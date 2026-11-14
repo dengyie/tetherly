@@ -424,9 +424,22 @@ impl Node {
         // Drop part_file so the file handle is released before rename.
         drop(part_file);
 
-        let path = dest_dir.join(&name);
-        let _ = std::fs::remove_file(&path);
+        // Never replace an existing inbox file: pick "name (n).ext". The
+        // exists-check and rename race only with another receive into the
+        // same name, which is serialized per transfer id; `rename` would
+        // replace, so the worst case is the pre-fix behaviour.
+        // Origin mark (Zone.Identifier / com.apple.quarantine) so Office
+        // Protected View, SmartScreen and Gatekeeper treat it as downloaded.
+        // Applied to the `.part` before the rename (both survive a same-volume
+        // rename) so the file never appears in the inbox unmarked, and the
+        // completion below is not delayed behind it.
+        super::shell_reveal::mark_received_file(&part, source.as_str());
+        let path = unique_inbox_path(&dest_dir, &name);
         std::fs::rename(&part, &path)?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(name);
         self.clear_resume(&transfer_id);
         let done = FileDone {
             transfer_id: transfer_id.clone(),
@@ -2300,5 +2313,57 @@ impl Node {
 
     pub fn now_ms(&self) -> u64 {
         self.shared.clock.unix_ms()
+    }
+}
+
+/// First free name for `name` in `dir`: `a.txt`, `a (1).txt`, `a (2).txt` ...
+/// A dotfile or extensionless name gets the counter appended.
+pub(super) fn unique_inbox_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
+        _ => (name, None),
+    };
+    (1u32..)
+        .map(|n| match ext {
+            Some(ext) => dir.join(format!("{stem} ({n}).{ext}")),
+            None => dir.join(format!("{stem} ({n})")),
+        })
+        .find(|p| !p.exists())
+        .expect("u32 counter exhausted")
+}
+
+#[cfg(test)]
+mod inbox_name_tests {
+    use super::unique_inbox_path;
+
+    /// P2: a received file silently replaced an existing inbox file with the
+    /// same name.
+    #[test]
+    fn received_file_never_overwrites_an_existing_one() {
+        let dir = std::env::temp_dir().join(format!("tetherly-uniq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unique_inbox_path(&dir, "a.txt"), dir.join("a.txt"));
+        std::fs::write(dir.join("a.txt"), b"1").unwrap();
+        assert_eq!(unique_inbox_path(&dir, "a.txt"), dir.join("a (1).txt"));
+        std::fs::write(dir.join("a (1).txt"), b"2").unwrap();
+        assert_eq!(unique_inbox_path(&dir, "a.txt"), dir.join("a (2).txt"));
+        std::fs::write(dir.join("Makefile"), b"").unwrap();
+        assert_eq!(
+            unique_inbox_path(&dir, "Makefile"),
+            dir.join("Makefile (1)")
+        );
+        std::fs::write(dir.join("x.tar.gz"), b"").unwrap();
+        assert_eq!(
+            unique_inbox_path(&dir, "x.tar.gz"),
+            dir.join("x.tar (1).gz")
+        );
+        std::fs::write(dir.join(".env"), b"").unwrap();
+        assert_eq!(unique_inbox_path(&dir, ".env"), dir.join(".env (1)"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -57,6 +57,19 @@ pub fn advertise(
 }
 
 #[cfg(feature = "lan")]
+/// Whether an mDNS `fullname` (as delivered by `ServiceRemoved`) is exactly
+/// the instance [`advertise`] registers for `name`. Exact, so removing
+/// "macbook" never expires a peer called "mac".
+pub fn instance_matches(fullname: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    fullname
+        .strip_suffix(SERVICE_TYPE)
+        .and_then(|s| s.strip_suffix('.'))
+        .is_some_and(|inst| inst.eq_ignore_ascii_case(&name.replace('.', "-")))
+}
+
 pub fn browse(daemon: &ServiceDaemon) -> Result<MdnsReceiver<ServiceEvent>, NetError> {
     daemon
         .browse(SERVICE_TYPE)
@@ -90,4 +103,23 @@ pub fn advertise(
 #[cfg(not(feature = "lan"))]
 pub fn daemon() -> Result<(), NetError> {
     Err(NetError::Discovery("lan feature disabled".into()))
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+
+    #[test]
+    fn removal_matches_only_the_exact_instance() {
+        let full = format!("macbook-pro.{SERVICE_TYPE}");
+        assert!(instance_matches(&full, "macbook-pro"));
+        assert!(instance_matches(&full, "macbook.pro"));
+        assert!(!instance_matches(&full, "mac"));
+        assert!(!instance_matches(&full, "book"));
+        assert!(!instance_matches(
+            &format!("my-macbook-pro.{SERVICE_TYPE}"),
+            "macbook-pro"
+        ));
+        assert!(!instance_matches(&full, ""));
+    }
 }

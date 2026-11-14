@@ -649,6 +649,37 @@ impl Node {
         blocked.peers.iter().any(|p| p.device_id == device_id)
     }
 
+    /// Gate for the side channels (input 45719, screen 45720): the control
+    /// listener checks the blocklist, these must too — a blocked device stays
+    /// trusted, so its handshake succeeds. A dialer also passes the device it
+    /// meant to reach: `live.addr` is peer-supplied and can move, and a
+    /// channel must never attach some other trusted device instead.
+    pub(super) fn admit_channel(
+        &self,
+        sess: &tetherly_net::session::ActiveSession,
+        expected: Option<&DeviceId>,
+        channel: &'static str,
+    ) -> Result<(), tetherly_net::NetError> {
+        if self.is_blocked(sess.peer_id.as_str()) {
+            warn!(peer = %sess.peer_id, channel, "side channel rejected: peer is blocked");
+            self.shared.telemetry.record_handshake_failed();
+            return Err(CoreError::PeerBlocked(sess.peer_id.to_string()).into());
+        }
+        if let Some(want) = expected {
+            if sess.peer_id != *want {
+                warn!(
+                    expected = %want,
+                    got = %sess.peer_id,
+                    channel,
+                    "side channel reached a different device; dropped"
+                );
+                self.shared.telemetry.record_handshake_failed();
+                return Err(tetherly_net::NetError::Handshake);
+            }
+        }
+        Ok(())
+    }
+
     /// Return a summary report of all currently blocked peers.
     pub fn blocked_peers_report(&self) -> BlockedPeersReport {
         let blocked = self.shared.blocked.lock().expect("blocked");
@@ -755,6 +786,24 @@ impl Node {
                 false
             }
         };
+
+        // Side channels are separate sockets: cut them too. The inbound input
+        // loop also re-checks the blocklist per frame.
+        let input_to_target =
+            self.shared.input_peer.lock().expect("input_peer").as_ref() == Some(&target_id);
+        if input_to_target {
+            let _ = self.input_stop().await;
+        }
+        let screen_to_target = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            == Some(&target_id);
+        if screen_to_target {
+            *self.shared.screen_out.lock().await = None;
+        }
 
         let trusted = self.trusted();
         let matched = trusted.iter().find(|t| t.device_id == target_id);

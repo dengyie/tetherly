@@ -2047,6 +2047,7 @@ impl Node {
                 return Err(e);
             }
         };
+        self.admit_channel(&sess, Some(peer), "input")?;
         self.attach_input_server(sess);
         Ok(())
     }
@@ -4116,24 +4117,43 @@ impl Node {
             .as_ref()
             .map(|(_, tx)| tx.clone());
         if let Some(tx) = tx_opt {
-            let mut disconnected = false;
-            for ev in &events {
-                match tx.try_send(ev.to_frame()?) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        // Drop Move frames on queue pressure so clicks/keys are never blocked
-                        if !matches!(ev.kind, tetherly_core::InputKind::Move { .. }) {
-                            return Err(CoreError::Json("input queue full; peer too slow".into()));
+            // All-or-nothing: reserve every slot before sending any frame, so
+            // queue pressure can never deliver a key-down without its key-up
+            // (or an Enter without its Move). Moves are the only frames shed
+            // to make the rest fit; order is preserved either way.
+            let is_move =
+                |ev: &InputEvent| matches!(ev.kind, tetherly_core::InputKind::Move { .. });
+            let frames = events
+                .iter()
+                .map(|ev| Ok((is_move(ev), ev.to_frame()?)))
+                .collect::<Result<Vec<_>, CoreError>>()?;
+            let essential = frames.iter().filter(|(mv, _)| !mv).count();
+            let reserved = match tx.try_reserve_many(frames.len()) {
+                Ok(p) => Ok((p, false)),
+                Err(mpsc::error::TrySendError::Full(())) if essential < frames.len() => {
+                    if essential == 0 {
+                        return Ok(());
+                    }
+                    tx.try_reserve_many(essential).map(|p| (p, true))
+                }
+                Err(e) => Err(e),
+            };
+            match reserved {
+                Ok((mut permits, shed_moves)) => {
+                    for (mv, frame) in frames {
+                        if shed_moves && mv {
+                            continue;
+                        }
+                        if let Some(p) = permits.next() {
+                            p.send(frame);
                         }
                     }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        disconnected = true;
-                        break;
-                    }
+                    return Ok(());
                 }
-            }
-            if !disconnected {
-                return Ok(());
+                Err(mpsc::error::TrySendError::Full(())) => {
+                    return Err(CoreError::Json("input queue full; peer too slow".into()));
+                }
+                Err(mpsc::error::TrySendError::Closed(())) => {}
             }
         }
 
@@ -4186,6 +4206,7 @@ impl Node {
                 return Err(e);
             }
         };
+        self.admit_channel(&sess, None, "input")?;
         self.attach_input_client(sess).await;
         Ok(())
     }
@@ -4529,6 +4550,10 @@ impl Node {
                     }
                     inbound = sess.recv_inner() => {
                         match inbound {
+                            Ok(_) if node.is_blocked(peer_id.as_str()) => {
+                                warn!(peer = %peer_id, "input channel closed: peer was blocked");
+                                break;
+                            }
                             Ok(frame) => {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_input_rx(f_len);
@@ -4931,6 +4956,40 @@ impl Node {
 mod tests {
     use super::*;
     use tetherly_core::InputKind;
+
+    /// §120 P2: a full send queue used to deliver a batch's head and then
+    /// error out — e.g. a key-down sent with its key-up lost (stuck key). A
+    /// batch is now all-or-nothing for its non-Move events; Moves are the
+    /// only frames shed under pressure.
+    #[tokio::test]
+    async fn input_batch_is_atomic_under_queue_pressure() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("input-atomic");
+        let (tx, mut rx) = mpsc::channel::<InnerFrame>(2);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        let batch = vec![
+            InputEvent::key(1, 30, true, 0),
+            InputEvent::key(2, 31, true, 0),
+            InputEvent::key(3, 30, false, 0),
+        ];
+        assert!(node.send_input_events(batch, "test").is_err());
+        assert!(rx.try_recv().is_err(), "partial batch delivered");
+
+        // Moves are shed so the essential events still fit, in order.
+        let batch = vec![
+            InputEvent::move_to(4, 1, 1),
+            InputEvent::key(5, 30, true, 0),
+            InputEvent::move_to(6, 2, 2),
+            InputEvent::key(7, 30, false, 0),
+        ];
+        node.send_input_events(batch, "test").unwrap();
+        let a = rx.try_recv().unwrap();
+        let b = rx.try_recv().unwrap();
+        assert_eq!(a.ty, tetherly_core::input::TYPE_INPUT_KEY);
+        assert_eq!(b.ty, tetherly_core::input::TYPE_INPUT_KEY);
+        assert!(a.payload != b.payload, "down then up, in order");
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// v0.2.30 input-engine trace ring: bounded at `INPUT_TRACE_CAP`
     /// (oldest dropped), timestamps from the node clock, and the seat

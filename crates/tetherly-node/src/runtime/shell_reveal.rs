@@ -138,6 +138,56 @@ pub fn apply_motw(file_path: &Path, source_peer: &str) -> Result<(), CoreError> 
     Ok(())
 }
 
+/// Mark a file received from a peer as coming from outside this machine:
+/// MOTW on Windows, `com.apple.quarantine` on macOS. Best effort — a failure
+/// is logged, the transfer itself already succeeded.
+pub fn mark_received_file(file_path: &Path, source_peer: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(e) = apply_motw(file_path, source_peer) {
+            tracing::warn!(path = %file_path.display(), error = %e, "MOTW not applied to received file");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let _ = source_peer;
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // 0081 = downloaded + user-approved-open not yet granted.
+        let value = format!("0081;{secs:x};Tetherly;");
+        // Direct setxattr(2): no subprocess on the receive path.
+        let rc = match std::ffi::CString::new(file_path.as_os_str().as_bytes()) {
+            // SAFETY: both strings are NUL-terminated and outlive the call;
+            // `value` is passed with its exact length.
+            Ok(cpath) => unsafe {
+                libc::setxattr(
+                    cpath.as_ptr(),
+                    c"com.apple.quarantine".as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                    0,
+                    0,
+                )
+            },
+            Err(_) => -1,
+        };
+        if rc != 0 {
+            tracing::warn!(
+                path = %file_path.display(),
+                error = %std::io::Error::last_os_error(),
+                "quarantine attribute not applied to received file"
+            );
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (file_path, source_peer);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +207,25 @@ mod tests {
         let res = apply_motw(&tmp, "home-win");
         let _ = std::fs::remove_file(&tmp);
         assert!(res.is_ok());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod quarantine_tests {
+    /// Review R2: inbox files carried no origin mark, so Gatekeeper never
+    /// applied to them on open.
+    #[test]
+    fn received_file_gets_the_quarantine_attribute() {
+        let p = std::env::temp_dir().join(format!("tetherly-q-{}.bin", std::process::id()));
+        std::fs::write(&p, b"x").unwrap();
+        super::mark_received_file(&p, "tdev_aaaaaaaaaaaaaaaa");
+        let out = std::process::Command::new("xattr")
+            .args(["-p", "com.apple.quarantine"])
+            .arg(&p)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert!(out.status.success(), "quarantine attribute missing");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Tetherly"));
     }
 }

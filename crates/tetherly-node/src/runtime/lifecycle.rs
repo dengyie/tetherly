@@ -1725,18 +1725,9 @@ impl Node {
                         live.caps = update.caps.clone();
                     }
                 }
-                // ADR-079: the outbound screen encoder upgrades to H.264 only
-                // when the peer advertises it. Cheap token scan, caps lists
-                // are a dozen entries.
-                if let Some(sel) = &self.shared.screen_encode_codec {
-                    let supports = update.caps.iter().any(|c| {
-                        c.split('=')
-                            .nth(1)
-                            .is_some_and(|v| v.split(',').any(|n| n == "h264"))
-                            && c.starts_with("screencodecs=")
-                    });
-                    sel.set_peer_supports_h264(supports);
-                }
+                // ADR-079: re-evaluated against the current screen viewer
+                // (whose caps may just have changed), never this peer alone.
+                self.refresh_screen_codec();
                 self.emit(UiEvent::PeerCapsChanged {
                     device_id: peer.to_string(),
                     caps: update.caps.clone(),
@@ -1958,6 +1949,10 @@ impl Node {
         target_addr: SocketAddr,
         expected: &DeviceId,
     ) -> Option<ActiveSession> {
+        // No handshake (and no Noise state) for a peer we would drop anyway.
+        if self.is_blocked(expected.as_str()) {
+            return None;
+        }
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
         cfg.handshake_timeout = super::RECONNECT_CONNECT_TIMEOUT;
@@ -2214,6 +2209,159 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// Review R1: blocking cut only the control session; the input (45719)
+    /// and screen (45720) listeners still accepted the blocked, still-trusted
+    /// peer — letting it inject keyboard/mouse or hijack the viewer slot. The
+    /// dial side must also refuse a channel that authenticates as a device
+    /// other than the one it was opened for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn input_and_screen_channels_refuse_blocked_or_unexpected_peers() {
+        let (a, dir_a) = crate::runtime::clipboard_policy_tests::temp_test_node("chan-block-a");
+        let (b, dir_b) = crate::runtime::clipboard_policy_tests::temp_test_node("chan-block-b");
+        a.spawn_listeners().await.unwrap();
+        b.spawn_listeners().await.unwrap();
+        let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+        a.set_pin(pin);
+        b.set_pin(pin);
+        a.dial(b.control_addr()).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !(a.is_trusted(b.identity().device_id()) && b.is_trusted(a.identity().device_id())) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pairing never completed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Dial side: a live entry claiming to be another device but routed to
+        // b must not yield b's channel.
+        let stranger = DeviceId::from_id_pk(&[77u8; 32]);
+        let mut fake = test_live_peer(&stranger, &b.control_addr().to_string());
+        fake.input_port = Some(b.input_addr().port());
+        fake.screen_port = Some(b.screen_addr().port());
+        a.shared.live.lock().unwrap().insert(stranger.clone(), fake);
+        assert!(
+            a.open_input(&stranger).await.is_err(),
+            "input to the wrong device"
+        );
+        assert!(a.shared.input_peer.lock().unwrap().is_none());
+        assert!(
+            a.open_screen(&stranger).await.is_err(),
+            "screen to the wrong device"
+        );
+        assert!(a.shared.screen_peer.lock().unwrap().is_none());
+        a.shared.live.lock().unwrap().remove(&stranger);
+
+        // Accept side: b blocks a; a's direct channel dials must not attach.
+        b.block_peer(a.identity().device_id().as_str(), None)
+            .await
+            .unwrap();
+        let mut held = Vec::new();
+        for screen in [false, true] {
+            let addr = if screen {
+                b.screen_addr()
+            } else {
+                b.input_addr()
+            };
+            let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut cfg = a.session_config_inner(true);
+            cfg.pin = None;
+            cfg.screen_only = screen;
+            // Keep the dialer side open: a dropped socket would make b's
+            // loop exit on EOF and mask a missing admission check.
+            held.push(tetherly_net::session::dial_session(stream, addr, &cfg).await);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            b.shared.input_peer.lock().unwrap().is_none(),
+            "blocked peer attached an input channel"
+        );
+        assert!(
+            b.shared.screen_peer.lock().unwrap().is_none(),
+            "blocked peer attached a screen channel"
+        );
+        drop(held);
+        a.shutdown();
+        b.shutdown();
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// §120 P2: `dial_peer` wrapped each candidate in a flat 2 s timeout that
+    /// also covered the (PIN/Argon2) handshake, so a slow-but-healthy path was
+    /// reported unreachable — and the cancel could land after the handshake
+    /// had already completed on the far side.
+    #[tokio::test]
+    async fn dial_peer_by_id_survives_a_slow_path() {
+        let (a, dir_a) = crate::runtime::clipboard_policy_tests::temp_test_node("slow-dial-a");
+        let (b, dir_b) = crate::runtime::clipboard_policy_tests::temp_test_node("slow-dial-b");
+        a.spawn_listeners().await.unwrap();
+        b.spawn_listeners().await.unwrap();
+        let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+        a.set_pin(pin);
+        b.set_pin(pin);
+        // A relay that answers the TCP connect at once but forwards bytes only
+        // after 2.5 s — a congested or relayed path.
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let upstream = b.control_addr();
+        tokio::spawn(async move {
+            while let Ok((mut down, _)) = relay.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                    if let Ok(mut up) = tokio::net::TcpStream::connect(upstream).await {
+                        let _ = tokio::io::copy_bidirectional(&mut down, &mut up).await;
+                    }
+                });
+            }
+        });
+        let b_id = b.identity().device_id().to_string();
+        crate::store::remember_route(&a.shared.cfg.data_dir, &b_id, &relay_addr.to_string())
+            .unwrap();
+        let res = a.dial_peer(&b_id).await;
+        assert_eq!(res.ok(), Some(relay_addr), "slow but healthy path rejected");
+        a.shutdown();
+        b.shutdown();
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// §120 P2: the H.264 decision was one global flag overwritten by *any*
+    /// peer's caps update, so a zstd-only peer re-advertising could drop the
+    /// stream to an H.264 viewer (and vice versa). It follows the viewer.
+    #[tokio::test]
+    async fn screen_codec_follows_the_viewer_not_the_last_caps_update() {
+        let (node, dir, _clock) = crate::runtime::clipboard_policy_tests::temp_test_node_tweaked(
+            "codec-viewer",
+            1000,
+            |c| c.screen_codec_h264 = true,
+        );
+        let viewer = DeviceId::from_id_pk(&[41u8; 32]);
+        let other = DeviceId::from_id_pk(&[42u8; 32]);
+        let mut v = test_live_peer(&viewer, "127.0.0.1:1");
+        v.caps = vec!["screencodecs=zstd,h264".into()];
+        let mut o = test_live_peer(&other, "127.0.0.1:2");
+        o.caps = vec!["screencodecs=zstd".into()];
+        node.shared.live.lock().unwrap().insert(viewer.clone(), v);
+        node.shared.live.lock().unwrap().insert(other.clone(), o);
+        let sel = node.shared.screen_encode_codec.clone().unwrap();
+
+        *node.shared.screen_peer.lock().unwrap() = Some(viewer.clone());
+        node.refresh_screen_codec();
+        assert_eq!(sel.active_name(), "h264");
+        // The other peer's caps change must not flip the viewer's codec.
+        node.refresh_screen_codec();
+        assert_eq!(sel.active_name(), "h264");
+        *node.shared.screen_peer.lock().unwrap() = Some(other.clone());
+        node.refresh_screen_codec();
+        assert_eq!(sel.active_name(), "zstd");
+        *node.shared.screen_peer.lock().unwrap() = None;
+        node.refresh_screen_codec();
+        assert_eq!(sel.active_name(), "zstd");
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn test_live_peer(id: &DeviceId, addr: &str) -> LivePeer {

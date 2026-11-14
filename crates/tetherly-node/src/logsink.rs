@@ -47,24 +47,31 @@ impl RotatingFile {
     fn rotate(&mut self) -> io::Result<()> {
         // Renaming a file this process holds open is fine on unix and on
         // Windows (std opens with FILE_SHARE_DELETE); `fs::rename` replaces
-        // an existing `.1`. If another process blocks the move, truncating in
-        // place still bounds the size, losing only history.
-        if std::fs::rename(&self.path, self.rotated_path()).is_ok() {
-            self.file = OpenOptions::new()
-                .create(true)
-                .append(true)
+        // an existing `.1`. If the move is blocked, truncate in place: that
+        // still bounds the size, losing only history. The truncation goes
+        // through a fresh write handle because an append-only handle lacks
+        // FILE_WRITE_DATA on Windows, so `set_len` on it fails there.
+        if std::fs::rename(&self.path, self.rotated_path()).is_err() {
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
                 .open(&self.path)?;
-        } else {
-            self.file.set_len(0)?;
         }
+        self.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         self.len = 0;
         Ok(())
     }
 
     pub fn write_record(&mut self, buf: &[u8]) -> io::Result<()> {
-        if self.len > 0 && self.len + buf.len() as u64 > self.cap {
-            // A failed rotation must not drop the record; keep appending.
-            let _ = self.rotate();
+        if self.len > 0 && self.len + buf.len() as u64 > self.cap && self.rotate().is_err() {
+            // A transiently failed rotation keeps the record, but a file that
+            // can neither move nor shrink must not grow without bound.
+            if self.len + buf.len() as u64 > self.cap.saturating_mul(2) {
+                return Ok(());
+            }
         }
         self.file.write_all(buf)?;
         self.len += buf.len() as u64;
@@ -143,6 +150,25 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn size_stays_bounded_when_rotation_cannot_rename() {
+        // A directory squatting on `<log>.1` makes the rename fail on every
+        // platform; the file must still be truncated rather than grow forever.
+        // (On Windows the append-only handle cannot `set_len`, which is why
+        // truncation goes through a separate write handle.)
+        let d = tmpdir("blocked-rename");
+        let path = d.join("t.log");
+        std::fs::create_dir_all(d.join("t.log.1").join("x")).unwrap();
+        let mut f = RotatingFile::open(&path, 64).unwrap();
+        for _ in 0..50 {
+            f.write_record(&[b'x'; 40]).unwrap();
+        }
+        f.flush().unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        assert!(len <= 64, "log grew to {len} bytes despite a 64 byte cap");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

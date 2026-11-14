@@ -235,7 +235,7 @@ fn vault_enabled_for(_dir: &Path) -> bool {
 /// just means the vault path is attempted as before (and its read failure
 /// falls back to the file side).
 #[cfg(windows)]
-fn process_runs_as_local_system() -> bool {
+pub(crate) fn process_runs_as_local_system() -> bool {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Security::{GetSidSubAuthority, GetSidSubAuthorityCount, TokenUser};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};

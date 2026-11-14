@@ -13,7 +13,7 @@ use tetherly_core::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // The loopback HTTP/SSE client used to be defined here and, separately, in
 // `tetherly-cli`. It now lives in `tetherly-loopback` so both binaries share one
@@ -30,6 +30,12 @@ pub use tetherly_loopback::{
 const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_BODY: usize = 2 * 1024 * 1024;
+/// Whole-request read budget (headers + body). A loopback client that stalls
+/// mid-request gets 408 instead of holding a task and socket open forever.
+#[cfg(not(test))]
+const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
 
 // ---- feature submodules (v0.1.64 / ADR-128) ----
 mod api_action;
@@ -197,6 +203,7 @@ async fn handle(
     ui_port: u16,
     token: &str,
 ) -> std::io::Result<()> {
+    let deadline = tokio::time::Instant::now() + REQUEST_READ_TIMEOUT;
     let mut buf = vec![0u8; 4096];
     let mut n = 0usize;
     loop {
@@ -210,7 +217,10 @@ async fn handle(
         if n >= buf.len() {
             buf.resize((buf.len() * 2).min(MAX_HEADER), 0);
         }
-        let k = stream.read(&mut buf[n..]).await?;
+        let Ok(read) = tokio::time::timeout_at(deadline, stream.read(&mut buf[n..])).await else {
+            return request_timed_out(&mut stream).await;
+        };
+        let k = read?;
         if k == 0 {
             return Ok(());
         }
@@ -319,7 +329,10 @@ async fn handle(
     while body.len() < content_len {
         let to_read = (content_len - body.len()).min(64 * 1024);
         let mut more = vec![0u8; to_read];
-        let k = stream.read(&mut more).await?;
+        let Ok(read) = tokio::time::timeout_at(deadline, stream.read(&mut more)).await else {
+            return request_timed_out(&mut stream).await;
+        };
+        let k = read?;
         if k == 0 {
             break;
         }
@@ -328,6 +341,11 @@ async fn handle(
     body.truncate(content_len);
     let resp = route(method, path, &body, &node).await;
     write_http_response(&mut stream, &resp).await
+}
+
+async fn request_timed_out(stream: &mut TcpStream) -> std::io::Result<()> {
+    debug!("ui request read timed out; 408");
+    write_http(stream, 408, "text/plain", b"request timeout").await
 }
 
 /// Best-effort read-and-discard of up to 64 KiB of request body (2 s cap)
@@ -395,6 +413,7 @@ async fn write_http_response(stream: &mut TcpStream, resp: &UiResponse) -> std::
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         413 => "Payload Too Large",
         _ => "Error",
     };
@@ -1999,6 +2018,36 @@ mod tests {
     ) -> std::io::Result<(u16, Vec<u8>)> {
         let token = crate::apitoken::read(dir).expect("listener minted a token");
         loopback_request(port, method, path, body, Some(&token)).await
+    }
+
+    /// §120 P2: a client that stops mid-request (half a header, or a body
+    /// shorter than its Content-Length) used to pin a task + socket forever.
+    #[tokio::test]
+    async fn stalled_request_is_answered_408_and_closed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (node, _dir) = temp_test_node("ui_read_timeout");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        for partial in [
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n".to_string(),
+            "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 50\r\n\r\n{}"
+                .to_string(),
+        ] {
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            s.write_all(partial.as_bytes()).await.unwrap();
+            let mut out = Vec::new();
+            tokio::time::timeout(
+                REQUEST_READ_TIMEOUT + std::time::Duration::from_secs(3),
+                s.read_to_end(&mut out),
+            )
+            .await
+            .expect("server must give up on a stalled request")
+            .unwrap();
+            let (code, _) = tetherly_loopback::parse_http_response(&out);
+            assert_eq!(code, 408, "partial: {partial:?}");
+        }
+        node.shutdown();
     }
 
     /// A refused request whose body trails the headers must still get a clean

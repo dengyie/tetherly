@@ -1864,6 +1864,15 @@ pub(crate) mod clipboard_policy_tests {
         tag: &str,
         start_ms: u64,
     ) -> (Node, std::path::PathBuf, Arc<ManualClock>) {
+        temp_test_node_tweaked(tag, start_ms, |_| {})
+    }
+
+    /// Same harness with a hook to adjust the config before start.
+    pub(crate) fn temp_test_node_tweaked(
+        tag: &str,
+        start_ms: u64,
+        tweak: impl FnOnce(&mut NodeConfig),
+    ) -> (Node, std::path::PathBuf, Arc<ManualClock>) {
         let dir = std::env::temp_dir().join(format!(
             "tetherly-clip-test-{tag}-{}-{}",
             std::process::id(),
@@ -1920,6 +1929,8 @@ pub(crate) mod clipboard_policy_tests {
             screen_sink: None,
             input_sink: None,
         };
+        let mut cfg = cfg;
+        tweak(&mut cfg);
         let clock = Arc::new(ManualClock::new(start_ms));
         let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
         (node, dir, clock)
@@ -2298,6 +2309,39 @@ mod handoff_engine_tests {
             .unwrap();
         assert!(!rep.demoted);
         assert!(opener.opened()[before].ends_with("notes.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review R2: a deny-list always misses something (.pyz, .iso, .dmg,
+    /// .mobileconfig, .xlsm, .rdp, `x.exe::$DATA` ...), and inbox files are
+    /// the only line of defence. Only known passive types may be launched;
+    /// everything else reveals the folder.
+    #[test]
+    fn inbox_open_launches_only_passive_types() {
+        let (node, dir, opener) = temp_handoff_node("inbox_allow");
+        let inbox = dir.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let risky = [
+            "tool.pyz",
+            "disk.iso",
+            "App.dmg",
+            "wifi.mobileconfig",
+            "budget.xlsm",
+            "host.rdp",
+            "q.searchConnector-ms",
+            "addin.xll",
+            "evil.exe::$DATA",
+            "mystery.xyz",
+        ];
+        let passive = ["photo.JPG", "doc.pdf", "clip.mp4", "report.docx", "a.txt"];
+        for name in risky.iter().chain(passive.iter()) {
+            if std::fs::write(inbox.join(name), b"x").is_err() {
+                continue; // `:` is not a legal file name on Windows
+            }
+            let rep = node.open_inbox_file(Some(name), opener.as_ref());
+            let Ok(rep) = rep else { continue };
+            assert_eq!(rep.demoted, risky.contains(name), "{name}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -397,10 +397,46 @@ pub struct BlockedTable {
 
 pub fn load_blocked(dir: &Path) -> BlockedTable {
     let path = dir.join(BLOCKED_FILE);
-    fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    let Ok(raw) = fs::read(&path) else {
+        return BlockedTable::default();
+    };
+    match serde_json::from_slice(&raw) {
+        Ok(t) => t,
+        Err(e) => {
+            // Fail closed: a damaged blocklist must not silently unblock
+            // everyone (and the next `add_blocked_peer` would then persist
+            // that). Keep the original bytes and salvage every device id.
+            let backup = dir.join(format!("{BLOCKED_FILE}.corrupt"));
+            if !backup.exists() {
+                let _ = fs::write(&backup, &raw);
+            }
+            let table = salvage_blocked(&raw);
+            tracing::error!(
+                error = %e,
+                salvaged = table.peers.len(),
+                "blocked.json is corrupt; kept a .corrupt copy and salvaged device ids"
+            );
+            table
+        }
+    }
+}
+
+/// Every well-formed `tdev_…` id found anywhere in `raw`, de-duplicated in
+/// order of appearance.
+fn salvage_blocked(raw: &[u8]) -> BlockedTable {
+    let text = String::from_utf8_lossy(raw);
+    let mut peers: Vec<BlockedPeer> = Vec::new();
+    for tok in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if tetherly_core::DeviceId::parse(tok).is_ok() && !peers.iter().any(|p| p.device_id == tok)
+        {
+            peers.push(BlockedPeer {
+                device_id: tok.to_string(),
+                reason: Some("recovered from corrupt blocked.json".into()),
+                blocked_at: 0,
+            });
+        }
+    }
+    BlockedTable { peers }
 }
 
 pub fn save_blocked(dir: &Path, table: &BlockedTable) -> Result<(), NodeStoreError> {
@@ -2651,6 +2687,37 @@ pub enum NodeStoreError {
 mod tests {
     use super::*;
     use tetherly_core::{TrustStore, TrustedPeer};
+
+    #[test]
+    fn corrupt_blocked_file_keeps_blocked_peers_blocked() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-blocked-corrupt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        // A torn write: valid prefix, truncated mid-entry.
+        let torn = br#"{"peers":[{"device_id":"tdev_aaaaaaaaaaaaaaaa","reason":null,"blocked_at":1},{"device_id":"tdev_bbbbbbbbbbbbbbbb","rea"#;
+        fs::write(dir.join(BLOCKED_FILE), torn).unwrap();
+
+        assert!(is_peer_blocked(&dir, "tdev_aaaaaaaaaaaaaaaa"));
+        assert!(is_peer_blocked(&dir, "tdev_bbbbbbbbbbbbbbbb"));
+        assert!(!is_peer_blocked(&dir, "tdev_cccccccccccccccc"));
+
+        // Blocking another peer must not throw the salvaged entries away, and
+        // the original bytes are kept for inspection.
+        add_blocked_peer(&dir, "tdev_cccccccccccccccc", None, 2).unwrap();
+        let t = load_blocked(&dir);
+        assert_eq!(t.peers.len(), 3);
+        assert_eq!(
+            fs::read(dir.join(format!("{BLOCKED_FILE}.corrupt"))).unwrap(),
+            torn.to_vec()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn identity_roundtrip() {

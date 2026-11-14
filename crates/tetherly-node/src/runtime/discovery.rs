@@ -548,9 +548,12 @@ impl Node {
             for ip_str in &addrs {
                 if let Ok(ip) = ip_str.parse::<IpAddr>() {
                     let sa = SocketAddr::new(ip, port);
-                    if let Ok(Ok(())) =
-                        tokio::time::timeout(std::time::Duration::from_secs(2), self.dial(sa)).await
-                    {
+                    // `dial` is already bounded: TCP connect by
+                    // RECONNECT_CONNECT_TIMEOUT, the handshake (incl. PIN
+                    // Argon2) by its own handshake timeout. An outer cap here
+                    // cut slow-but-healthy paths and could cancel after the
+                    // far side had committed the session.
+                    if self.dial(sa).await.is_ok() {
                         return Ok(sa);
                     }
                 }
@@ -567,9 +570,7 @@ impl Node {
 
         if let Some(r) = route_candidate {
             if let Ok(sa) = r.addr.parse::<SocketAddr>() {
-                if let Ok(Ok(())) =
-                    tokio::time::timeout(std::time::Duration::from_secs(2), self.dial(sa)).await
-                {
+                if self.dial(sa).await.is_ok() {
                     return Ok(sa);
                 }
             }
@@ -674,8 +675,7 @@ impl Node {
                                     {
                                         let disc = node.shared.discovered.lock().expect("discovered");
                                         for (id, p) in disc.iter() {
-                                            let inst = p.name.replace('.', "-");
-                                            if fullname.contains(&inst) {
+                                            if tetherly_net::mdns::instance_matches(&fullname, &p.name) {
                                                 to_remove.push(id.clone());
                                             }
                                         }

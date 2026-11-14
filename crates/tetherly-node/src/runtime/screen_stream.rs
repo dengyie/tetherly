@@ -20,7 +20,34 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+/// `screencodecs=` in a caps list names `h264`.
+fn caps_advertise_h264(caps: &[String]) -> bool {
+    caps.iter().any(|c| {
+        c.strip_prefix("screencodecs=")
+            .is_some_and(|v| v.split(',').any(|n| n.trim() == "h264"))
+    })
+}
+
 impl Node {
+    /// ADR-079: the outbound encoder uses H.264 only when the peer actually
+    /// viewing this screen advertised it. Re-run on screen attach and on
+    /// every caps merge; another peer's caps never decide it.
+    pub(crate) fn refresh_screen_codec(&self) {
+        let Some(sel) = &self.shared.screen_encode_codec else {
+            return;
+        };
+        let viewer = self.shared.screen_peer.lock().expect("screen_peer").clone();
+        let supports = viewer.is_some_and(|v| {
+            self.shared
+                .live
+                .lock()
+                .expect("live")
+                .get(&v)
+                .is_some_and(|l| caps_advertise_h264(&l.caps))
+        });
+        sel.set_peer_supports_h264(supports);
+    }
+
     pub fn screen_port(&self) -> u16 {
         self.shared.bound_screen.load(Ordering::SeqCst)
     }
@@ -42,7 +69,7 @@ impl Node {
             let port = p.screen_port.ok_or(tetherly_net::NetError::Handshake)?;
             SocketAddr::new(p.addr.ip(), port)
         };
-        let stream = TcpStream::connect(addr).await?;
+        let stream = super::connect_with_timeout(addr, super::RECONNECT_CONNECT_TIMEOUT).await?;
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
         cfg.screen_only = true;
@@ -53,6 +80,7 @@ impl Node {
                 return Err(e);
             }
         };
+        self.admit_channel(&sess, Some(peer), "screen")?;
         self.attach_screen_client(sess).await;
         Ok(())
     }
@@ -74,6 +102,7 @@ impl Node {
                 return Err(e);
             }
         };
+        self.admit_channel(&sess, None, "screen")?;
         self.attach_screen_server(sess).await;
         Ok(())
     }
@@ -110,6 +139,7 @@ impl Node {
         };
         *self.shared.screen_out.lock().await = Some(tx);
         *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
+        self.refresh_screen_codec();
         // A new screen session re-evaluates every ADR-083/084/085 bandwidth
         // tier from scratch — not just bitrate. The fps/scale/profile flags
         // gate first-frame tier selection too; leaving them set would pin a

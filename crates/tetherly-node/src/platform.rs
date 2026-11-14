@@ -130,8 +130,108 @@ impl Insertor for MemoryInsertor {
 /// that came from the validated allowlist.
 pub struct SystemOpener;
 
+/// Raw command line for `rundll32 url.dll,FileProtocolHandler <url>` with the
+/// url as exactly one quoted argument. `None` for an empty url or one that
+/// could break out of the quotes (`"`) or the line (control characters);
+/// neither occurs in a Windows path or a well-formed url.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn opener_command_line(rundll32: &str, url: &str) -> Option<String> {
+    if url.is_empty() || url.contains('"') || url.chars().any(char::is_control) {
+        return None;
+    }
+    Some(format!(
+        "\"{rundll32}\" url.dll,FileProtocolHandler \"{url}\""
+    ))
+}
+
+/// Windows: the daemon runs as LocalSystem on the interactive desktop (so it
+/// can inject into elevated windows). Anything it opens must not inherit
+/// that: launch the handler with the console user's token instead. Refuses
+/// rather than falling back to SYSTEM when no user token is available.
+#[cfg(windows)]
+fn open_as_console_user(url: &str) -> Result<(), CoreError> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Environment::{
+        CreateEnvironmentBlock, DestroyEnvironmentBlock,
+    };
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTSGetActiveConsoleSessionId, WTSQueryUserToken,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessAsUserW, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
+        STARTUPINFOW,
+    };
+
+    let refused =
+        |what: &str| CoreError::OpenRefused(format!("{what}: {}", std::io::Error::last_os_error()));
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let rundll32 = format!(r"{root}\System32\rundll32.exe");
+    let line = opener_command_line(&rundll32, url)
+        .ok_or_else(|| CoreError::OpenRefused("unsafe characters in open target".into()))?;
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let app = wide(&rundll32);
+    let mut cmd = wide(&line);
+    let mut desktop = wide(r"winsta0\default");
+
+    // SAFETY: plain Win32 calls; every handle / environment block acquired
+    // here is released before return, and all string buffers outlive the
+    // CreateProcessAsUserW call.
+    unsafe {
+        let session = WTSGetActiveConsoleSessionId();
+        if session == u32::MAX {
+            return Err(CoreError::OpenRefused(
+                "no interactive console session".into(),
+            ));
+        }
+        let mut token: HANDLE = std::ptr::null_mut();
+        if WTSQueryUserToken(session, &mut token) == 0 {
+            return Err(refused("WTSQueryUserToken"));
+        }
+        let mut env: *mut core::ffi::c_void = std::ptr::null_mut();
+        let have_env = CreateEnvironmentBlock(&mut env, token, 0) != 0;
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.lpDesktop = desktop.as_mut_ptr();
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let flags = CREATE_NO_WINDOW
+            | if have_env {
+                CREATE_UNICODE_ENVIRONMENT
+            } else {
+                0
+            };
+        let ok = CreateProcessAsUserW(
+            token,
+            app.as_ptr(),
+            cmd.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            flags,
+            if have_env { env } else { std::ptr::null_mut() },
+            std::ptr::null(),
+            &si,
+            &mut pi,
+        );
+        let err = (ok == 0).then(|| refused("CreateProcessAsUserW"));
+        if have_env {
+            DestroyEnvironmentBlock(env);
+        }
+        CloseHandle(token);
+        if let Some(e) = err {
+            return Err(e);
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    Ok(())
+}
+
 impl Opener for SystemOpener {
     fn open(&self, url: &str) -> Result<(), CoreError> {
+        #[cfg(windows)]
+        if crate::cred::process_runs_as_local_system() {
+            return open_as_console_user(url);
+        }
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = std::process::Command::new("rundll32.exe");
             c.arg("url.dll,FileProtocolHandler");
@@ -4362,5 +4462,33 @@ mod daemon_responsiveness_tests {
             raise_daemon_responsiveness(),
             DaemonResponsiveness::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod opener_cmdline_tests {
+    use super::opener_command_line;
+
+    /// Review R3: the SYSTEM daemon must hand "open" to the interactive user
+    /// via CreateProcessAsUserW, which takes one raw command line. The url is
+    /// a single, quoted argument and can never smuggle a second one.
+    #[test]
+    fn opener_command_line_quotes_a_single_argument() {
+        let exe = r"C:\Windows\System32\rundll32.exe";
+        assert_eq!(
+            opener_command_line(exe, r"C:\in box\a b.pdf").as_deref(),
+            Some(
+                r#""C:\Windows\System32\rundll32.exe" url.dll,FileProtocolHandler "C:\in box\a b.pdf""#
+            )
+        );
+        assert_eq!(
+            opener_command_line(exe, "https://x.test/?a=1&b=2").as_deref(),
+            Some(
+                r#""C:\Windows\System32\rundll32.exe" url.dll,FileProtocolHandler "https://x.test/?a=1&b=2""#
+            )
+        );
+        assert_eq!(opener_command_line(exe, r#"a" "calc.exe"#), None);
+        assert_eq!(opener_command_line(exe, "a\nb"), None);
+        assert_eq!(opener_command_line(exe, ""), None);
     }
 }
