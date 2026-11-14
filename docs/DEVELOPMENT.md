@@ -8662,3 +8662,43 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - netprofm svchost 内存泄漏：属于系统服务，不在生产机上动。
 - daemon 改从 SSD 运行：v0.2.42 的 VirtualLock 锁定映像已经缓解冷页问题，跳过。
 - Windows 偶发卡死（10053 和自动重连在同一毫秒）：其中的拨号竞态已由 §117 的 single-flight 和 settled 等待覆盖。之后若再出现，先查 `/api/input/trace` 和 `lan probe` 日志。
+
+## 118. Windows 控制 Mac 光标横向卡顿：线协议坐标网格 1000 → 10000 (v0.2.47)
+
+**现象**：Windows 鼠标跨到 Mac 后，在 Mac 桌面内移动有卡顿，横向明显，纵向不明显。
+
+**排查（全部为只读探测）**：
+- 路径：Windows 看到 Mac 的 `path:"lan"`，input 拨号走 LAN 地址 `:45719`；ping 2–4 ms 且稳定，网络不是原因。
+- 控制端：capture worker 约 800 Hz 上报，每个事件平均约 1.7 px。backlog 合并后立即发送，没有定时批处理。relay 模式用 `pt - GetCursorPos()` 计算 delta，不经过 warp-echo 门控，也就不会吞事件。每批之后 `SetCursorPos` 回中心无害。
+- 被控端：Mac 的 apply 循环很轻；`tap_callback` 遇到注入事件（`TETHERLY_INJECTED_MAGIC`）直接返回。
+
+**根因**：
+- `SCREEN_UNITS = 1000`。在 1470 pt 宽的 Mac 上，1 个单位 = 1.47 pt（日志 rem_x=258 → px=379）。
+- 每次 1–2 px 的手部移动经过 1000 网格量化：约 1/3 的事件对应的 rem 不变，被抑制为 no-op（不发 Move），随后出现一次 1.47 pt 的跳变。在 800 Hz 下，这表现为横向一顿一顿。
+- 纵向 956 < 1000，每个单位不到 1 pt，所以几乎不受影响。
+- RED：400 个 1 px 事件只产生 272 次光标移动。
+
+**修复**：
+- `SCREEN_UNITS` 改为 10_000（新增 `LEGACY_SCREEN_UNITS = 1000`）。Move 帧改用新类型 `TYPE_INPUT_MOVE_FINE = 0x0408` 编码。解码同时接受两种类型，legacy 值按 ×10 四舍五入换算。
+- 兼容：
+  - 节点在 caps 中广播 `inputunits=10000`（`initial_caps` 和 `local_caps_report`/`broadcast_caps`）。
+  - 控制端 pump（`attach_input_server`）只有在对端已广播该 cap 时才发 FINE 帧。否则经 `legacy_compat_frame` 降级为旧的 0x0401 / 1000 网格帧。caps 未知时同样降级，并且在未确认前每秒最多重查一次（`peer_supports_fine_input`）。
+  - 旧版本节点不认识 0x0408（`frame.rs` 的 `is_input_type` 会拒收），因此必须降级。
+- 进出屏迟滞带 `INTERIOR_HYSTERESIS` / `REMOTE_INTERIOR_HYSTERESIS` 改为 `SCREEN_UNITS / 50`，物理宽度与原来的 20/1000 相同。
+- Windows 注入 `units_to_abs`（i32，10000 × 65535 不溢出）和 Mac 注入 `move_abs`（f64）都已按 `SCREEN_UNITS` 泛化，无需修改。
+
+**测试**：
+- 新增：
+  - `remote_motion_moves_narrow_peer_cursor_one_px_per_px`：1920 宽控制 1470 宽，400 个 1 px 事件必须产生 400 次移动，且每步恰好 1 px。
+  - `move_frame_carries_full_wire_resolution`
+  - `legacy_move_frames_interoperate_with_fine_scale`
+  - `fine_input_grid_is_advertised_and_gated_on_peer_caps`：node 测试；删掉 cap 广播后确认会失败。
+- 既有测试里写死的 1000/500 单位（core、`probe_engine`、`phase3`、Windows 的 `units_map_to_full_absolute_range`）改为 `SCREEN_UNITS` 的分数表达。
+- `phase3` 端到端测试拿到 5051（即 50/99 × 10000），说明双端新版本时走的是 FINE 链路。
+- 全量 workspace 测试通过；clippy `-D warnings` 干净；CI 三平台 + android + deny 全绿。
+
+**部署验证 v0.2.47（2026-11-14 21:42 本地，CI release）**：
+- 两端 health 均为 0.2.47，path lan。
+- Mac 看到 Windows 的 caps 含 `inputunits=10000`，Windows 也看到 Mac 的 caps 含 `inputunits=10000`，因此 Windows → Mac 方向走 FINE 帧。
+- 受保护进程 3/3 完好；部署前清理：可用内存 2.5 → 3.3 GB。
+- 待用户实际跨屏后确认：Mac 日志中 `push: enter+move` / 入口 move 的 rem 应为 0–10000 量级。

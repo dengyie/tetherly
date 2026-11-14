@@ -1154,3 +1154,9 @@
 - 上线时观察到：Mac 新、Windows 旧的混合版本窗口内，提升握手半开，卡满 20 s，约 19 s 没有可用链路。
 - v0.2.46：`dial_lan_promotion` 握手超时改为 3 s。
 - 已部署并验证：两次重连都是单次提升、单条 LAN；path overlay 从 42 条降到 3 条；受保护进程 3/3 完好。DEVELOPMENT §117。
+
+## 2026-11-14 v0.2.47 Windows→Mac 光标横向卡顿（坐标量化）
+- 只读排除：网络（LAN 2–4 ms）、overlay、relay echo 门控、时间批处理、Mac tap/apply 开销。
+- 根因：1000 单位网格在 1470 pt 宽 Mac 上每单位 1.47 pt；800 Hz × 1.7 px 的事件约 1/3 被量化为 no-op，随后跳变（RED 400→272）。
+- 修复：SCREEN_UNITS=10000、FINE 帧 0x0408、双解码、`legacy_compat_frame`、cap `inputunits=10000`，pump 按 `peer_supports_fine_input` 降级；迟滞带 = SCREEN_UNITS/50。
+- 已部署：两端 0.2.47、互见 cap、path lan、受保护进程 3/3。DEVELOPMENT §118。
