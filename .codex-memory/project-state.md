@@ -1,6 +1,7 @@
 # Project State
 
 ## Release Baseline (2026-11-14)
+- **v0.2.42**（§114）：启动时用 `VirtualLock` 锁住整个 daemon 映像。home-win 内存超订，64 MB 硬 WS 下限（flags=0x9）仍被压到 7.8 MB，空闲后第一次 enter 要从 E: HDD 缺页读回冷代码，延迟约 7.5 s。
 - **v0.2.41**（§113）：Target 侧的「本地手拥有光标」：zone 已开且物理位移 ≥64 px 时，晋升为 local owner（fast push / 100 ms dwell / 1 s 冷却），用来消除「Mac 光标在 Windows 时，Windows 鼠标划向 Mac」的 600 ms dwell 加 3 s 冷却延迟。
 - **v0.2.40**（§112，tag → `2850c67`）：v0.2.39 复现确认根因：Mac 在 idle hide 后被 Enter 时光标仍不可见，用户来回划导致弹回。修复按 Deskflow OSXScreen 重写光标显隐：
   - 单一隐藏状态 `DeskflowCursorOwners`（Capture/Idle）；

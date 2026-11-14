@@ -1122,3 +1122,9 @@
   - deploy.sh 重启前加健康探测；
   - 修复 m3_2 flake；
   - 接管后 Windows 引擎越界还需约 185 ms，等待下一个 hook 事件。
+
+## 2026-11-14 v0.2.42
+- 「偶尔卡顿」：00:18:49 Mac push enter → Windows apply enter 晚了约 7.5 s。这是重启后第一次 enter（空闲约 19 min）；enter 与同批 entry move 相隔 4.7 s，日志时间戳乱序。
+- 只读采集主机状态：提交 31 GB / 物理 16 GB，C: idle 7.7%，exe 在 E: HDD，WS 7.8 MB，flags=0x9 → 硬下限无效。
+- 修复：`lock_daemon_image`（VirtualQuery 遍历映像 + 纯函数 `image_lock_ranges` / `image_lock_fits_floor` + VirtualLock）。启动日志新增 `image_locked_bytes`。
+- 测试：3 个跨平台单测加 1 个 Windows 实测。
