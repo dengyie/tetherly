@@ -1173,3 +1173,8 @@
 
 ## 2026-11-15 v0.2.51
 - P0-2 zombie sessions: RED tests session_channel_closes_when_registration_is_dropped_despite_keepalive / replaced_session_exit_does_not_release_its_successor → GREEN. register_session/release_session/spawn_session_keepalive extracted in lifecycle.rs. CI 43624055681, release 43625021011, deployed both; zombie overlay conn gone.
+
+## 2026-11-15 v0.2.52 API token + ACL
+- P0-1：特权 UI 路由必须带每次启动生成的 token（`apitoken.rs`）。RED→GREEN 测试：`privileged_routes_require_the_api_token`、`refused_request_with_late_body_gets_clean_401`（拒绝前不读掉请求体就会 RST）、`port_registered_token_wins_over_the_default`（多 node 测试按端口取 token）。
+- CI 43628983820 与 release 43630108316 均为绿；两端 0.2.52；无 token 返回 401、带 token 返回 200；Windows token 文件 DACL 正确。
+- home-win ACL：release 目录和 bat 去掉 AU:M（备份在 `E:\code\acl-backup\`），收紧后带 token 的重部署成功，受保护进程 3/3。DEVELOPMENT §122。

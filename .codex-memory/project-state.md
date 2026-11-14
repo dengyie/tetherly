@@ -1,6 +1,7 @@
 # Project State
 
 ## Release Baseline (2026-11-14)
+- **v0.2.52**（§122，2026-11-15 双端已部署）：P0-1 本地 API token。每次启动生成 `<data_dir>/api.token`（Unix 0600，Windows DACL 只给 SYSTEM/BA/OW）；特权 POST/PUT/DELETE 路由无 token 返回 401；CLI 自动读 token，`tetherly dashboard` 生成带 token 的地址，托盘也打开带 token 的地址；deploy/package 脚本带请求头。home-win release 目录和 bat 去掉 Authenticated Users M，备份在 `E:\code\acl-backup\`。
 - **v0.2.42**（§114）：启动时用 `VirtualLock` 锁住整个 daemon 映像。home-win 内存超订，64 MB 硬 WS 下限（flags=0x9）仍被压到 7.8 MB，空闲后第一次 enter 要从 E: HDD 缺页读回冷代码，延迟约 7.5 s。
 - **v0.2.44**（§116）：性能/内存优化。`logsink` 让日志 16 MiB 滚动为 `.1`，写入 `--data-dir`（Windows 现在看用户目录的 `tetherly.log`），daemon 不再写 stdout 副本和 ANSI；夹边和 park warp 日志降为 debug；剪贴板轮询凭 OS 变更计数跳过全量读加哈希。已部署并验证。
 - **v0.2.43**（§115）：重连修复。inbound 不再记录临时端口（改记 `ip:45717`，不覆盖拨号路由）；重连回退到控制端口；connect 设 3 s 超时；退避在空闲轮或会话关闭时清零并唤醒。

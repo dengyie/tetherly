@@ -8862,3 +8862,63 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **部署后**：只剩 1 条 LAN 连接。每次重启都先建立 overlay 连接，约 90 ms 后升到 LAN，两端都出现 `control session superseded; closing previous`，随后 overlay 连接被真正关闭。
 - 部署后两端没有新增 WARN；用户在部署过程中一直在漫游使用，输入 grace/resume 正常。
 - **下一步**：P0-1，本地 API token 鉴权。
+
+## 122. 本地 API token 鉴权 + home-win 部署目录 ACL 收紧 (v0.2.52)
+
+**问题**（来自 §120 review 的 P0-1）：
+
+- UI 服务器只做了 Host、Origin 和 Sec-Fetch 校验。本机任意进程（任意用户、任意低权限程序）都能直接 POST 特权路由：重启/替换 daemon、打开文件、发送任意文件、改 action 和配置。
+- home-win 的 daemon 以 SYSTEM 运行，`/api/daemon/restart` 加上 updates 目录等于本地提权链。
+- 部署目录 `E:\code\tetherly\target\release\` 和 `run_tetherly_system.bat` 都继承了 `Authenticated Users:(M)`。任何登录用户都能替换由 SYSTEM 执行的二进制。
+
+**设计**：
+
+- **生成**：daemon 每次启动生成 32 字节随机数，写成 64 位 hex 的 `<data_dir>/api.token`（`apitoken.rs`），并先删除旧文件，防止有人预埋文件。
+  - Unix：0600 + `create_new`。
+  - Windows：`CreateFileW(CREATE_NEW)`，SDDL `D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)`。DACL 受保护、不继承，普通用户读不到。
+  - 写入失败时，listener 照常服务，但特权路由一律 401（fail closed）。
+- **网关**：`apitoken::requires_token(method, path)` 列出特权路由：
+  - daemon shutdown/stop/restart 与 `/api/restart`
+  - file/inbox/handoff open
+  - file send/send-multi/send-batch/batch
+  - drag intent
+  - action policy/local
+  - config
+  - log level
+
+  所有 GET、`/api/copy`、`/api/open`、`/api/input/ensure` 等日常路由不需要 token，dashboard 与日常功能不受影响。
+- **校验**：
+  - 接受 `X-Tetherly-Token` 或 `Authorization: Bearer`。
+  - 常量时间比较；期望值为空时永不匹配。
+  - 拒绝返回 401 JSON，并打 WARN `privileged ui route refused`。
+- **拒绝前先读掉请求体**：拒绝前会读取并丢弃最多 64 KiB 的请求体（2 s 上限）。否则接收缓冲还有未读数据时直接 close 会触发 TCP RST，客户端拿不到 401。这是全量测试中偶发 reset 的根因，有专门的 RED 测试。
+- **客户端**：
+  - `tetherly-loopback` 有进程级默认 token，另有按端口登记的 token（`set_port_api_token` / `api_token_for`）。daemon 在 `spawn_ui` 中两者都设，同一进程驱动多个 node（集成测试）时各用各的 token。
+  - CLI 启动时依次读 `TETHERLY_API_TOKEN` 和 `<data_dir>/api.token`。Windows 上需要提升权限的 shell 才能读到。
+  - 新命令 `tetherly dashboard [--open]`：打印或打开带 token 的地址。
+  - 托盘打开 `http://127.0.0.1:45716/#token=…`。页面把 fragment 存进 sessionStorage 后立即清掉 URL，fetch 包装器给同源请求自动加头。fragment 不会进入请求行和日志。
+  - `deploy.sh`（Windows restart）和 `package-macos-app.sh`（shutdown）读 token 文件并带上请求头。
+
+**测试**（都先看到 RED）：
+
+- `apitoken` 单测 7 个。
+- `privileged_routes_require_the_api_token`。
+- `refused_request_with_late_body_gets_clean_401`。
+- `port_registered_token_wins_over_the_default`。
+- 已有的 uihttp 和集成测试改用带 token 的调用。
+
+**home-win ACL 收紧（2026-11-15）**：
+
+- 备份在 `E:\code\acl-backup\{release,bat}-20261115.acl`，共 5860 项，0 失败。回滚命令：`icacls E:\code\tetherly\target /restore E:\code\acl-backup\release-20261115.acl`。
+- release 目录：`/inheritance:r`，只保留 Administrators F、SYSTEM F、Users RX（可继承），子项全部 `/reset` 为继承。bat 文件同样处理。
+- 复核：Authenticated Users 条目为 0；新部署落下的 `tetherly.exe` 继承 Users RX / SYSTEM F / Administrators F。
+
+**上线验证（2026-11-15）**：
+
+- CI 43628983820 和 release 43630108316 均为绿。`deploy.sh --target all --tag v0.2.52` 完成，两端 health 均为 0.2.52，live_peers=1。
+- **两端 token 行为**：
+  - 无 token POST `/api/log/level` 返回 401，错误 token 也返回 401；带正确 token 返回 200（用原 filter 回写，零变更）；GET `/api/peers` 返回 200。
+  - Windows `api.token` 的 icacls：只有 SYSTEM、Administrators、OWNER RIGHTS。
+- **ACL 收紧后**又对 Windows 做了一次重部署：带 token 的 `/api/daemon/restart` 热替换成功（pid 308876 → 263856），受保护进程 3/3。新增 WARN 只有自己发的探测请求。
+- **残余风险**：data_dir 仍归用户可写，action 定义等配置可能被同用户进程篡改。若要防同用户进程，只能把敏感配置迁到 SYSTEM 专属目录，列入后续评估。
+- **下一步**：P1 inbox 可执行文件拒开/降级、LAN 提升时校验 peer_id 与黑名单、rekey 取消安全。
