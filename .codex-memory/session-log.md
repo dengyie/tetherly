@@ -1130,3 +1130,12 @@
 - 测试：3 个跨平台单测加 1 个 Windows 实测。
 - 部署前内存清理：新增 `scripts/win_memory_cleanup.ps1` 并接入 deploy.sh（预检之后、staging 之前）。只清理卡死的 sshd 会话加 EmptyWorkingSet，受保护进程永不触碰，exit 2 中止部署。首次执行可用内存 1.1 GB → 3.5 GB，结束 9 个僵尸会话进程和 1 个卡死的 pytest。
 - Windows CI clippy 修复：`then_some`，函数指针先转 `as *const ()`（0115933）。
+
+## 2026-11-14 v0.2.43
+- v0.2.42 部署验证：`image_locked_bytes=26304512`，WS 37.4 MB，部署内清理生效，受保护进程完好。
+- 新问题：Windows 热重启后 Mac 3m49s 才重连。三个根因：
+  1. `accept_one` 把对端临时源端口写进 routes（Windows 路由 = `192.168.1.7:56857`）；
+  2. 拨号无 connect 超时，overlay 黑洞 SYN，macOS 挂 75 s；
+  3. 退避计数在 peer 在线时不复位，会话断开也不唤醒循环。
+- 修复：`inbound_route_update` / `reconnect_candidates`（回退 `ip:CONTROL_PORT`，坏路由自愈）/ `connect_with_timeout(3s)` / `ReconnectBackoff` + `reconnect_wake` Notify。共 8 个单测。
+- 附带发现：旧 daemon 同毫秒做了两次 LAN 升级，产生重复会话（未修）。
