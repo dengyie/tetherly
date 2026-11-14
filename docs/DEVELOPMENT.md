@@ -8514,3 +8514,25 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 桌面磕碰只有几 px，不会触发晋升（测试 `local_hand_bump_does_not_take_ownership`）。进入时的停放抖动仍被 zone gate 与 `controller_on_screen_disables_fast_reverse_until_leave` 挡住。
 
 **测试**：`local_hand_sweep_takes_ownership_and_fast_reverses`（RED → GREEN）、`local_hand_bump_does_not_take_ownership`。
+
+## 114. 空闲后第一次跨屏偶发卡顿约 7.5 s：daemon 被换页，冷代码从 HDD 缺页读回 (v0.2.42)
+
+**现象**：v0.2.41 之后整体顺畅，只是「偶尔会卡顿」。
+
+**证据**（双端日志按时钟偏差校正，Windows ≈ Mac + 519 ms）：
+- 00:18:49.456 Mac `push: enter+move`，00:18:57.53（Windows 时钟）才 `apply: enter`，差约 7.5 s。这是 Windows daemon 23:59:46 重启后的**第一次** enter，此前空闲约 19 min。后续 enter 都是 2–3 ms 送达。
+- 同一批帧里，enter 和 `entry move placed rem=(100,1000)` 本应相隔不到 1 ms，这次相隔 4.7 s；Windows 日志时间戳还出现乱序（00:19:07.67 的行写在 00:19:02.20 的前面）。说明线程拿到时间戳后在执行途中被阻塞，与网络无关。
+- 主机状态（只读采集）：
+  - 内存：提交 31 GB / 物理 16 GB，Pages Input 约 9.3k/s；C:（pagefile 所在盘）idle 7.7%，被 ugrep 和 ZCode 压满。
+  - 进程：`tetherly.exe` 从 `E:`（TOSHIBA SATA HDD）运行，exe 25 MB。
+  - 工作集：daemon 只有 7.8 MB（峰值 19.9 MB），而 `GetProcessWorkingSetSizeEx` 返回 `min=64MB flags=0x9`，硬下限标志在，工作集却仍被压到下限以下。
+
+**根因**：v0.2.34 的硬工作集下限（`QUOTA_LIMITS_HARDWS_MIN_ENABLE`）在这台超订主机上保不住常驻。空闲期间映像页被裁掉；第一次 enter 时，apply 路径的冷代码要从 HDD 上的 exe 硬缺页读回，数据页要从繁忙的 pagefile 读回，累计数秒。
+
+**修复**：`raise_daemon_responsiveness` 在设置硬下限之后调用 `lock_daemon_image()`。它用 `VirtualQuery` 遍历本映像（`AllocationBase` 相同）的全部区域，交给纯函数 `image_lock_ranges` 规划：只保留 committed、可访问、非 guard 的区域，相邻区域合并。规划总量须满足 `image_lock_fits_floor`（总量加 16 MB 余量不超过 64 MB 下限）才执行 `VirtualLock`。启动日志新增 `image_locked_bytes=N`。
+
+**测试**：
+- 跨平台：`image_lock_ranges_covers_committed_image_pages_merged`、`image_lock_ranges_skips_unlockable_and_foreign_regions`、`image_lock_fits_floor_requires_headroom`，均先 RED（符号不存在）再 GREEN。
+- Windows CI 实测：`raise_daemon_responsiveness_locks_the_image`（测试二进制自身的映像锁定字节数 > 0）。
+
+**验收（下次）**：Windows 启动日志 `image_locked_bytes` 接近 exe 映像大小；空闲 20 min 以上后，Get-Process WS 仍不低于约 25 MB；空闲后第一次 enter 的 push→apply 延迟回到毫秒级。

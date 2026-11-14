@@ -386,6 +386,7 @@ pub(crate) async fn run(
         priority_ok = responsiveness.priority_ok,
         throttling_disabled = responsiveness.throttling_disabled,
         working_set_pinned = responsiveness.working_set_pinned,
+        image_locked_bytes = responsiveness.image_locked_bytes,
         "daemon responsiveness"
     );
     let node = Node::start(cfg)?;

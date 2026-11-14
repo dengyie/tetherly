@@ -2262,6 +2262,105 @@ const _: () = assert!(
         && DAEMON_MAX_WORKING_SET <= 1024 * 1024 * 1024
 );
 
+// Win32 memory-state/protection values (winnt.h), spelled out so the pure
+// lock planner below compiles and is tested on every platform.
+pub const WIN_MEM_COMMIT: u32 = 0x1000;
+pub const WIN_PAGE_NOACCESS: u32 = 0x01;
+pub const WIN_PAGE_GUARD: u32 = 0x100;
+/// Working-set headroom kept free under the floor after locking the image
+/// (VirtualLock's own overhead plus the daemon's hot heap and stacks).
+pub const IMAGE_LOCK_HEADROOM: usize = 16 * 1024 * 1024;
+
+/// One `VirtualQuery` region, platform-neutral for the lock planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemRegion {
+    pub base: usize,
+    pub size: usize,
+    pub alloc_base: usize,
+    pub state: u32,
+    pub protect: u32,
+}
+
+/// Ranges of the daemon image (`alloc_base == image_base`) that can be
+/// `VirtualLock`ed: committed, accessible, non-guard. Adjacent lockable
+/// regions are merged so each becomes a single lock call.
+pub fn image_lock_ranges(regions: &[MemRegion], image_base: usize) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for r in regions {
+        let lockable = r.alloc_base == image_base
+            && r.size > 0
+            && r.state == WIN_MEM_COMMIT
+            && r.protect & 0xFF != WIN_PAGE_NOACCESS
+            && r.protect & 0xFF != 0
+            && r.protect & WIN_PAGE_GUARD == 0;
+        if !lockable {
+            continue;
+        }
+        match out.last_mut() {
+            Some((b, s)) if *b + *s == r.base => *s += r.size,
+            _ => out.push((r.base, r.size)),
+        }
+    }
+    out
+}
+
+/// Whether locking `bytes` still leaves [`IMAGE_LOCK_HEADROOM`] under the
+/// hard working-set floor (VirtualLock fails past the minimum).
+pub fn image_lock_fits_floor(bytes: usize) -> bool {
+    bytes.saturating_add(IMAGE_LOCK_HEADROOM) <= DAEMON_MIN_WORKING_SET
+}
+
+/// Production 2026-11-14: the hard floor alone did not keep the daemon
+/// resident on an over-committed host — its working set sat at 7.8 MB with
+/// the 64 MB hard-min flag still set, and the first enter after a quiet
+/// spell hard-faulted the cold apply path back in from the exe on a spinning
+/// HDD (7.5 s). Lock every committed page of the image instead; returns the
+/// bytes actually locked (0 when the image does not fit under the floor).
+#[cfg(windows)]
+fn lock_daemon_image() -> usize {
+    use windows_sys::Win32::System::Memory::{VirtualLock, VirtualQuery, MEMORY_BASIC_INFORMATION};
+    let query = |addr: usize| -> Option<MemRegion> {
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let n = unsafe {
+            VirtualQuery(
+                addr as *const std::ffi::c_void,
+                &mut mbi,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        (n != 0).then(|| MemRegion {
+            base: mbi.BaseAddress as usize,
+            size: mbi.RegionSize,
+            alloc_base: mbi.AllocationBase as usize,
+            state: mbi.State,
+            protect: mbi.Protect,
+        })
+    };
+    let Some(anchor) = query(lock_daemon_image as usize) else {
+        return 0;
+    };
+    let image_base = anchor.alloc_base;
+    let mut regions = Vec::new();
+    let mut addr = image_base;
+    while let Some(r) = query(addr) {
+        if r.alloc_base != image_base || r.size == 0 {
+            break;
+        }
+        addr = r.base + r.size;
+        regions.push(r);
+    }
+    let ranges = image_lock_ranges(&regions, image_base);
+    let total: usize = ranges.iter().map(|(_, s)| s).sum();
+    if !image_lock_fits_floor(total) {
+        return 0;
+    }
+    ranges
+        .into_iter()
+        .filter(|(b, s)| unsafe { VirtualLock(*b as *const std::ffi::c_void, *s) } != 0)
+        .map(|(_, s)| s)
+        .sum()
+}
+
 /// Whether a process running at `class` must be lifted to AboveNormal.
 /// Never demotes High/Realtime; unknown values are treated as needing it.
 pub fn daemon_priority_needs_raise(class: u32) -> bool {
@@ -2282,6 +2381,8 @@ pub struct DaemonResponsiveness {
     pub throttling_disabled: bool,
     /// Hard working-set floor installed.
     pub working_set_pinned: bool,
+    /// Bytes of the daemon image locked resident (VirtualLock).
+    pub image_locked_bytes: usize,
 }
 
 /// Production 2026-11-13: the Windows daemon inherited BelowNormal from the
@@ -2333,6 +2434,10 @@ pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
             DAEMON_MAX_WORKING_SET,
             QUOTA_LIMITS_HARDWS_MIN_ENABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE,
         ) != 0;
+    }
+    // After the floor: VirtualLock is bounded by the working-set minimum.
+    if report.working_set_pinned {
+        report.image_locked_bytes = lock_daemon_image();
     }
     report
 }
@@ -4131,6 +4236,91 @@ mod daemon_responsiveness_tests {
             "priority class after raise: {class:#x}"
         );
         assert!(report.priority_ok, "{report:?}");
+    }
+
+    fn region(base: usize, size: usize, alloc_base: usize, state: u32, protect: u32) -> MemRegion {
+        MemRegion {
+            base,
+            size,
+            alloc_base,
+            state,
+            protect,
+        }
+    }
+
+    // Production 2026-11-14 (v0.2.41): the hard working-set floor held its
+    // flag (GetProcessWorkingSetSizeEx flags=0x9) yet the daemon sat at
+    // 7.8 MB on an over-committed host (31 GB commit / 16 GB RAM), so the
+    // first enter after a quiet spell hard-faulted its cold code back in
+    // from the exe on a spinning HDD: 7.5 s between the Mac's push and
+    // "apply: enter". Every committed, accessible page of the image itself
+    // must be locked — contiguous pieces merged into one range each.
+    #[test]
+    fn image_lock_ranges_covers_committed_image_pages_merged() {
+        let base = 0x1_4000_0000;
+        let regions = [
+            region(base, 0x1000, base, WIN_MEM_COMMIT, 0x02), // headers R
+            region(base + 0x1000, 0x80_0000, base, WIN_MEM_COMMIT, 0x20), // .text RX
+            region(base + 0x80_1000, 0x40_0000, base, WIN_MEM_COMMIT, 0x02), // .rdata R
+            region(base + 0xC0_1000, 0x1_0000, base, WIN_MEM_COMMIT, 0x08), // .data WC
+        ];
+        assert_eq!(image_lock_ranges(&regions, base), vec![(base, 0xC1_1000)]);
+    }
+
+    // Guard / no-access / reserved pages cannot be locked (VirtualLock
+    // fails the whole call), and regions of another allocation are not ours.
+    #[test]
+    fn image_lock_ranges_skips_unlockable_and_foreign_regions() {
+        let base = 0x1_4000_0000;
+        let regions = [
+            region(base, 0x1000, base, WIN_MEM_COMMIT, 0x02),
+            region(
+                base + 0x1000,
+                0x1000,
+                base,
+                WIN_MEM_COMMIT,
+                WIN_PAGE_NOACCESS,
+            ),
+            region(base + 0x2000, 0x2000, base, WIN_MEM_COMMIT, 0x20),
+            region(
+                base + 0x4000,
+                0x1000,
+                base,
+                WIN_MEM_COMMIT,
+                0x04 | WIN_PAGE_GUARD,
+            ),
+            region(
+                base + 0x5000,
+                0x1000,
+                base,
+                0x2000, /* MEM_RESERVE */
+                0x00,
+            ),
+            region(base + 0x6000, 0x1000, 0x7FF0_0000, WIN_MEM_COMMIT, 0x02),
+        ];
+        assert_eq!(
+            image_lock_ranges(&regions, base),
+            vec![(base, 0x1000), (base + 0x2000, 0x2000)]
+        );
+    }
+
+    // VirtualLock is bounded by the working-set minimum (minus a small
+    // system overhead); the plan is only applied when it fits under the
+    // floor with headroom for the daemon's own hot heap.
+    #[test]
+    fn image_lock_fits_floor_requires_headroom() {
+        assert!(image_lock_fits_floor(26 * 1024 * 1024));
+        assert!(!image_lock_fits_floor(DAEMON_MIN_WORKING_SET));
+        assert!(!image_lock_fits_floor(DAEMON_MIN_WORKING_SET - 1024 * 1024));
+    }
+
+    // Real effect on the Windows CI runner: the test binary's own image is
+    // locked resident after the call.
+    #[cfg(windows)]
+    #[test]
+    fn raise_daemon_responsiveness_locks_the_image() {
+        let report = raise_daemon_responsiveness();
+        assert!(report.image_locked_bytes > 0, "{report:?}");
     }
 
     // macOS/Linux have no miner-starvation analogue; the call is an honest
