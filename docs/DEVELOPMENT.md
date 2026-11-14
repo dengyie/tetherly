@@ -8565,3 +8565,54 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 **排查方法**：Windows 日志用 `iconv -c -f GBK` 读（混合编码会让 iconv 中途退出）；两端 `routes.json` 对比即可发现临时端口问题。
 
 **附带发现（未修）**：旧 Windows daemon 在 02:04:03.352/.353 同时做了两次 LAN 升级，产生两条重复会话。
+
+## 116. 性能与内存优化：日志轮转 + 剪贴板变更计数 (v0.2.44)
+
+**基线（2026-11-14，只读测量）**：
+- Mac daemon：RSS 29 MB（footprint 25.5 MB，其中 MALLOC_SMALL 18 MB），22–25 线程，99 FD，7.4 h 累计 CPU 2:37（约 0.6%）。
+- Windows daemon：WS 33.6 MB（主要是 v0.2.42 锁定的映像），私有 11.5 MB，319 句柄，24 线程，空闲 30 s 共 31 ms CPU（约 0.1%）。
+- 结论：内存和空闲 CPU 本身已经很省。真正的问题有两个：
+  1. 日志无界增长且重复写；
+  2. 剪贴板每 800 ms 做一次全量读取加哈希。
+
+**问题与修复**：
+1. **日志无界、重复写**：
+   - 现状：Mac `tetherly.log` 12 天涨到 17.8 MB，从不轮转，内容还带 ANSI 转义码。
+   - Windows SYSTEM 链路共有三份：
+     - `main` 用 `default_data_dir()` 定日志位置、忽略 `--data-dir`，LocalSystem 下这个目录落在 `C:\Windows\System32\config\systemprofile\AppData\Local\tetherly\tetherly.log`（隐藏，3.7 MB）；
+     - stdout 又被 bat 的 `>>` 重定向写进 `tetherly_system.log`（1.8 MB），同样的字节写了两遍；
+     - 用户目录下另有一份 `tetherly.log`（0.7 MB，11-12 起不再写入）。
+   - 修复，新模块 `logsink`：
+     - `RotatingFile` 达到 16 MiB 时滚动为 `.1`，只保留一代，最多占 32 MiB；
+     - 日志路径跟随 `--data-dir`（CLI 解析提前到日志初始化之前）；
+     - 只有 stdout 是终端或日志文件打不开时才镜像到 stdout（`mirror_stdout`）；
+     - 只在终端输出 ANSI。
+   - 部署后，Windows 日志统一看 `C:\Users\mango\AppData\Local\tetherly\tetherly.log`。`tetherly_system.log` 只再收 stderr（`[takeover]` eprintln 和 panic）。
+2. **每次夹边都打 INFO 日志**：
+   - "push: lone edge-clamp move"（当天 535 条）和 "park warp before remote roaming" 降为 debug。
+   - 两者在 `/api/input/trace` 环里已有 `push_clamp` / `park_warp` 记录，不损失诊断信息。
+3. **剪贴板轮询**：
+   - 现状：`poll_clipboard_auto_sync` 每 800 ms 新建一个 arboard Clipboard，读取全文再做 SHA-256；剪贴板里是大段文本时开销按文本大小线性增长。
+   - 修复：新增 `Clip::change_token()`，默认 `None`，即保持原行为。
+     - macOS 用 `NSPasteboard.changeCount`；
+     - Windows 用 `GetClipboardSequenceNumber`，返回 0（无剪贴板访问权）时退回全量读；
+     - `MemoryClip` 用写入代数。
+   - 轮询逻辑：
+     - 计数没变就直接返回，由纯函数 `clip_read_needed` 判断；
+     - token 在读取之前取，读取过程中发生的变更下一轮能看到；
+     - 读取失败时清空 token，下一轮重读。
+   - 与原有哈希去重语义等价：同一内容本来就会被 `last_auto_sync_hash` 拦下，无论有没有 peer 都会记 hash。
+
+**测试**：
+- `logsink` 7 个：追加、滚动、只保留一代、已有大小计入上限、超大单条照写、stdout 镜像判定、Sink 写入。
+- 剪贴板 3 个：`clip_read_needed`、`memory_clip_change_token_advances_on_set_text`、`test_poll_clipboard_auto_sync_still_sees_changes_after_skip`。
+- 用"禁用滚动"的变体验证过滚动测试确实会失败。
+
+**附带**：`tests/phase5.rs` 里的 `screen_and_input_lifecycle_and_peer_targeting_via_loopback_api` 在全量并行负载下偶发 `channel_open` 断言失败，单跑 3/3 通过，与本次改动无关。
+
+**部署验证（2026-11-14 18:47，CI release v0.2.44）**：
+- 部署内清理：可用内存 2.7 GB → 3.9 GB，裁剪 59 个进程；受保护进程 3/3 完好。
+- Windows（PID 271828，命令行带 `--data-dir`）：日志写入用户目录的 `tetherly.log`，纯文本无 ANSI。systemprofile 那份在旧进程退出时（10:47:04）停止增长；`tetherly_system.log` 不再收到 INFO 副本。
+- Windows 资源：私有 11.5 → 6.6 MB，WS 37.5 MB（含锁定映像），句柄 313。
+- Mac：首次写入即把 17.9 MB 旧日志滚动为 `tetherly.log.1`，新文件无 ANSI；footprint 25.5 → 16 MB，RSS 27.6 MB（启动峰值约 48 MB，随后回落）；用户正常操作时 30 s 用 CPU 0.43 s，与优化前持平。
+- 遗留：`C:\Windows\System32\config\systemprofile\AppData\Local\tetherly\tetherly.log`（3.7 MB）已不再写入，可手动删除。

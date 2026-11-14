@@ -1140,3 +1140,8 @@
 - 修复：`inbound_route_update` / `reconnect_candidates`（回退 `ip:CONTROL_PORT`，坏路由自愈）/ `connect_with_timeout(3s)` / `ReconnectBackoff` + `reconnect_wake` Notify。共 8 个单测。
 - 附带发现：旧 daemon 同毫秒做了两次 LAN 升级，产生重复会话（未修）。
 - v0.2.43 已部署并验证：Windows 热重启 02:44:04，Mac 在 1 s 内经 overlay 重连，随后升级到 LAN；input channel 自动重连成功。Windows routes.json 已自愈为 `10.144.144.100:45717`（原为临时端口 56857）。部署内清理：可用内存 3.6 GB → 4.3 GB，裁剪 43 个进程；受保护进程 3/3 完好；image_locked_bytes=26316800。
+
+## 2026-11-14 v0.2.44 性能/内存优化
+- 只读基线：两端 daemon 都已很省（Mac footprint 25.5 MB，Windows 私有 11.5 MB，空闲 CPU <1%）；瓶颈在 I/O：日志无界、写了两三份、带 ANSI；剪贴板每 800 ms 全量读一次再算 SHA-256。
+- 修复：新模块 `logsink`（16 MiB 滚动为 `.1`，日志跟随 `--data-dir`，仅终端才镜像 stdout/ANSI）；两条逐事件 INFO 降为 debug；`Clip::change_token`（NSPasteboard changeCount / GetClipboardSequenceNumber）+ `clip_read_needed` 跳过未变化的轮询。新增 10 个单测，全量 870 通过。
+- 已部署并验证：Windows 日志改为写用户目录的 `tetherly.log`；Mac 旧日志已滚动；Mac footprint 16 MB，Windows 私有 6.6 MB；受保护进程 3/3 完好。
