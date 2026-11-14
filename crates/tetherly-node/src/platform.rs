@@ -2328,7 +2328,7 @@ fn lock_daemon_image() -> usize {
                 std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
             )
         };
-        (n != 0).then(|| MemRegion {
+        (n != 0).then_some(MemRegion {
             base: mbi.BaseAddress as usize,
             size: mbi.RegionSize,
             alloc_base: mbi.AllocationBase as usize,
@@ -2336,7 +2336,7 @@ fn lock_daemon_image() -> usize {
             protect: mbi.Protect,
         })
     };
-    let Some(anchor) = query(lock_daemon_image as usize) else {
+    let Some(anchor) = query(lock_daemon_image as *const () as usize) else {
         return 0;
     };
     let image_base = anchor.alloc_base;
