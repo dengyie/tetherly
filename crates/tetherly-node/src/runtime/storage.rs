@@ -101,6 +101,122 @@ pub struct InboxOpenReport {
     pub name: Option<String>,
     pub path: String,
     pub message: String,
+    /// The named file looked executable, so the inbox folder was revealed
+    /// instead of launching it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub demoted: bool,
+}
+
+/// Extensions the OS shell would run (or hand to an interpreter) on "open".
+/// Compared case-insensitively against the final extension.
+const LAUNCHABLE_EXTENSIONS: &[&str] = &[
+    // Windows
+    "exe",
+    "com",
+    "scr",
+    "pif",
+    "cpl",
+    "msi",
+    "msp",
+    "mst",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "psd1",
+    "ps1xml",
+    "vb",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "ws",
+    "wsf",
+    "wsh",
+    "wsc",
+    "hta",
+    "lnk",
+    "url",
+    "scf",
+    "reg",
+    "inf",
+    "msc",
+    "jar",
+    "appref-ms",
+    "application",
+    "gadget",
+    "settingcontent-ms",
+    "library-ms",
+    "dll",
+    "sys",
+    "appx",
+    "msix",
+    "appxbundle",
+    "msixbundle",
+    "chm",
+    "diagcab",
+    // macOS / unix
+    "app",
+    "command",
+    "tool",
+    "terminal",
+    "sh",
+    "bash",
+    "zsh",
+    "csh",
+    "ksh",
+    "fish",
+    "pkg",
+    "mpkg",
+    "workflow",
+    "action",
+    "scpt",
+    "scptd",
+    "applescript",
+    "webloc",
+    "inetloc",
+    "fileloc",
+    "py",
+    "pyw",
+    "pl",
+    "rb",
+    "php",
+    "desktop",
+    "run",
+    "bin",
+    "out",
+    "elf",
+    "appimage",
+];
+
+/// True when "open" on this inbox file could execute code: a launchable
+/// extension, or (extensionless) a native-binary / shebang header.
+fn inbox_file_is_launchable(path: &std::path::Path, name: &str) -> bool {
+    // Windows ignores trailing dots/spaces, so "x.exe. " launches as x.exe.
+    let trimmed = name.trim_end_matches(['.', ' ']);
+    match trimmed.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => {
+            let ext = ext.to_ascii_lowercase();
+            LAUNCHABLE_EXTENSIONS.contains(&ext.as_str())
+        }
+        _ => {
+            let mut head = [0u8; 4];
+            let n = std::fs::File::open(path)
+                .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+                .unwrap_or(0);
+            let head = &head[..n];
+            head.starts_with(b"MZ")
+                || head.starts_with(b"#!")
+                || head.starts_with(b"\x7fELF")
+                || matches!(
+                    head,
+                    [0xfe, 0xed, 0xfa, 0xce | 0xcf]
+                        | [0xce | 0xcf, 0xfa, 0xed, 0xfe]
+                        | [0xca, 0xfe, 0xba, 0xbe]
+                        | [0xbe, 0xba, 0xfe, 0xca]
+                )
+        }
+    }
 }
 
 pub(super) enum OutboundSource {
@@ -653,6 +769,32 @@ impl Node {
                     return Err(CoreError::File("file not found in inbox".into()));
                 }
 
+                if inbox_file_is_launchable(&file_path, &clean_name) {
+                    let dir_str = inbox_dir.to_str().ok_or(CoreError::UnsafeFileName)?;
+                    opener.open(dir_str)?;
+                    tracing::warn!(
+                        name = %clean_name,
+                        "inbox open demoted: executable file not launched; folder revealed"
+                    );
+                    self.record_audit(
+                        AuditCategory::File,
+                        AuditSeverity::Warning,
+                        "inbox_open_demoted",
+                        Some(clean_name.clone()),
+                        format!(
+                            "inbox file '{clean_name}' looks executable; revealed the inbox folder instead of launching it"
+                        ),
+                        true,
+                    );
+                    return Ok(InboxOpenReport {
+                        ok: true,
+                        name: Some(clean_name),
+                        path: inbox_dir.display().to_string(),
+                        message: "executable file not launched; inbox folder opened instead".into(),
+                        demoted: true,
+                    });
+                }
+
                 let path_str = file_path.to_str().ok_or(CoreError::UnsafeFileName)?;
                 opener.open(path_str)?;
 
@@ -675,6 +817,7 @@ impl Node {
                     name: Some(clean_name),
                     path: file_path.display().to_string(),
                     message: "file opened in system default handler".into(),
+                    demoted: false,
                 })
             }
             None => {
@@ -701,6 +844,7 @@ impl Node {
                     name: None,
                     path: inbox_dir.display().to_string(),
                     message: "inbox directory opened in system file manager".into(),
+                    demoted: false,
                 })
             }
         }

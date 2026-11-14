@@ -2252,6 +2252,54 @@ mod handoff_engine_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// P1: a peer-supplied executable must never be launched by "open". The
+    /// request is demoted to revealing the inbox folder; documents still open.
+    #[test]
+    fn inbox_open_demotes_executables_to_the_folder() {
+        let (node, dir, opener) = temp_handoff_node("inbox_exec");
+        let inbox = dir.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let cases: &[(&str, &[u8])] = &[
+            ("setup.exe", b"MZ\x90\x00"),
+            ("invoice.pdf.EXE", b"MZ"),
+            ("run.bat", b"echo hi"),
+            ("x.ps1", b"Write-Host"),
+            ("y.lnk", b"L\x00\x00\x00"),
+            ("z.command", b"ls"),
+            ("t.app.zip.scr", b"MZ"),
+            ("readme", b"#!/bin/sh\nrm -rf ~\n"),
+            ("blob", b"\xcf\xfa\xed\xfe\x07\x00"),
+            ("notes.txt", b"MZ but just text with a .txt name"),
+        ];
+        for (name, bytes) in cases {
+            std::fs::write(inbox.join(name), bytes).unwrap();
+        }
+        for (name, _) in &cases[..cases.len() - 1] {
+            let rep = node
+                .open_inbox_file(Some(name), opener.as_ref())
+                .expect("demoted open still succeeds");
+            assert!(rep.demoted, "{name} must be demoted");
+            assert!(
+                rep.path.ends_with("inbox"),
+                "{name}: folder revealed, got {}",
+                rep.path
+            );
+        }
+        assert!(
+            opener.opened().iter().all(|u| u.ends_with("inbox")),
+            "no executable reached the opener: {:?}",
+            opener.opened()
+        );
+
+        let before = opener.opened().len();
+        let rep = node
+            .open_inbox_file(Some("notes.txt"), opener.as_ref())
+            .unwrap();
+        assert!(!rep.demoted);
+        assert!(opener.opened()[before].ends_with("notes.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

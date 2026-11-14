@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::codec::{
-    read_len_prefixed, write_len_prefixed, write_tagged, TaggedReader, TAG_DATA, TAG_REKEY,
+    read_len_prefixed, write_len_prefixed, TaggedReader, MAX_OUTER, TAG_DATA, TAG_REKEY,
 };
 use crate::error::NetError;
 use std::collections::VecDeque;
@@ -21,6 +21,7 @@ use tetherly_crypto::identity::Identity;
 use tetherly_crypto::noise::{prologue, NoiseHandshake, NoiseTransport};
 use tetherly_crypto::pairbind::{decrypt_pairbind, encrypt_pairbind, PairBind, PairBindRole};
 use tetherly_crypto::spake::SpakeRole;
+use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
@@ -62,7 +63,18 @@ pub struct ActiveSession {
     /// Frames the peer sent under the old transport while our rekey handshake
     /// was in flight. Drained by `recv_inner` before reading the wire again.
     pending: VecDeque<InnerFrame>,
+    /// Encoded wire bytes committed for sending but not yet accepted by the
+    /// socket. Once a frame is encrypted its nonce is spent, so it must reach
+    /// the wire whole even if the future writing it is cancelled; every send
+    /// and receive drains this first. Same idea as [`TaggedReader`] on the
+    /// read side.
+    outbox: Vec<u8>,
+    outbox_sent: usize,
 }
+
+/// Keep the outbox allocation across frames, but do not pin a burst-sized
+/// buffer for the rest of the session.
+const OUTBOX_RETAIN: usize = 512 * 1024;
 
 /// Static material for an in-band rekey. `Identity` and `Hello` are cheap to
 /// clone and the values are fixed for the whole session.
@@ -80,18 +92,12 @@ struct RekeyContext {
 /// A rekey handshake resumable across cancellations. The `NoiseHandshake`
 /// keeps its own ratchet state; we only track which step comes next so a
 /// `select!`-cancelled send/recv can re-enter without re-ratcheting.
+///
+/// Only the initiator ever has one: its `m1` is committed to the outbox when
+/// the handshake starts, so the remaining step is always "await `m2`". The
+/// responder commits `m2` and swaps transports in one synchronous step.
 struct RekeyInFlight {
     hs: NoiseHandshake,
-    phase: RekeyPhase,
-}
-
-enum RekeyPhase {
-    /// Initiator: `m1` is ready to write, then we wait for the peer's `m2`.
-    SendInit { m1: Vec<u8> },
-    /// Initiator: `m1` is on the wire, awaiting `m2`.
-    AwaitReply,
-    /// Responder: `m1` was read; write this `m2`, then swap transports.
-    SendReply { m2: Vec<u8> },
 }
 
 impl ActiveSession {
@@ -104,6 +110,7 @@ impl ActiveSession {
     }
 
     pub async fn send_inner(&mut self, mut frame: InnerFrame) -> Result<(), NetError> {
+        self.flush_outbox().await?;
         if self.rekey_due(unix_now()) {
             self.drive_rekey().await?;
         }
@@ -111,14 +118,51 @@ impl ActiveSession {
         let plain = frame.encode()?;
         // A fresh transport never needs a rekey, so this does not re-enter.
         let ct = self.transport.encrypt(&plain)?;
-        write_tagged(&mut self.writer, TAG_DATA, &ct).await
+        self.queue_tagged(TAG_DATA, &ct)?;
+        self.flush_outbox().await
+    }
+
+    /// Commit `tag | u32 len | body` to the outbox. Synchronous, so a frame is
+    /// either fully committed or not at all.
+    fn queue_tagged(&mut self, tag: u8, body: &[u8]) -> Result<(), NetError> {
+        if body.len() > MAX_OUTER {
+            return Err(NetError::TooLarge);
+        }
+        self.outbox.reserve(5 + body.len());
+        self.outbox.push(tag);
+        self.outbox
+            .extend_from_slice(&(body.len() as u32).to_be_bytes());
+        self.outbox.extend_from_slice(body);
+        Ok(())
+    }
+
+    /// Push committed bytes to the socket. Cancellation-safe: `write` either
+    /// accepted `n` bytes (recorded before the next await) or none.
+    async fn flush_outbox(&mut self) -> Result<(), NetError> {
+        while self.outbox_sent < self.outbox.len() {
+            let n = self.writer.write(&self.outbox[self.outbox_sent..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+            }
+            self.outbox_sent += n;
+        }
+        if !self.outbox.is_empty() {
+            self.outbox.clear();
+            self.outbox_sent = 0;
+            if self.outbox.capacity() > OUTBOX_RETAIN {
+                self.outbox.shrink_to(OUTBOX_RETAIN);
+            }
+            self.writer.flush().await?;
+        }
+        Ok(())
     }
 
     /// [`send_inner`] under [`SESSION_WRITE_TIMEOUT`]. Bounding the write turns
     /// a silently wedged peer into a hard [`NetError::WriteStalled`] so the
     /// caller tears the session down instead of buffering into a black hole.
-    /// On timeout the write half may be mid-frame, so the session must not be
-    /// reused afterwards — every caller treats the error as fatal.
+    /// On timeout the committed bytes stay in the outbox (the stream is never
+    /// left mid-frame), but a peer that stalled for 15s is treated as dead —
+    /// every caller tears the session down on this error.
     pub async fn send_bounded(&mut self, frame: InnerFrame) -> Result<(), NetError> {
         match tokio::time::timeout(SESSION_WRITE_TIMEOUT, self.send_inner(frame)).await {
             Ok(res) => res,
@@ -127,6 +171,9 @@ impl ActiveSession {
     }
 
     pub async fn recv_inner(&mut self) -> Result<InnerFrame, NetError> {
+        // Bytes a cancelled send (or a rekey `m2`) committed must reach the
+        // peer even if this side only ever receives from now on.
+        self.flush_outbox().await?;
         if self.rekey_due(unix_now()) {
             self.drive_rekey().await?;
         }
@@ -159,87 +206,55 @@ impl ActiveSession {
     }
 
     /// Advance an in-band rekey if the transport is due, and run it to
-    /// completion. Cancellation-safe: all progress lives in `self.rekey_state`.
+    /// completion. Cancellation-safe: `m1` is committed to the outbox and the
+    /// handshake parked in `self.rekey_state` before any await.
     async fn drive_rekey(&mut self) -> Result<(), NetError> {
-        if let Some(inflight) = self.rekey_state.take() {
-            return self.rekey_step(inflight).await;
+        if self.rekey_state.is_none() {
+            if !self.rekey.we_initiate_noise {
+                // The responder never starts a rekey; it waits for the
+                // initiator's `m1`. Reusing a spent transport for one more
+                // frame is harmless — only the initiator's counter gates the
+                // boundary.
+                return Ok(());
+            }
+            let p = prologue(&self.rekey.local_hello, &self.rekey.remote_hello)?;
+            let mut hs =
+                NoiseHandshake::initiator(&self.rekey.identity, &self.rekey.remote_n_pk, &p)?;
+            let m1 = hs.write_message(b"")?;
+            self.queue_tagged(TAG_REKEY, &m1)?;
+            self.rekey_state = Some(RekeyInFlight { hs });
         }
-        if !self.rekey.we_initiate_noise {
-            // The responder never starts a rekey; it waits for the initiator's
-            // `m1`. Reusing a spent transport for one more frame is harmless —
-            // only the initiator's counter gates the boundary.
-            return Ok(());
-        }
-        let p = prologue(&self.rekey.local_hello, &self.rekey.remote_hello)?;
-        let mut hs = NoiseHandshake::initiator(&self.rekey.identity, &self.rekey.remote_n_pk, &p)?;
-        let m1 = hs.write_message(b"")?;
-        self.rekey_step(RekeyInFlight {
-            hs,
-            phase: RekeyPhase::SendInit { m1 },
-        })
-        .await
+        // `m1` must be on the wire before waiting for the reply.
+        self.flush_outbox().await?;
+        self.await_rekey_reply().await
     }
 
-    /// Run an in-flight rekey one step further. On cancellation the state is
-    /// put back first, so the caller re-enters at exactly this step.
-    async fn rekey_step(&mut self, mut inflight: RekeyInFlight) -> Result<(), NetError> {
+    /// Initiator: wait for `m2` and swap transports. The handshake stays in
+    /// `self.rekey_state` across every await, so a `select!`-cancelled call
+    /// resumes the same handshake instead of dropping or re-ratcheting it.
+    async fn await_rekey_reply(&mut self) -> Result<(), NetError> {
         loop {
-            match inflight.phase {
-                RekeyPhase::SendInit { m1 } => {
-                    // Take the message out before awaiting: a cancel while the
-                    // write is pending loses it, so re-enter at `AwaitReply`
-                    // only after the write completed.
-                    self.rekey_state = Some(RekeyInFlight {
-                        hs: inflight.hs,
-                        phase: RekeyPhase::AwaitReply,
-                    });
-                    write_tagged(&mut self.writer, TAG_REKEY, &m1).await?;
-                    inflight = self.rekey_state.take().expect("rekey in flight");
-                }
-                RekeyPhase::AwaitReply => {
-                    // Park the state before reading so a select! cancelled read
-                    // resumes the same handshake instead of dropping it.
-                    self.rekey_state = Some(inflight);
-                    let (tag, body) = self.tagged_reader.read_tagged(&mut self.reader).await?;
-                    inflight = self.rekey_state.take().expect("rekey in flight");
-                    match tag {
-                        TAG_REKEY => {
-                            inflight.hs.read_message(&body)?;
-                            if !inflight.hs.is_handshake_finished() {
-                                return Err(NetError::Handshake);
-                            }
-                            let mut transport = inflight.hs.into_transport()?;
-                            transport.set_started(unix_now());
-                            self.transport = transport;
-                            debug!(peer = %self.peer_id, "noise rekey complete (initiator)");
-                            return Ok(());
-                        }
-                        TAG_DATA => {
-                            // Old-transport frame racing ahead of the peer's
-                            // `m2`: decrypt under the old transport, deliver
-                            // after the swap.
-                            let plain = self.transport.decrypt(&body)?;
-                            self.pending.push_back(InnerFrame::decode(&plain)?);
-                        }
-                        _ => return Err(NetError::Handshake),
+            let (tag, body) = self.tagged_reader.read_tagged(&mut self.reader).await?;
+            match tag {
+                TAG_REKEY => {
+                    let mut inflight = self.rekey_state.take().expect("rekey in flight");
+                    inflight.hs.read_message(&body)?;
+                    if !inflight.hs.is_handshake_finished() {
+                        return Err(NetError::Handshake);
                     }
-                }
-                RekeyPhase::SendReply { m2 } => {
-                    // `m2` depends on `m1`; rebuilding it would consume the
-                    // handshake again, so it is computed once when `m1` is read
-                    // and only the write is retried.
-                    self.rekey_state = Some(RekeyInFlight {
-                        hs: inflight.hs,
-                        phase: RekeyPhase::SendReply { m2: m2.clone() },
-                    });
-                    write_tagged(&mut self.writer, TAG_REKEY, &m2).await?;
-                    let done = self.rekey_state.take().expect("rekey in flight");
-                    let mut transport = done.hs.into_transport()?;
+                    let mut transport = inflight.hs.into_transport()?;
                     transport.set_started(unix_now());
                     self.transport = transport;
-                    debug!(peer = %self.peer_id, "noise rekey complete (responder)");
+                    debug!(peer = %self.peer_id, "noise rekey complete (initiator)");
                     return Ok(());
                 }
+                TAG_DATA => {
+                    // Old-transport frame racing ahead of the peer's `m2`:
+                    // decrypt under the old transport, deliver after the swap.
+                    let plain = self.transport.decrypt(&body)?;
+                    self.pending.push_back(InnerFrame::decode(&plain)?);
+                }
+                _ => return Err(NetError::Handshake),
             }
         }
     }
@@ -261,12 +276,15 @@ impl ActiveSession {
         if !hs.is_handshake_finished() {
             return Err(NetError::Handshake);
         }
-        self.rekey_state = None;
-        self.rekey_step(RekeyInFlight {
-            hs,
-            phase: RekeyPhase::SendReply { m2 },
-        })
-        .await
+        // Commit `m2` and swap in one synchronous step: every frame queued
+        // after it is encrypted under the new transport, and a cancelled
+        // flush finishes on the next send/recv.
+        self.queue_tagged(TAG_REKEY, &m2)?;
+        let mut transport = hs.into_transport()?;
+        transport.set_started(unix_now());
+        self.transport = transport;
+        debug!(peer = %self.peer_id, "noise rekey complete (responder)");
+        self.flush_outbox().await
     }
 
     pub fn handshake_hash(&self) -> &[u8; 32] {
@@ -705,6 +723,8 @@ async fn finish_noise(
         },
         rekey_state: None,
         pending: VecDeque::new(),
+        outbox: Vec::new(),
+        outbox_sent: 0,
     })
 }
 

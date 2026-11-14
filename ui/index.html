@@ -8178,8 +8178,10 @@ async function updateInbox() {
         try {
           const res = await api("/api/file/inbox/open", { name: f.name });
           if (res && res.ok) {
-            if (msg) msg.textContent = "已调起系统应用打开: " + f.name;
-            setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+            if (msg) msg.textContent = res.demoted
+              ? "\"" + f.name + "\" 是可执行文件，已改为打开收件箱文件夹（不会直接运行）"
+              : "已调起系统应用打开: " + f.name;
+            setTimeout(() => { if (msg) msg.textContent = ""; }, res.demoted ? 6000 : 3000);
           } else {
             alert("打开失败: " + (res && res.error ? res.error : "未知错误"));
             if (msg) msg.textContent = "";

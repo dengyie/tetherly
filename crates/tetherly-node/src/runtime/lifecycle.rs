@@ -1789,8 +1789,9 @@ impl Node {
                                     {
                                         let _ = stream.set_nodelay(true);
                                         info!(peer = %peer_cloned, %target_addr, "lan probe succeeded; promoting from overlay to direct lan");
-                                        if let Some(sess) =
-                                            node.dial_lan_promotion(stream, target_addr).await
+                                        if let Some(sess) = node
+                                            .dial_lan_promotion(stream, target_addr, &peer_cloned)
+                                            .await
                                         {
                                             node.attach(sess).await;
                                             if node.input_channel_open().await {
@@ -1955,13 +1956,30 @@ impl Node {
         &self,
         stream: tokio::net::TcpStream,
         target_addr: SocketAddr,
+        expected: &DeviceId,
     ) -> Option<ActiveSession> {
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
         cfg.handshake_timeout = super::RECONNECT_CONNECT_TIMEOUT;
-        tetherly_net::dial_session(stream, target_addr, &cfg)
+        let sess = tetherly_net::dial_session(stream, target_addr, &cfg)
             .await
-            .ok()
+            .ok()?;
+        // `lanips` is peer-supplied and DHCP leases move: only the identity
+        // proven by the handshake decides whose session this is.
+        if sess.peer_id != *expected {
+            warn!(
+                expected = %expected,
+                reached = %sess.peer_id,
+                %target_addr,
+                "lan promotion reached a different device; dropped"
+            );
+            return None;
+        }
+        if self.is_blocked(sess.peer_id.as_str()) {
+            warn!(peer = %sess.peer_id, %target_addr, "lan promotion aborted: peer is blocked");
+            return None;
+        }
+        Some(sess)
     }
 
     pub fn control_port(&self) -> u16 {
@@ -2135,7 +2153,11 @@ mod tests {
         let started = std::time::Instant::now();
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            node.dial_lan_promotion(stream, addr),
+            node.dial_lan_promotion(
+                stream,
+                addr,
+                &DeviceId::parse("tdev_aaaaaaaaaaaaaaaa").unwrap(),
+            ),
         )
         .await
         .expect("promotion handshake must be bounded well below 20 s");
@@ -2143,6 +2165,55 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         hold.abort();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P1: a LAN promotion must reach the peer it was started for, and never
+    /// attach a blocked one. `lanips` is peer-supplied (and DHCP leases move),
+    /// so the authenticated identity on the far end is the only proof.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lan_promotion_rejects_identity_mismatch_and_blocked_peer() {
+        let (a, dir_a) = crate::runtime::clipboard_policy_tests::temp_test_node("promo-id-a");
+        let (b, dir_b) = crate::runtime::clipboard_policy_tests::temp_test_node("promo-id-b");
+        a.spawn_listeners().await.unwrap();
+        b.spawn_listeners().await.unwrap();
+        let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+        a.set_pin(pin);
+        b.set_pin(pin);
+        a.dial(b.control_addr()).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !(a.is_trusted(b.identity().device_id()) && b.is_trusted(a.identity().device_id())) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pairing never completed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let b_id = b.identity().device_id().clone();
+        let b_addr = b.control_addr();
+        let probe = || async { tokio::net::TcpStream::connect(b_addr).await.unwrap() };
+
+        let stranger = DeviceId::parse("tdev_aaaaaaaaaaaaaaaa").unwrap();
+        assert!(
+            a.dial_lan_promotion(probe().await, b_addr, &stranger)
+                .await
+                .is_none(),
+            "promotion for another device must not yield b's session"
+        );
+        assert!(
+            a.dial_lan_promotion(probe().await, b_addr, &b_id)
+                .await
+                .is_some(),
+            "promotion to the expected peer succeeds"
+        );
+        a.block_peer(b_id.as_str(), None).await.unwrap();
+        assert!(
+            a.dial_lan_promotion(probe().await, b_addr, &b_id)
+                .await
+                .is_none(),
+            "a blocked peer must never be attached via promotion"
+        );
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 
     fn test_live_peer(id: &DeviceId, addr: &str) -> LivePeer {

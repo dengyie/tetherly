@@ -155,3 +155,78 @@ async fn rekey_rejects_a_changed_static_key() {
     assert_ne!(resp.remote_static(), Some(honest.n_pk().as_slice()));
     assert_eq!(resp.remote_static(), Some(attacker.n_pk().as_slice()));
 }
+
+/// A send cancelled mid-write (a `select!` arm or `timeout` dropping the
+/// future while the socket buffer is full) must not leave half a frame on the
+/// wire or skip a Noise nonce: the bytes already committed finish on the next
+/// send, and a rekey started afterwards still lines up on both ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_cancelled_mid_write_keeps_the_stream_and_rekey_intact() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        let mut sess = accept_session(stream, peer, &cfg(0x33, "server"))
+            .await
+            .unwrap();
+        // Do not read until the client has had a send cancelled on a full
+        // socket buffer.
+        go_rx.await.unwrap();
+        let mut bulk = 0usize;
+        loop {
+            let f = tokio::time::timeout(Duration::from_secs(10), sess.recv_inner())
+                .await
+                .expect("server stalled")
+                .expect("stream must stay decodable after a cancelled send");
+            if f.ty == TYPE_PING {
+                sess.send_inner(pong(0)).await.unwrap();
+                break;
+            }
+            bulk += 1;
+        }
+        bulk
+    });
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let mut sess = dial_session(stream, addr, &cfg(0x43, "client"))
+        .await
+        .unwrap();
+
+    let big = || tetherly_core::frame::InnerFrame::new(0x7ff0, vec![0xab; 32 * 1024]).unwrap();
+    let mut completed = 0usize;
+    let mut cancelled = false;
+    for _ in 0..4096 {
+        match tokio::time::timeout(Duration::from_millis(100), sess.send_inner(big())).await {
+            Ok(r) => {
+                r.unwrap();
+                completed += 1;
+            }
+            Err(_) => {
+                cancelled = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        cancelled,
+        "socket buffer never filled; test cannot cancel a write"
+    );
+    go_tx.send(()).unwrap();
+
+    sess.debug_force_rekey_due();
+    sess.send_inner(ping(1)).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(10), sess.recv_inner())
+        .await
+        .expect("client stalled")
+        .unwrap();
+    assert_eq!(reply.ty, TYPE_PONG);
+
+    let bulk = server.await.unwrap();
+    assert_eq!(
+        bulk,
+        completed + 1,
+        "every completed frame plus the cancelled-but-committed one must arrive exactly once"
+    );
+}
