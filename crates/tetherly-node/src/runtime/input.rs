@@ -2173,6 +2173,22 @@ impl Node {
         }
     }
 
+    /// Edge return of a controller stint: put the cursor home and, when
+    /// this node started the stint, drop the tunnel grant.
+    ///
+    /// v0.2.48: the cursor goes home FIRST. The release disarms capture,
+    /// which on Windows restores the system cursors (SPI_SETCURSORS,
+    /// 8-14 ms) — run before the return warp, that painted the arrow at
+    /// the center park point (the Windows return hitch). After
+    /// `leave_remote_seat_capture` the release's disarm is a no-op restore,
+    /// and its UI/audit work no longer delays the warp.
+    fn end_remote_roaming_stint(&self, x: i32, y: i32, release_grant: bool, restore_last: bool) {
+        self.leave_remote_seat_capture(x, y, restore_last);
+        if release_grant {
+            self.release_input_tunnel_local("roaming returned to local seat");
+        }
+    }
+
     /// Check if low-level keyboard hook is currently armed and actively swallowing keystrokes.
     pub fn is_keyboard_armed(&self) -> bool {
         if let Ok(guard) = self.shared.input_hook_control.lock() {
@@ -2390,14 +2406,20 @@ impl Node {
     /// alive — the peer's late ACCEPT still matches it (CI m3_11); releasing
     /// there dead-ends the takeover.
     fn rescue_seat_to_local(&self, release_grant: bool) -> (i32, i32) {
-        let mut engine = self.shared.input_engine.lock().expect("engine");
-        engine.force_local();
-        let (cx, cy) = engine.local_pos();
+        // The engine guard must be dropped before the release: it relocks
+        // the engine (`set_remote_screen(None)`) and a std Mutex relock on
+        // the same thread deadlocks the watcher (v0.2.48).
+        let (cx, cy) = {
+            let mut engine = self.shared.input_engine.lock().expect("engine");
+            engine.force_local();
+            engine.local_pos()
+        };
         *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        // Warp home before the release restores the cursor (v0.2.48).
+        self.leave_remote_seat_capture(cx, cy, Self::CURSOR_HIDE_AROUND_WARPS);
         if release_grant {
             self.release_input_tunnel_local("stranded remote seat rescued");
         }
-        self.leave_remote_seat_capture(cx, cy, Self::CURSOR_HIDE_AROUND_WARPS);
         self.emit(UiEvent::input_seat_changed("local", false, None));
         self.trace_input(
             "rescue",
@@ -3117,12 +3139,11 @@ impl Node {
                     .shared
                     .roaming_own_crossing
                     .swap(false, std::sync::atomic::Ordering::SeqCst);
-                if own_stint && self.input_channel_open_sync() {
-                    self.release_input_tunnel_local("roaming returned to local seat");
-                }
-                self.leave_remote_seat_capture(
+                let release_grant = own_stint && self.input_channel_open_sync();
+                self.end_remote_roaming_stint(
                     local_pos.0,
                     local_pos.1,
+                    release_grant,
                     Self::CURSOR_HIDE_AROUND_WARPS,
                 );
             } else {
@@ -7308,6 +7329,101 @@ mod tests {
         assert_eq!(
             kinds,
             vec!["park_warp", "cursor_hide", "cursor_restore", "return_warp"]
+        );
+    }
+
+    /// v0.2.48 (production 2026-11-14 14:15:04.760 crossing → 04.768
+    /// restored): on the Windows edge return the grant release ran first,
+    /// and its disarm restored the system cursors (SPI_SETCURSORS, 8-14 ms)
+    /// while the physical cursor was still parked at screen center — the
+    /// arrow flashed there before the return warp: the "Windows return
+    /// hitch". The return warp must precede every cursor restore and the
+    /// release.
+    #[tokio::test]
+    async fn edge_return_warps_home_before_grant_release_restores_cursor() {
+        let (node, _dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("return-warp-first");
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_ctl".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: Some(tetherly_core::DisplayEdge::Bottom),
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        node.end_remote_roaming_stint(743, 1031, true, true);
+        let kinds: Vec<String> = node
+            .input_trace_snapshot()
+            .iter()
+            .map(|e| e.kind.clone())
+            .filter(|k| matches!(k.as_str(), "return_warp" | "cursor_restore" | "release"))
+            .collect();
+        assert_eq!(
+            kinds.first().map(String::as_str),
+            Some("return_warp"),
+            "the cursor must be home before anything shows it again: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|k| k == "release"),
+            "grant released: {kinds:?}"
+        );
+        assert!(node.active_tunnel_role().is_none());
+    }
+
+    /// v0.2.48: the watcher reconcile rescues a stranded Remote seat whose
+    /// Controller grant outlived its channel with `release_grant = true`.
+    /// `rescue_seat_to_local` held the engine lock across the release,
+    /// whose `set_remote_screen(None)` relocks the engine — a same-thread
+    /// std Mutex relock that froze the watcher (and every input path
+    /// behind the engine lock). It must also warp home before the release
+    /// restores the cursor, as the edge return does.
+    #[tokio::test]
+    async fn reconcile_rescue_with_stale_controller_grant_releases_without_deadlock() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("rescue-release");
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_ctl".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: Some(tetherly_core::DisplayEdge::Bottom),
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(1920, 540, 10, 0);
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+        let worker = node.clone_handle();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // A plain thread: on a deadlock it is leaked, the test still fails.
+        std::thread::spawn(move || {
+            let _ = tx.send(worker.reconcile_stranded_remote_seat());
+        });
+        let rescued = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reconcile rescue must not deadlock on the engine lock");
+        assert!(rescued);
+        assert!(node.active_tunnel_role().is_none(), "stale grant released");
+        let kinds: Vec<String> = node
+            .input_trace_snapshot()
+            .iter()
+            .map(|e| e.kind.clone())
+            .filter(|k| matches!(k.as_str(), "return_warp" | "cursor_restore" | "release"))
+            .collect();
+        let pos = |k: &str| kinds.iter().position(|x| x == k);
+        assert!(
+            pos("return_warp").is_some() && pos("return_warp") < pos("release"),
+            "the cursor goes home before the release: {kinds:?}"
         );
     }
 
