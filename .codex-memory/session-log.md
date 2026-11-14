@@ -1178,3 +1178,7 @@
 - P0-1：特权 UI 路由必须带每次启动生成的 token（`apitoken.rs`）。RED→GREEN 测试：`privileged_routes_require_the_api_token`、`refused_request_with_late_body_gets_clean_401`（拒绝前不读掉请求体就会 RST）、`port_registered_token_wins_over_the_default`（多 node 测试按端口取 token）。
 - CI 43628983820 与 release 43630108316 均为绿；两端 0.2.52；无 token 返回 401、带 token 返回 200；Windows token 文件 DACL 正确。
 - home-win ACL：release 目录和 bat 去掉 AU:M（备份在 `E:\code\acl-backup\`），收紧后带 token 的重部署成功，受保护进程 3/3。DEVELOPMENT §122。
+
+## 2026-11-15 v0.2.53 P1 收尾
+- P1-a inbox 可执行文件降级：`inbox_open_demotes_executables_to_the_folder`。P1-b LAN 提升身份与黑名单校验：`lan_promotion_rejects_identity_mismatch_and_blocked_peer`。P1-c 写入取消安全（outbox）：`send_cancelled_mid_write_keeps_the_stream_and_rekey_intact`。三项都是先看到 RED 再修到 GREEN。
+- CI 43633483432 与 release 43634582339 均为绿；两端 0.2.53，path lan；Mac 降级实测 demoted:true；受保护进程 3/3。DEVELOPMENT §123。

@@ -8922,3 +8922,44 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **ACL 收紧后**又对 Windows 做了一次重部署：带 token 的 `/api/daemon/restart` 热替换成功（pid 308876 → 263856），受保护进程 3/3。新增 WARN 只有自己发的探测请求。
 - **残余风险**：data_dir 仍归用户可写，action 定义等配置可能被同用户进程篡改。若要防同用户进程，只能把敏感配置迁到 SYSTEM 专属目录，列入后续评估。
 - **下一步**：P1 inbox 可执行文件拒开/降级、LAN 提升时校验 peer_id 与黑名单、rekey 取消安全。
+
+## 123. P1 三项：inbox 可执行文件降级、LAN 提升身份校验、会话写入取消安全 (v0.2.53)
+
+**P1-a inbox 打开可执行文件**
+
+- 问题：`/api/inbox/open` 用系统 opener 打开对端发来的文件。如果对端发来 `.exe`、`.bat`、`.lnk`、`.command`、`.app`，或者没有扩展名的 ELF/Mach-O 文件，这一步就等于直接运行对端的代码。在 home-win 上 daemon 以 SYSTEM 身份运行。
+- 修复（`storage.rs`）：
+  - 判定：`inbox_file_is_launchable` 先去掉文件名末尾的 `.` 和空格，再用 `LAUNCHABLE_EXTENSIONS`（Windows 与 mac/unix 两套）检查扩展名；没有扩展名时检查文件头魔数（MZ、`#!`、ELF、Mach-O 及其 fat 格式）。
+  - 命中后改为打开 inbox 文件夹，同时打 WARN、写一条 Warning 级审计 `inbox_open_demoted`，响应中带 `demoted:true`。
+  - dashboard 会提示用户“已改为打开收件箱文件夹（不会直接运行）”。
+- 测试：`inbox_open_demotes_executables_to_the_folder`（RED→GREEN）。
+
+**P1-b LAN 提升身份/黑名单**
+
+- 问题：`dial_lan_promotion` 拨对端在 caps 里自报的 `lanips`。DHCP 租约漂移后，这个地址可能已经属于另一台受信设备，于是提升到的会话会挂到错误的 peer 名下。此外这条路径不检查黑名单。
+- 修复（`lifecycle.rs`）：握手完成后要求 `sess.peer_id == expected`，并且对端不在黑名单中，否则丢弃会话并打 WARN。
+- 测试：`lan_promotion_rejects_identity_mismatch_and_blocked_peer`（RED→GREEN）。
+
+**P1-c 会话写入/rekey 取消安全**
+
+- 问题：`send_inner` 加密后直接 `write_tagged`（`write_all`）。如果 `select!` 或 `send_bounded` 的 timeout 在写到一半时取消了这个 future：
+  - Noise nonce 已经消耗，但线上只有半帧，或者整帧都没写出，对端随后的解密全部失败；
+  - rekey 的 `m1`、`m2` 也走同一条写路径，写到一半被取消时，发起方会永远等不到 `m2`；响应方的 `SendReply` 重试会重写已经部分写出的字节。
+- 修复（`tetherly-net/session.rs`）：
+  - **outbox**：会话持有 `outbox` 和 `outbox_sent`。`queue_tagged` 同步地把完整帧放进 outbox（帧要么整帧提交，要么完全没提交）；`flush_outbox` 每成功写出 n 字节就立即记账，所以可以安全取消。
+  - **每次收发先排空**：每次 `send_inner` 和 `recv_inner` 都先排空 outbox。被取消的那一帧会在下一次收发时补完，绝不会丢失或重复。
+  - **rekey**：
+    - 发起方在第一个 await 之前就把 `m1` 提交进 outbox，并把握手状态挂进 `rekey_state`。
+    - 响应方提交 `m2` 与切换 transport 在同一个同步步骤里完成。
+    - 状态机简化为只剩“等 `m2`”这一步，删掉了 `RekeyPhase`。
+  - outbox 容量超过 512 KiB 后回收。
+- 测试：
+  - 新增 `send_cancelled_mid_write_keeps_the_stream_and_rekey_intact`：先塞满 socket 缓冲，让 100 ms timeout 取消一次 32 KiB 的发送，再强制 rekey；断言服务端恰好收到“已完成帧数 + 1”帧，并且 ping/pong 正常。修复前服务端解密失败（RED）。
+  - 已有的 `rekey_resumes_after_a_cancelled_send` 等 3 个测试保持绿。
+
+**上线验证（2026-11-15）**
+
+- CI 43633483432 与 release 43634582339 均为绿。`deploy.sh --target all --tag v0.2.53` 完成，部署前清理了 Windows 内存。
+- 两端 health 均为 0.2.53，live_peers=1，path=lan；受保护进程 3/3 完好（pid 未变）。Windows 新 pid 为 298100，启动后无新增 WARN。
+- Mac inbox 降级实测：在 inbox 放无害的 `zz-demote-probe.sh` 后 POST open，响应为 `demoted:true`，同时打出 WARN `inbox open demoted`。探测文件已删除。Windows 没有做打开探测：SYSTEM 会话会弹窗，这里只做只读检查。
+- §120 路线图中的 P0、P1 至此全部完成。

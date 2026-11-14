@@ -1,6 +1,7 @@
 # Project State
 
 ## Release Baseline (2026-11-14)
+- **v0.2.53**（§123，2026-11-15 双端已部署）：P1 收尾。inbox open 遇到可执行文件（看扩展名或魔数）时降级为打开文件夹，并写 WARN 与审计；LAN 提升必须校验 peer_id 与黑名单；会话写入改走 outbox，send 被取消也不会留下半帧或跳过 nonce，rekey 的 m1/m2 在任何 await 之前提交。§120 路线图中的 P0、P1 全部完成。
 - **v0.2.52**（§122，2026-11-15 双端已部署）：P0-1 本地 API token。每次启动生成 `<data_dir>/api.token`（Unix 0600，Windows DACL 只给 SYSTEM/BA/OW）；特权 POST/PUT/DELETE 路由无 token 返回 401；CLI 自动读 token，`tetherly dashboard` 生成带 token 的地址，托盘也打开带 token 的地址；deploy/package 脚本带请求头。home-win release 目录和 bat 去掉 Authenticated Users M，备份在 `E:\code\acl-backup\`。
 - **v0.2.42**（§114）：启动时用 `VirtualLock` 锁住整个 daemon 映像。home-win 内存超订，64 MB 硬 WS 下限（flags=0x9）仍被压到 7.8 MB，空闲后第一次 enter 要从 E: HDD 缺页读回冷代码，延迟约 7.5 s。
 - **v0.2.44**（§116）：性能/内存优化。`logsink` 让日志 16 MiB 滚动为 `.1`，写入 `--data-dir`（Windows 现在看用户目录的 `tetherly.log`），daemon 不再写 stdout 副本和 ANSI；夹边和 park warp 日志降为 debug；剪贴板轮询凭 OS 变更计数跳过全量读加哈希。已部署并验证。
