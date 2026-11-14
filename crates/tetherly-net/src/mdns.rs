@@ -56,7 +56,6 @@ pub fn advertise(
         .map_err(|e| NetError::Discovery(e.to_string()))
 }
 
-#[cfg(feature = "lan")]
 /// Whether an mDNS `fullname` (as delivered by `ServiceRemoved`) is exactly
 /// the instance [`advertise`] registers for `name`. Exact, so removing
 /// "macbook" never expires a peer called "mac".
@@ -70,6 +69,7 @@ pub fn instance_matches(fullname: &str, name: &str) -> bool {
         .is_some_and(|inst| inst.eq_ignore_ascii_case(&name.replace('.', "-")))
 }
 
+#[cfg(feature = "lan")]
 pub fn browse(daemon: &ServiceDaemon) -> Result<MdnsReceiver<ServiceEvent>, NetError> {
     daemon
         .browse(SERVICE_TYPE)
