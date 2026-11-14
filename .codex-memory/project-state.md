@@ -496,3 +496,5 @@
 - Review 修复：四指滑动 ABBA 死锁、外来 release 误清授权、transfer_id 路径穿越、action 超时进程 kill_on_drop、mDNS 广播空转。
 - 待办（已核实）：P0 本地 API 鉴权（SYSTEM 提权面），P0 会话 generation（防僵尸会话）。DEVELOPMENT §120。
 - v0.2.50：tail 的 level 过滤会剥离 ANSI（v0.2.44 之前的彩色旧行），续行继承所属记录的级别。已部署：两端 0.2.50、path lan、受保护进程 3/3。当前生产版本为 v0.2.50。
+
+- v0.2.51 (2026-11-15): P0-2 fixed — superseded control sessions now close (keepalive holds WeakSender; replaced sender dropped after 2s grace); exit cleanup ownership by channel identity (same_channel) not addr. Verified prod: Mac↔Win 45717 connections 2→1. Next: P0-1 local API token auth (DEVELOPMENT.md §120/§121).

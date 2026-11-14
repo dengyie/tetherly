@@ -8832,3 +8832,33 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
   - `dial_peer` 的 2 s 超时把 Argon2 配对也算在内。
   - `open_screen` 连接没有超时。
   - H.264 能力是全局开关，而不是按 peer 记录。
+
+## 121. 被替换的控制会话不再变僵尸 (v0.2.51)
+
+**背景**：§120 路线图 P0-2。
+
+**根因**（逐条对照 `runtime/lifecycle.rs::attach` 核实）：
+
+1. keepalive 任务持有会话 sender 的**强引用克隆**。因此只要 keepalive 还在，`rx.recv()` 就永远不会返回 `None`。
+   - 同一 peer 的新会话覆盖 `sessions` map 后，旧会话不会结束。两端的旧会话继续互相 ping、互相保活，overlay 与 LAN 每抖动一次就泄漏一对 TCP 和两个任务。
+   - `forget` / `unpair` / `block` 的注释写着“丢掉 sender 就会关闭会话”，实际同样不成立：被拉黑或忘记的设备，会话仍然活着。
+2. 会话退出时用 **peer 地址**判断“注册是否仍属于我”。同一 NAT 映射重拨时地址相同，旧会话退出会把新会话的注册一并清掉，并误报 PeerDown（同时清空 `input_seat`）。
+
+**修复**：
+
+- `spawn_session_keepalive` 只持有 `WeakSender`，每个 tick 时 `upgrade()`，失败即退出。`sessions` map 中的注册是唯一的强引用持有者，移除或替换注册就会关闭通道，从而结束会话任务。
+- `register_session`：在持有 `sessions` 锁的情况下同时写入 `sessions` 和 `live`，并返回被替换的 sender。attach 拿到旧 sender 后，等 `SUPERSEDED_SESSION_GRACE`（2 s）再 drop，留时间让对端先 attach 新会话，避免旧连接一关闭对端就误判掉线。日志中会出现 `control session superseded; closing previous`。
+- `release_session`：在 `sessions` 锁内用 `WeakSender::upgrade` + `same_channel` 判定所有权，按**通道身份**判断，不再看地址。
+- **测试**（都先看到 RED）：
+  - `session_channel_closes_when_registration_is_dropped_despite_keepalive`：修复前 4 s 内通道一直不关闭。
+  - `replaced_session_exit_does_not_release_its_successor`：修复前，同一地址下旧会话会把新会话的注册清掉。
+
+**上线验证（2026-11-15）**：
+
+- CI 43624055681 和 release 43625021011 均为绿。
+- `deploy.sh --target all --tag v0.2.51` 完成：Windows 可用内存从 2.45 GB 升到 3.18 GB，受保护进程 3/3 存活。
+- 两端 health 均返回 0.2.51。
+- **部署前**：Mac↔Win 之间有 2 条 45717 ESTABLISHED 连接。一条是 LAN 192.168.1.7↔.6（活跃路径）；另一条是 overlay 10.144.144.10:61555，即本 bug 留下的僵尸会话。
+- **部署后**：只剩 1 条 LAN 连接。每次重启都先建立 overlay 连接，约 90 ms 后升到 LAN，两端都出现 `control session superseded; closing previous`，随后 overlay 连接被真正关闭。
+- 部署后两端没有新增 WARN；用户在部署过程中一直在漫游使用，输入 grace/resume 正常。
+- **下一步**：P0-1，本地 API token 鉴权。

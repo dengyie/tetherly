@@ -1170,3 +1170,6 @@
 - 三路 review（输入/网络/HTTP）结果逐条核实；5 个高危且改动面小的问题已 TDD 修复（每项都先 RED）。
 - 日志：运行时可切换级别并定时自动回滚、tail/grep/level 过滤、panic 落盘、启动横幅；Windows 排障不再需要 PowerShell 读文件。
 - 路线图写入 DEVELOPMENT §120：P0 API token 鉴权 + data_dir ACL；P0 会话 generation；P1 inbox 可执行文件、LAN 提升身份校验、rekey 取消安全。
+
+## 2026-11-15 v0.2.51
+- P0-2 zombie sessions: RED tests session_channel_closes_when_registration_is_dropped_despite_keepalive / replaced_session_exit_does_not_release_its_successor → GREEN. register_session/release_session/spawn_session_keepalive extracted in lifecycle.rs. CI 43624055681, release 43625021011, deployed both; zombie overlay conn gone.
