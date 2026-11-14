@@ -265,13 +265,6 @@ pub struct TailQuery {
 pub fn tail(path: &Path, q: &TailQuery) -> io::Result<Vec<String>> {
     let want = q.lines.clamp(1, TAIL_MAX_LINES);
     let needle = q.grep.as_deref().map(str::to_lowercase);
-    let keep = |line: &str| {
-        needle
-            .as_deref()
-            .is_none_or(|n| line.to_lowercase().contains(n))
-            && q.min_level
-                .is_none_or(|min| line_level(line).is_none_or(|l| l <= min))
-    };
     let mut out: Vec<String> = Vec::new();
     for generation in [path.to_path_buf(), rotated_path(path)] {
         let text = match read_tail_bytes(&generation, TAIL_SCAN_BYTES) {
@@ -279,12 +272,34 @@ pub fn tail(path: &Path, q: &TailQuery) -> io::Result<Vec<String>> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e),
         };
-        let mut matched: Vec<String> = text
+        // Forward pass: strip ANSI (pre-v0.2.44 files were coloured) and
+        // give continuation lines the level of the record they continue.
+        // A continuation before any record in the window has no known
+        // parent and passes.
+        let mut record_level: Option<tracing::Level> = None;
+        let lines: Vec<(String, Option<tracing::Level>)> = text
             .lines()
+            .filter(|l| !l.is_empty())
+            .map(|raw| {
+                let clean = strip_ansi(raw);
+                if let Some(l) = line_level(&clean) {
+                    record_level = Some(l);
+                }
+                (clean, record_level)
+            })
+            .collect();
+        let keep = |line: &str, level: Option<tracing::Level>| {
+            needle
+                .as_deref()
+                .is_none_or(|n| line.to_lowercase().contains(n))
+                && q.min_level.is_none_or(|min| level.is_none_or(|l| l <= min))
+        };
+        let mut matched: Vec<String> = lines
+            .into_iter()
             .rev()
-            .filter(|l| !l.is_empty() && keep(l))
+            .filter(|(l, lvl)| keep(l, *lvl))
             .take(want - out.len())
-            .map(str::to_string)
+            .map(|(l, _)| l)
             .collect();
         matched.reverse();
         matched.extend(out);
@@ -296,9 +311,29 @@ pub fn tail(path: &Path, q: &TailQuery) -> io::Result<Vec<String>> {
     Ok(out)
 }
 
+/// Remove ANSI CSI escape sequences (`ESC [ … final-byte`), e.g. the colour
+/// codes older tetherly builds wrote into the file log.
+pub fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Level of a formatted tracing line (`<ts>  INFO target: msg`); `None` for
-/// continuation lines (backtraces, multi-line messages), which always pass
-/// the level filter.
+/// continuation lines (backtraces, multi-line messages), which inherit the
+/// level of the record they continue in [`tail`].
 pub fn line_level(line: &str) -> Option<tracing::Level> {
     line.split_whitespace().nth(1).and_then(|tok| match tok {
         "ERROR" => Some(tracing::Level::ERROR),
@@ -443,6 +478,66 @@ mod tests {
             vec![
                 "t1  WARN tetherly_node::runtime::input: Crossing lost".to_string(),
                 "t3 ERROR tetherly_node::lan: dial failed".to_string(),
+            ]
+        );
+    }
+
+    /// v0.2.50 (production 2026-11-15): the Windows log still holds
+    /// pre-v0.2.44 lines written with ANSI colour codes. Their level column
+    /// did not parse, so `level=warn` returned stale INFO lines as
+    /// "continuations". ANSI is stripped before parsing and from the output.
+    #[test]
+    fn tail_level_filter_sees_through_ansi_colour_codes() {
+        let d = tmpdir("ansi");
+        let p = d.join("tetherly.log");
+        write_lines(
+            &p,
+            &[
+                "\u{1b}[2mt0\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2mx\u{1b}[0m: noisy",
+                "\u{1b}[2mt1\u{1b}[0m \u{1b}[33m WARN\u{1b}[0m \u{1b}[2mx\u{1b}[0m: real",
+            ],
+        );
+        let got = tail(
+            &p,
+            &TailQuery {
+                lines: 10,
+                min_level: Some(tracing::Level::WARN),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(got, vec!["t1  WARN x: real".to_string()]);
+    }
+
+    /// Continuation lines (backtraces, multi-line messages) inherit the
+    /// level of the record they continue instead of always passing.
+    #[test]
+    fn tail_continuation_lines_follow_their_record_level() {
+        let d = tmpdir("continuation");
+        let p = d.join("tetherly.log");
+        write_lines(
+            &p,
+            &[
+                "t0  INFO x: chatty",
+                "   detail of info",
+                "t1 ERROR tetherly::panic: panic",
+                "   0: frame",
+            ],
+        );
+        let got = tail(
+            &p,
+            &TailQuery {
+                lines: 10,
+                min_level: Some(tracing::Level::WARN),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "t1 ERROR tetherly::panic: panic".to_string(),
+                "   0: frame".to_string()
             ]
         );
     }

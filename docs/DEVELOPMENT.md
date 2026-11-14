@@ -8743,3 +8743,92 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - 两端 health 均为 0.2.48，path lan。
 - 部署前清理：可用内存 3.2 → 3.7 GB；受保护进程 3/3 完好。
 - 待确认：用户实际回边后，Windows trace 应显示 `return_warp` 早于 `cursor_restore` / `release`。
+
+## 120. 全面 review + 完备日志系统 (v0.2.49)
+
+**背景**：用户体感已无问题，要求全面 review、补齐日志系统并规划迭代。三路并行 review 覆盖三块：输入/接管、网络/生命周期、HTTP/存储/文件。下面的结论都已逐条对照代码核实，本版只修“高危且改动面小”的项，其余进入路线图。
+
+### 日志系统（新）
+
+- **`logging.rs`（新模块）**：用 `reload::Layer<EnvFilter>` 包住 fmt 层，过滤级别可以运行时热切换。
+  - 默认过滤串：`warn,tetherly=info,tetherly_node=info,tetherly_core=info,tetherly_net=info,mdns_sd=off`；`RUST_LOG` 合法时用它做基线。
+- **panic hook**：打出 `target=tetherly::panic` 的 error 日志，带线程、位置、payload 和 backtrace，然后链回原 hook。
+  - 之前 Windows release 用 `FreeConsole`，launchd 又丢弃 stderr，panic 信息会直接丢失。
+- **启动横幅**：`tetherly daemon starting`，带 version / pid / os / arch / data_dir / filter。
+- **`eprintln!` 全部收编为 tracing**：`[takeover]` / `[cursor]` 这类诊断以前在生产环境不可见；其中与已有 tracing 重复的直接删除。
+- **`trace_input` 镜像**：在 64 条的内存 ring 之外，同时以 `target=tetherly::input_trace` 的 debug 级别写入文件日志。默认关闭，按需打开。
+- **HTTP API（仅 loopback）**：
+  - `GET /api/log`（别名 `/api/log/status`）返回：路径、大小、`.1` 大小、上限 16 MiB、当前与基线过滤串、自动回滚时间。
+  - `GET /api/log/tail?lines=200&grep=xxx&level=warn`：
+    - 返回 `{count, lines}`，从旧到新；不足时跨到 `.1` 补齐。
+    - grep 不区分大小写；`level` 是最低级别，续行（如 backtrace）始终保留。
+    - 最多 2000 行，扫描末尾最多 4 MiB。
+  - `POST /api/log/level`：
+    - 请求体 `{"filter":"…","revert_after_secs":600}`，或 `{"reset":true}`。
+    - 非法过滤串返回 400。
+    - 设置 `revert_after_secs` 后到期自动回到基线（上限 24 h）；新的设置会取消尚未执行的回滚。
+- **排障范式**（Windows 不再需要 ssh + PowerShell 读文件）：
+  ```bash
+  ssh home-win "curl.exe -s \"http://127.0.0.1:45716/api/log/tail?lines=100&level=warn\""
+  ssh home-win "curl.exe -s -X POST http://127.0.0.1:45716/api/log/level -d \"{\\\"filter\\\":\\\"warn,tetherly=info,tetherly_node=debug,tetherly::input_trace=debug\\\",\\\"revert_after_secs\\\":600}\""
+  ```
+
+### v0.2.50 小修：tail 的 level 过滤
+
+- **现象**：v0.2.49 上线后，在 Windows 执行 `level=warn` 返回的是 11-11 的旧 INFO 行。
+- **根因**：v0.2.44 之前写入的日志带 ANSI 颜色码，解析不出 level，被当作续行，于是总能通过过滤。
+- **修复**：
+  - 先剥离 ANSI 再解析 level，返回的文本也去掉颜色码。
+  - 续行继承所属记录的 level，不再无条件放行；panic backtrace 跟随它的 ERROR 记录一起返回。
+- **测试**：
+  - `tail_level_filter_sees_through_ansi_colour_codes`
+  - `tail_continuation_lines_follow_their_record_level`
+
+### Review 修复（每项都是 TDD，先看到 RED）
+
+1. **四指滑动 ABBA 死锁（高）**：
+   - `drive_gesture_swipe` 先锁 `input_engine`，再锁 `active_input_tunnel`；`input_tunnel_status`（1 s watcher / HTTP）加锁顺序相反。
+   - 两者同时发生会冻住钩子线程，Windows 低级钩子随之超时，整机输入卡死。
+   - 修复：所有快照（tunnel role / remote_session / peer platform / gesture map）都在拿 engine 锁之前读取。
+   - 测试 `gesture_swipe_never_holds_engine_while_waiting_for_tunnel_lock`。
+2. **外来 release 误清授权（中高）**：
+   - `receive_input_tunnel_release` 先 `take()` 再比对，导致其他 peer 或其他 session 的过期 release 会静默清掉当前授权，且不产生任何事件或审计。
+   - 修复：先比对再 take，不匹配时记一条 info 日志。
+   - 测试 `foreign_tunnel_release_keeps_the_live_grant`。
+3. **`transfer_id` 路径穿越（高）**：
+   - 该 id 会直接拼进 inbox 文件名（`.{id}.part` / `.{id}.resume.json`）。已配对 peer 可以借此让 SYSTEM 在 inbox 之外创建、截断或删除文件。
+   - 修复：只接受 `[A-Za-z0-9_-]{1,64}`。本端生成的 id 格式为 `tr_<hex>`，不受影响。
+   - 测试 `transfer_id_outside_safe_charset_is_rejected`。
+4. **Action 超时后子进程不死（中）**：
+   - 修复：抽出 `run_action_command`，并加上 `kill_on_drop(true)`。
+   - 测试 `timed_out_action_command_is_killed`。
+5. **mDNS 广播线程空转（中低）**：
+   - 并发 re-advertise 会把旧的 stop sender 直接丢弃，旧循环里的 `changed()` 随即持续返回 Err，循环永不退出，一个阻塞线程跑满 100% CPU，旧记录也一直残留。
+   - 修复：抽出 `hold_advertisement`，收到 Err 即退出。
+   - 测试 `advertisement_hold_ends_when_stop_sender_is_dropped`。
+
+### 已核实、留待后续版本的 review 发现（按优先级）
+
+- **P0 本地 API 无鉴权**：
+  - Windows 守护进程以 SYSTEM 运行，data_dir 和二进制目录普通用户都可写。
+  - 因此任意本地进程都能借 `/api/daemon/restart`（replacement_path）、`/api/action/local`、`/api/file/send` 提权或读取任意文件。
+  - 方案：每次安装生成随机 token 文件（ACL 只给 SYSTEM 和当前用户），UI 和 CLI 带 header 访问；同时收紧 data_dir 的 ACL。
+- **P0 被替换的会话永不关闭**：
+  - 同一 peer 的新会话直接覆盖 map，旧会话的 keepalive 继续跑，两端旧会话互相 ping，彼此保活。overlay 与 LAN 每抖动一次就泄漏一对。
+  - 旧会话最终退出时，只按地址判断“是否还是我”，可能把新会话一起清掉（PeerDown 误报）。
+  - 方案：给会话加 generation，并显式关闭被替换的旧会话。
+- **P1**：
+  - 打开 inbox 文件会以 SYSTEM 身份执行 peer 发来的 exe/bat/lnk（`open_inbox_file` 应拒绝可执行扩展名，或降权运行）。
+  - LAN 提升不校验 `peer_id`，也不查黑名单。
+  - rekey 写入不能安全取消（在 select 分支里写 m1/m2）。
+- **P2**：
+  - 发送队列满时，一批输入事件会只发出一部分，并触发 rescue。
+  - 同名文件静默覆盖。
+  - uihttp 读请求没有超时。
+  - Windows 上 logsink rename 失败时会退回 `set_len`，可能失败后无限增长。
+  - `url_decode` 遇到非法转义会吞字节。
+  - `blocked.json` 损坏时按“全部放行”加载。
+  - mDNS 移除用子串匹配。
+  - `dial_peer` 的 2 s 超时把 Argon2 配对也算在内。
+  - `open_screen` 连接没有超时。
+  - H.264 能力是全局开关，而不是按 peer 记录。

@@ -1165,3 +1165,8 @@
 - 证据：Windows 回边时 release → restore（SPI_SETCURSORS 8–14 ms），完成后才 return_warp，箭头在中心停靠点闪现。
 - 修复：先传送后释放；`rescue_seat_to_local` 缩小 engine 锁作用域，消除 reconcile 路径的同线程重入死锁。
 - 新增 2 个 RED→GREEN 测试；CI 与 release 全绿；两端 0.2.48、lan、受保护进程 3/3。DEVELOPMENT §119。
+
+## 2026-11-15 v0.2.49 全面 review + 日志系统
+- 三路 review（输入/网络/HTTP）结果逐条核实；5 个高危且改动面小的问题已 TDD 修复（每项都先 RED）。
+- 日志：运行时可切换级别并定时自动回滚、tail/grep/level 过滤、panic 落盘、启动横幅；Windows 排障不再需要 PowerShell 读文件。
+- 路线图写入 DEVELOPMENT §120：P0 API token 鉴权 + data_dir ACL；P0 会话 generation；P1 inbox 可执行文件、LAN 提升身份校验、rekey 取消安全。

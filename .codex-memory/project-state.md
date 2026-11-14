@@ -489,3 +489,9 @@
 
 ## 2026-11-14 v0.2.48
 - Windows 控制端回边卡顿：回边改为先 `leave_remote_seat_capture`（先 warp 后 restore），再 release（`end_remote_roaming_stint`）；同时修复 `rescue_seat_to_local` 持 engine 锁调用 release 导致的死锁。已部署（当前生产 v0.2.48）。DEVELOPMENT §119。
+
+## 2026-11-15 v0.2.49
+- 日志系统：`logging.rs` 用 reload EnvFilter 支持热切换，加 panic hook 和启动横幅，eprintln 全部收编为 tracing，input trace 镜像到 debug（target `tetherly::input_trace`）。
+- 新 API：`GET /api/log`、`GET /api/log/tail?lines=&grep=&level=`、`POST /api/log/level {filter|reset, revert_after_secs}`。
+- Review 修复：四指滑动 ABBA 死锁、外来 release 误清授权、transfer_id 路径穿越、action 超时进程 kill_on_drop、mDNS 广播空转。
+- 待办（已核实）：P0 本地 API 鉴权（SYSTEM 提权面），P0 会话 generation（防僵尸会话）。DEVELOPMENT §120。
