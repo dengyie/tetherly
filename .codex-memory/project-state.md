@@ -486,3 +486,6 @@
 
 ## 2026-11-14 v0.2.47
 - Windows 控制 Mac 横向卡顿：线协议网格 SCREEN_UNITS 1000→10000（TYPE_INPUT_MOVE_FINE 0x0408，caps `inputunits=10000` 门控，旧对端降级）。已部署并验证（当前生产 v0.2.47）。DEVELOPMENT §118。
+
+## 2026-11-14 v0.2.48
+- Windows 控制端回边卡顿：回边改为先 `leave_remote_seat_capture`（先 warp 后 restore），再 release（`end_remote_roaming_stint`）；同时修复 `rescue_seat_to_local` 持 engine 锁调用 release 导致的死锁。已部署（当前生产 v0.2.48）。DEVELOPMENT §119。

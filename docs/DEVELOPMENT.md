@@ -8702,3 +8702,44 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - Mac 看到 Windows 的 caps 含 `inputunits=10000`，Windows 也看到 Mac 的 caps 含 `inputunits=10000`，因此 Windows → Mac 方向走 FINE 帧。
 - 受保护进程 3/3 完好；部署前清理：可用内存 2.5 → 3.3 GB。
 - 待用户实际跨屏后确认：Mac 日志中 `push: enter+move` / 入口 move 的 rem 应为 0–10000 量级。
+
+## 119. Windows 作控制端时回边卡顿：先传送回家，再释放授权 (v0.2.48)
+
+**现象**：
+- Mac 控制时两机切换很顺滑；Windows 控制时，鼠标从 Mac 回到 Windows 会稍微顿一下。
+
+**证据（只读）**：
+- Windows `/api/input/trace` 回边时序：
+  - `release roaming returned to local seat`
+  - `cursor_restore grant released`
+  - 13 ms 后才出现 `return_warp (743,1031)`
+- Windows 日志：每次回边 `engine crossing fired hook=(960,539)` 之后 8–14 ms 才打出 `system_cursor: restored`。
+- Mac 端 restore 与 warp 在 1 ms 内完成。
+
+**根因**：
+- `drive_input_delta` 回边分支先调用 `release_input_tunnel_local`，后调用 `leave_remote_seat_capture`。
+- `release_input_tunnel_local` 内的 `disarm_input_capture` → `set_keyboard(false)` → `system_cursor::restore` 走 `SPI_SETCURSORS`，耗时 8–14 ms。它连同 UI emit / audit 都在 return warp **之前**执行。
+- 这段时间物理光标仍停在屏幕中心的停靠点，于是箭头先在中心闪现，再跳回边缘。v0.2.33 “先传送、后显示”的顺序因此被绕过。
+
+**附带发现的潜伏死锁**：
+- `rescue_seat_to_local(release_grant=true)` 只有 watcher 的 reconcile 会传 true。它在持有 engine 锁时调用 release，而 release 内部的 `set_remote_screen(None)` 要再锁一次 engine。
+- 同一线程重复锁 std Mutex 会导致 watcher 死锁，所有走 engine 锁的输入路径随之冻结。
+- 触发条件：Controller 授权残留，但通道已断。
+
+**修复**：
+- 新增 `end_remote_roaming_stint`，执行顺序为先 `leave_remote_seat_capture`（Windows 下先 warp 后 restore），再 release。之后 release 里的 restore 已无事可做，UI 与 audit 也不再拖慢传送。
+- `rescue_seat_to_local`：engine 锁只包住 `force_local` / `local_pos` 的作用域；先传送回家，再 release。
+
+**测试**：
+- `edge_return_warps_home_before_grant_release_restores_cursor`：
+  - RED 时序为 `[release, cursor_restore, return_warp, cursor_restore]`，与生产 trace 完全一致。
+  - GREEN 后 `return_warp` 排在第一位。
+- `reconcile_rescue_with_stale_controller_grant_releases_without_deadlock`：
+  - RED 时 5 s 超时（死锁）。
+  - GREEN 后能释放授权，且 `return_warp` 早于 `release`。
+- 全量 workspace 测试通过；clippy `-D warnings` 干净；CI 三平台 + android + deny 全绿；release 全绿。
+
+**部署 v0.2.48（2026-11-14，CI release）**：
+- 两端 health 均为 0.2.48，path lan。
+- 部署前清理：可用内存 3.2 → 3.7 GB；受保护进程 3/3 完好。
+- 待确认：用户实际回边后，Windows trace 应显示 `return_warp` 早于 `cursor_restore` / `release`。

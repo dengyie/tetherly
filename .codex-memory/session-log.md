@@ -1160,3 +1160,8 @@
 - 根因：1000 单位网格在 1470 pt 宽 Mac 上每单位 1.47 pt；800 Hz × 1.7 px 的事件约 1/3 被量化为 no-op，随后跳变（RED 400→272）。
 - 修复：SCREEN_UNITS=10000、FINE 帧 0x0408、双解码、`legacy_compat_frame`、cap `inputunits=10000`，pump 按 `peer_supports_fine_input` 降级；迟滞带 = SCREEN_UNITS/50。
 - 已部署：两端 0.2.47、互见 cap、path lan、受保护进程 3/3。DEVELOPMENT §118。
+
+## 2026-11-14 v0.2.48 Windows 回边卡顿
+- 证据：Windows 回边时 release → restore（SPI_SETCURSORS 8–14 ms），完成后才 return_warp，箭头在中心停靠点闪现。
+- 修复：先传送后释放；`rescue_seat_to_local` 缩小 engine 锁作用域，消除 reconcile 路径的同线程重入死锁。
+- 新增 2 个 RED→GREEN 测试；CI 与 release 全绿；两端 0.2.48、lan、受保护进程 3/3。DEVELOPMENT §119。
