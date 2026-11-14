@@ -120,6 +120,11 @@ const SCREEN_GRAB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// that stops a wedged peer from turning a live session into unbounded memory
 /// growth; a full queue surfaces as an error instead of silently buffering.
 const SESSION_QUEUE_DEPTH: usize = 256;
+/// How long a superseded control session stays open after its replacement
+/// registers. Long enough for the peer to attach the replacement on its side
+/// (the responder finishes the handshake a round trip later), short enough
+/// that the old connection does not linger as a zombie.
+const SUPERSEDED_SESSION_GRACE: Duration = Duration::from_secs(2);
 
 /// Screen fragments are large, so their queue is short: a frame that cannot fit
 /// is dropped rather than queued behind a slow link.

@@ -1001,10 +1001,9 @@ impl Node {
                     }
                 }
             }
-            {
-                let mut live = self.shared.live.lock().expect("live");
-                live.insert(
-                    peer_id.clone(),
+            let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
+            let replaced = self
+                .register_session(
                     LivePeer {
                         device_id: peer_id.clone(),
                         name: name.clone(),
@@ -1019,20 +1018,24 @@ impl Node {
                         rtt_ms: None,
                         last_seen_ms: self.shared.clock.unix_ms(),
                     },
-                );
+                    tx.clone(),
+                )
+                .await;
+            if let Some(old) = replaced {
+                // Close the superseded session after a short grace instead of
+                // leaving it alive forever: the peer gets time to attach the
+                // replacement first, so the old session's close does not look
+                // like the peer going down on its side.
+                info!(peer = %peer_id, %addr, "control session superseded; closing previous");
+                tokio::spawn(async move {
+                    tokio::time::sleep(SUPERSEDED_SESSION_GRACE).await;
+                    drop(old);
+                });
             }
             self.emit(peer_up(&peer_id, &name, &platform));
             match incoming {
                 PathKind::Lan => info!(peer = %peer_id, %addr, "path lan"),
                 PathKind::Overlay => info!(peer = %peer_id, %addr, "path overlay"),
-            }
-            let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
-            {
-                self.shared
-                    .sessions
-                    .lock()
-                    .await
-                    .insert(peer_id.clone(), tx.clone());
             }
             let file_port = self.file_port();
             let input_port = self.input_port();
@@ -1065,50 +1068,8 @@ impl Node {
             let node = self.clone_handle();
             let clock = self.shared.clock.clone();
             let mut stop = self.shared.shutdown.subscribe();
-            let sess_addr = addr;
-            // Keepalive: a ping every heartbeat keeps the NAT mapping warm and, more
-            // importantly, gives the peer something to answer, so `Liveness` can tell
-            // a merely-quiet session from a dead one. The task ends when the session
-            // task drops its receiver (try_send then reports Closed) or on shutdown.
-            let keep_tx = tx.clone();
-            let keep_clock = clock.clone();
-            let mut keep_stop = self.shared.shutdown.subscribe();
-            let keep_node = self.clone_handle();
-            let keep_peer = peer_id.clone();
-            tokio::spawn(async move {
-                loop {
-                    let interval_secs = keep_node
-                        .shared
-                        .heartbeat_config
-                        .lock()
-                        .expect("heartbeat")
-                        .interval_secs
-                        .max(1);
-                    tokio::select! {
-                        _ = keep_stop.changed() => {
-                            if *keep_stop.borrow() {
-                                break;
-                            }
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
-                            let now_ms = keep_clock.unix_ms();
-                            match keep_tx.try_send(ping(now_ms)) {
-                                Ok(()) => {
-                                    let mut trackers =
-                                        keep_node.shared.link_trackers.lock().expect("link_trackers");
-                                    trackers
-                                        .entry(keep_peer.clone())
-                                        .or_insert_with(|| PeerLinkTracker::new(now_ms))
-                                        .record_ping_sent(now_ms);
-                                }
-                                // A full queue is backpressure, not a dead peer.
-                                Err(mpsc::error::TrySendError::Full(_)) => {}
-                                Err(mpsc::error::TrySendError::Closed(_)) => break,
-                            }
-                        }
-                    }
-                }
-            });
+            self.spawn_session_keepalive(&peer_id, &tx);
+            let my_tx = tx.downgrade();
             self.shared.telemetry.record_session_established();
             tokio::spawn(async move {
                 let hb = node.shared.heartbeat_config.lock().expect("hb").clone();
@@ -1176,17 +1137,8 @@ impl Node {
                     }
                 }
                 node.shared.telemetry.record_session_closed();
-                let still_mine = node
-                    .shared
-                    .live
-                    .lock()
-                    .expect("live")
-                    .get(&peer_id)
-                    .map(|p| p.addr)
-                    == Some(sess_addr);
+                let still_mine = node.release_session(&peer_id, &my_tx).await;
                 if still_mine {
-                    node.shared.sessions.lock().await.remove(&peer_id);
-                    node.shared.live.lock().expect("live").remove(&peer_id);
                     node.shared.reconnect_wake.notify_one();
                     node.shared
                         .ping_waiters
@@ -1230,6 +1182,100 @@ impl Node {
                 }
             });
         })
+    }
+
+    /// Install a freshly attached control session as the peer's current one.
+    /// Returns the sender of the session it replaced, if any.
+    pub(super) async fn register_session(
+        &self,
+        peer: LivePeer,
+        tx: mpsc::Sender<InnerFrame>,
+    ) -> Option<mpsc::Sender<InnerFrame>> {
+        let mut sessions = self.shared.sessions.lock().await;
+        let old = sessions.insert(peer.device_id.clone(), tx);
+        self.shared
+            .live
+            .lock()
+            .expect("live")
+            .insert(peer.device_id.clone(), peer);
+        drop(sessions);
+        old
+    }
+
+    /// Drop the peer's registration if it still belongs to the exiting
+    /// session. Returns whether it did (and so whether PeerDown is due).
+    pub(super) async fn release_session(
+        &self,
+        peer: &DeviceId,
+        mine: &mpsc::WeakSender<InnerFrame>,
+    ) -> bool {
+        // Ownership is channel identity, not peer address: a re-dial through
+        // the same NAT mapping reuses the address. Checked and released under
+        // the `sessions` lock, which `register_session` also holds while it
+        // writes both maps, so the two maps always change together.
+        let mut sessions = self.shared.sessions.lock().await;
+        let still_mine = match (mine.upgrade(), sessions.get(peer)) {
+            (Some(me), Some(cur)) => me.same_channel(cur),
+            _ => false,
+        };
+        if still_mine {
+            sessions.remove(peer);
+            self.shared.live.lock().expect("live").remove(peer);
+        }
+        still_mine
+    }
+
+    /// Keepalive: a ping every heartbeat keeps the NAT mapping warm and, more
+    /// importantly, gives the peer something to answer, so `Liveness` can tell
+    /// a merely-quiet session from a dead one.
+    ///
+    /// Holds only a weak sender: the registration in `sessions` is the one
+    /// strong owner, so removing or replacing it (forget, block, reconnect)
+    /// closes the channel and ends the session task. A strong clone here kept
+    /// every superseded session alive as a pinging zombie.
+    pub(super) fn spawn_session_keepalive(&self, peer: &DeviceId, tx: &mpsc::Sender<InnerFrame>) {
+        let keep_tx = tx.downgrade();
+        let keep_clock = self.shared.clock.clone();
+        let mut keep_stop = self.shared.shutdown.subscribe();
+        let keep_node = self.clone_handle();
+        let keep_peer = peer.clone();
+        tokio::spawn(async move {
+            loop {
+                let interval_secs = keep_node
+                    .shared
+                    .heartbeat_config
+                    .lock()
+                    .expect("heartbeat")
+                    .interval_secs
+                    .max(1);
+                tokio::select! {
+                    _ = keep_stop.changed() => {
+                        if *keep_stop.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
+                        let now_ms = keep_clock.unix_ms();
+                        let Some(tx) = keep_tx.upgrade() else {
+                            break;
+                        };
+                        match tx.try_send(ping(now_ms)) {
+                            Ok(()) => {
+                                let mut trackers =
+                                    keep_node.shared.link_trackers.lock().expect("link_trackers");
+                                trackers
+                                    .entry(keep_peer.clone())
+                                    .or_insert_with(|| PeerLinkTracker::new(now_ms))
+                                    .record_ping_sent(now_ms);
+                            }
+                            // A full queue is backpressure, not a dead peer.
+                            Err(mpsc::error::TrySendError::Full(_)) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                    }
+                }
+            }
+        });
     }
 
     pub(super) async fn handle_event(
@@ -2057,6 +2103,8 @@ fn cleanup_old_binaries_in(parent: &std::path::Path, stem: &str, cutoff: std::ti
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // Production 2026-11-14: a promotion handshake went half-open (the peer
     // attached the LAN session, ours never completed) and sat on the 20 s
     // session HANDSHAKE_TIMEOUT. Meanwhile the peer kept the dead LAN path
@@ -2083,6 +2131,83 @@ mod tests {
         assert!(res.is_none());
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         hold.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_live_peer(id: &DeviceId, addr: &str) -> LivePeer {
+        LivePeer {
+            device_id: id.clone(),
+            name: "peer".into(),
+            platform: "test".into(),
+            addr: addr.parse().unwrap(),
+            handshake_hash: [0u8; 32],
+            file_port: None,
+            input_port: None,
+            screen_port: None,
+            caps: Vec::new(),
+            path: PathKind::Lan,
+            rtt_ms: None,
+            last_seen_ms: 0,
+        }
+    }
+
+    // P0-2: the keepalive held a strong clone of the session sender, so
+    // removing/replacing the registration (forget, block, reconnect) never
+    // closed the channel — the old session lived on as a pinging zombie.
+    #[tokio::test]
+    async fn session_channel_closes_when_registration_is_dropped_despite_keepalive() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("keepalive-weak");
+        let peer = DeviceId::from_id_pk(&[41u8; 32]);
+        let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
+        node.spawn_session_keepalive(&peer, &tx);
+        drop(tx);
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            loop {
+                if rx.recv().await.is_none() {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "keepalive must not keep the session channel open"
+        );
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // P0-2: ownership was decided by peer address. A replaced session that
+    // exits later (same addr, e.g. a re-dial through the same NAT mapping)
+    // would tear down its successor's registration and emit a false PeerDown.
+    #[tokio::test]
+    async fn replaced_session_exit_does_not_release_its_successor() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("sess-owner");
+        let peer = DeviceId::from_id_pk(&[42u8; 32]);
+        let (old_tx, _old_rx) = mpsc::channel::<InnerFrame>(4);
+        let old_weak = old_tx.downgrade();
+        assert!(node
+            .register_session(test_live_peer(&peer, "10.0.0.2:5000"), old_tx)
+            .await
+            .is_none());
+        let (new_tx, _new_rx) = mpsc::channel::<InnerFrame>(4);
+        let new_weak = new_tx.downgrade();
+        let replaced = node
+            .register_session(test_live_peer(&peer, "10.0.0.2:5000"), new_tx)
+            .await;
+        assert!(replaced.is_some());
+        drop(replaced);
+
+        assert!(
+            !node.release_session(&peer, &old_weak).await,
+            "a superseded session must not own the registration"
+        );
+        assert!(node.shared.live.lock().unwrap().contains_key(&peer));
+        assert!(node.shared.sessions.lock().await.contains_key(&peer));
+
+        assert!(node.release_session(&peer, &new_weak).await);
+        assert!(!node.shared.live.lock().unwrap().contains_key(&peer));
+        assert!(!node.shared.sessions.lock().await.contains_key(&peer));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
