@@ -8608,11 +8608,57 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - 剪贴板 3 个：`clip_read_needed`、`memory_clip_change_token_advances_on_set_text`、`test_poll_clipboard_auto_sync_still_sees_changes_after_skip`。
 - 用"禁用滚动"的变体验证过滚动测试确实会失败。
 
-**附带**：`tests/phase5.rs` 里的 `screen_and_input_lifecycle_and_peer_targeting_via_loopback_api` 在全量并行负载下偶发 `channel_open` 断言失败，单跑 3/3 通过，与本次改动无关。
+**附带**：`tests/phase5.rs` 里的 `screen_and_input_lifecycle_and_peer_targeting_via_loopback_api` 偶发 `channel_open` 断言失败，根因见 §117（v0.2.45 已修）。
 
 **部署验证（2026-11-14 18:47，CI release v0.2.44）**：
 - 部署内清理：可用内存 2.7 GB → 3.9 GB，裁剪 59 个进程；受保护进程 3/3 完好。
 - Windows（PID 271828，命令行带 `--data-dir`）：日志写入用户目录的 `tetherly.log`，纯文本无 ANSI。systemprofile 那份在旧进程退出时（10:47:04）停止增长；`tetherly_system.log` 不再收到 INFO 副本。
 - Windows 资源：私有 11.5 → 6.6 MB，WS 37.5 MB（含锁定映像），句柄 313。
 - Mac：首次写入即把 17.9 MB 旧日志滚动为 `tetherly.log.1`，新文件无 ANSI；footprint 25.5 → 16 MB，RSS 27.6 MB（启动峰值约 48 MB，随后回落）；用户正常操作时 30 s 用 CPU 0.43 s，与优化前持平。
-- 遗留：`C:\Windows\System32\config\systemprofile\AppData\Local\tetherly\tetherly.log`（3.7 MB）已不再写入，可手动删除。
+- 遗留：`C:\Windows\System32\config\systemprofile\AppData\Local\tetherly\tetherly.log`（3.7 MB）已不再写入，2026-11-14 已删除。
+
+## 117. LAN 双端同时提升 / 重复会话；input start 竞态；提升握手半开 (v0.2.45–v0.2.46)
+
+**现象**：
+- 每次重连，两端各自打出 "lan probe succeeded"，随后出现两条 "path lan"，后一条 LAN 会话替换前一条。input 通道也跟着重建一次。
+- `tests/phase5.rs` 偶发 `channel_open` 断言失败。
+
+**根因**：
+1. **双端同时提升**：overlay 会话上每收到一次带 `lanips=` 的 Caps，就 spawn 一次 LAN 探测，没有 single-flight，两端也没有先后顺序。`attach` 只会丢弃"已有 LAN 时进来的 overlay"，所以 LAN 会替换 LAN。
+2. **input start 竞态**：`open_input` 的单拨号 CAS 失败时（另一路拨号在途，比如 LAN 提升或重连 watcher）直接返回 Ok。`input_start_reported` 却固定上报 `channel_open: true`，而此时 `input_out` 还是空的。
+3. **提升握手半开**（v0.2.45 上线时观察到，当时 Mac 已是 v0.2.45，Windows 仍是 v0.2.44）：
+   - Mac 的提升握手卡满 20 s 的 `HANDSHAKE_TIMEOUT`；Windows 那边已经 attach 了这条 LAN 会话。
+   - Windows 于是一直认为走的是 LAN，静默丢弃 Mac 每 140 ms 一次的 overlay 重连。
+   - 结果是约 19 s 没有可用链路。加了 single-flight 之后，这 20 s 内也无法重试提升。
+
+**修复**：
+- v0.2.45：
+  - `Shared.lan_promotions: InflightSet`：每个 peer 同时最多一次提升，`InflightGuard` 在 Drop 时释放。
+  - `lan_promotion_delay`：device id 小的一端立即提升，大的一端退避 1.5 s；探测循环每轮检查 `peer_on_overlay`，peer 已离开 overlay 就停止。
+  - `open_input_settled`：start API 在 CAS 失败时最多等 5 s，等在途拨号结束；`channel_open` 上报真实状态。
+- v0.2.46：`dial_lan_promotion` 的握手超时改用 `RECONNECT_CONNECT_TIMEOUT`（3 s）。
+
+**测试**：
+- `lan_promotion_lower_id_goes_first_higher_id_backs_off`
+- `lan_promotion_guard_admits_one_probe_per_peer`
+- `test_open_input_settled_waits_for_inflight_dial`
+- `lan_promotion_dial_gives_up_on_silent_peer`（对端只 accept 不说话，修复前要 8 s 以上，修复后 3 s 返回）
+
+以上测试都先确认修复前失败，修复后通过。
+
+**部署验证 v0.2.45（2026-11-14 19:56 本地，CI release）**：
+- Windows 切换到 v0.2.45 之后：Windows 的 overlay 拨入，Mac（id 较小）立即提升，Windows 只看到一条入站 LAN，自己没有探测。全程只有一条 LAN 会话。
+- 双端重复提升只出现在 Windows 仍是 v0.2.44 的混合版本窗口内。
+- 受保护进程 3/3 完好。部署前清理：可用内存 2.7 → 3.7 GB。
+
+**部署验证 v0.2.46（2026-11-14 20:25 本地，CI release）**：
+- 两次重连（Mac 重启 12:25:38Z、Windows 热重启 12:25:54Z）结果一致：
+  - Mac 打出一次 "lan probe succeeded"、一条 "path lan"；
+  - Windows 只有一条入站 LAN，没有自行探测，也没有出现第二条 LAN 会话。
+- 窗口内 "path overlay" 只有 3 条（v0.2.45 上线窗口是 42 条），没有出现半开的 overlay 抖动。
+- 受保护进程 3/3 完好；部署前清理：可用内存 3.2 → 3.6 GB。
+
+**未处理（评估后不改）**：
+- netprofm svchost 内存泄漏：属于系统服务，不在生产机上动。
+- daemon 改从 SSD 运行：v0.2.42 的 VirtualLock 锁定映像已经缓解冷页问题，跳过。
+- Windows 偶发卡死（10053 和自动重连在同一毫秒）：其中的拨号竞态已由 §117 的 single-flight 和 settled 等待覆盖。之后若再出现，先查 `/api/input/trace` 和 `lan probe` 日志。

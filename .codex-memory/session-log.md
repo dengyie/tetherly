@@ -1145,3 +1145,12 @@
 - 只读基线：两端 daemon 都已很省（Mac footprint 25.5 MB，Windows 私有 11.5 MB，空闲 CPU <1%）；瓶颈在 I/O：日志无界、写了两三份、带 ANSI；剪贴板每 800 ms 全量读一次再算 SHA-256。
 - 修复：新模块 `logsink`（16 MiB 滚动为 `.1`，日志跟随 `--data-dir`，仅终端才镜像 stdout/ANSI）；两条逐事件 INFO 降为 debug；`Clip::change_token`（NSPasteboard changeCount / GetClipboardSequenceNumber）+ `clip_read_needed` 跳过未变化的轮询。新增 10 个单测，全量 870 通过。
 - 已部署并验证：Windows 日志改为写用户目录的 `tetherly.log`；Mac 旧日志已滚动；Mac footprint 16 MB，Windows 私有 6.6 MB；受保护进程 3/3 完好。
+
+## 2026-11-14 v0.2.45–v0.2.46 LAN 提升 single-flight / input start 竞态 / 提升握手超时
+- 删除孤儿日志 `C:\Windows\System32\config\systemprofile\AppData\Local\tetherly\tetherly.log`（3.7 MB）。
+- v0.2.45：
+  - `InflightSet` 让每个 peer 同时只做一次 LAN 提升；id 较小的一端先提升，较大的一端退避 1.5 s；探测循环每轮检查 `peer_on_overlay`。
+  - `open_input_settled` 修复 phase5 偶发失败：CAS 失败时等待在途拨号，并上报真实的 `channel_open`。
+- 上线时观察到：Mac 新、Windows 旧的混合版本窗口内，提升握手半开，卡满 20 s，约 19 s 没有可用链路。
+- v0.2.46：`dial_lan_promotion` 握手超时改为 3 s。
+- 已部署并验证：两次重连都是单次提升、单条 LAN；path overlay 从 42 条降到 3 条；受保护进程 3/3 完好。DEVELOPMENT §117。

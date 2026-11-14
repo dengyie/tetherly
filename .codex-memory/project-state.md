@@ -480,3 +480,6 @@
 - `ui/index.html`, `tests/phase1.rs`, `tests/phase2.rs`, `tests/phase4.rs`, `tests/phase5.rs`
 - GitHub: `dengyie/tetherly`
 - Vault: `Note/Project/tetherly/tetherly 开发文档.md`
+
+## 2026-11-14 v0.2.45–v0.2.46
+- LAN 提升 single-flight + id 先后 + 3 s 提升握手；input start 等待在途拨号。已部署并验证（当前生产 v0.2.46）。
