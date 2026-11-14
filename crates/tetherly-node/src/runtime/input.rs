@@ -2130,7 +2130,7 @@ impl Node {
                 }
             }
         }
-        tracing::info!(park_x, park_y, "park warp before remote roaming");
+        tracing::debug!(park_x, park_y, "park warp before remote roaming");
         self.trace_input("park_warp", format!("({park_x},{park_y})"));
         crate::platform::warp_mouse_position(park_x, park_y);
         if !hide_first {
@@ -4055,7 +4055,7 @@ impl Node {
                 tetherly_core::InputKind::Move { x, y }
                     if *y == tetherly_core::SCREEN_UNITS && idx == 0 =>
                 {
-                    tracing::info!(
+                    tracing::debug!(
                         source,
                         rem_x = x,
                         seq = ev.seq,

@@ -6,8 +6,8 @@
 // window whenever the binary is launched by the autostart scheduled task or
 // Explorer — the TUI-equivalent of a stray black rectangle next to the tray
 // icon. `tetherly-cli` and the other CLI bins stay console-subsystem: they
-// are piping tools. The DualLogWriter still mirrors logs to the file (see
-// windows_daemon_console_quirk below for why stdout writes are harmless).
+// are piping tools. Logs go to the rotating `tetherly.log` (logsink); stdout
+// is mirrored only when it is a terminal.
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
@@ -15,39 +15,12 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::io::Write;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tetherly_node::{Node, NodeConfig, SystemSink};
 use tracing::{info, warn};
-
-#[derive(Clone)]
-struct DualLogWriter {
-    file: Option<Arc<std::sync::Mutex<std::fs::File>>>,
-}
-
-impl Write for DualLogWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let _ = std::io::stdout().write_all(buf);
-        if let Some(ref file) = self.file {
-            if let Ok(mut f) = file.lock() {
-                let _ = f.write_all(buf);
-            }
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let _ = std::io::stdout().flush();
-        if let Some(ref file) = self.file {
-            if let Ok(mut f) = file.lock() {
-                let _ = f.flush();
-            }
-        }
-        Ok(())
-    }
-}
 
 // ---- CLI surface (v0.1.64 / ADR-128) ----
 mod cli;
@@ -119,16 +92,32 @@ fn main() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let data_dir = tetherly_node::store::default_data_dir();
-    let _ = tetherly_node::store::ensure_dir(&data_dir);
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(data_dir.join("tetherly.log"))
-        .ok()
-        .map(|f| Arc::new(std::sync::Mutex::new(f)));
+    let args: Vec<String> = std::env::args().collect();
+    let effective_args = if args.len() <= 1 || (args.len() == 2 && args[1].starts_with("-psn_")) {
+        vec![args[0].clone(), "run".into()]
+    } else {
+        args
+    };
 
-    let dual_writer = DualLogWriter { file: log_file };
+    let cli = Cli::parse_from(effective_args);
+
+    // The log lives in the effective data dir: the Windows SYSTEM launcher
+    // passes --data-dir, and default_data_dir() under LocalSystem resolves
+    // to the hidden systemprofile tree (an unbounded 3.7 MB duplicate there,
+    // 2026-11-14).
+    let data_dir = cli
+        .data_dir
+        .clone()
+        .unwrap_or_else(tetherly_node::store::default_data_dir);
+    let _ = tetherly_node::store::ensure_dir(&data_dir);
+    let log_file = tetherly_node::logsink::RotatingFile::open(
+        &data_dir.join("tetherly.log"),
+        tetherly_node::logsink::LOG_FILE_CAP,
+    )
+    .ok();
+    let stdout_tty = std::io::stdout().is_terminal();
+    let mirror = tetherly_node::logsink::mirror_stdout(log_file.is_some(), stdout_tty);
+    let sink = tetherly_node::logsink::LogSink::new(log_file, mirror);
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -141,20 +130,13 @@ fn main() -> Result<()> {
                 // RUST_LOG still overrides for debugging.
                 .add_directive("mdns_sd=off".parse().unwrap()),
         )
-        .with_writer(move || dual_writer.clone())
+        // Colour codes only for a human terminal; the file stays greppable.
+        .with_ansi(stdout_tty)
+        .with_writer(move || sink.clone())
         .init();
     if std::env::var("TETHERLY_INSECURE_LOG").ok().as_deref() == Some("1") {
         tracing::warn!("TETHERLY_INSECURE_LOG=1 is set; debug profile only");
     }
-
-    let args: Vec<String> = std::env::args().collect();
-    let effective_args = if args.len() <= 1 || (args.len() == 2 && args[1].starts_with("-psn_")) {
-        vec![args[0].clone(), "run".into()]
-    } else {
-        args
-    };
-
-    let cli = Cli::parse_from(effective_args);
 
     #[cfg(target_os = "macos")]
     if matches!(&cli.cmd, Cmd::Run { .. }) {
