@@ -1113,3 +1113,12 @@
   - 用户运行 verify_crossing.py；
   - 排查 Windows 挂死：10053 关闭与 reconnect 并发，疑似锁顺序问题；
   - deploy.sh 在 restart 前先探 health。
+
+## 2026-11-14 v0.2.41
+- 分析剩余切换延迟：网络单向约 5 ms，可排除。23:08:15 → 23:08:22 约 7 s 的等待来自 Target reverse 栅栏（600 ms 未 armed dwell / pinned heartbeat，加 3 s 冷却）。
+- 修复：`REVERSE_HAND_OWNS_PX=64` 的本地手晋升。新增测试 local_hand_sweep_takes_ownership_and_fast_reverses、local_hand_bump_does_not_take_ownership。
+- 下一步：
+  - Windows 守护进程挂死根因（10053 断开与 reconnect 同毫秒）；
+  - deploy.sh 重启前加健康探测；
+  - 修复 m3_2 flake；
+  - 接管后 Windows 引擎越界还需约 185 ms，等待下一个 hook 事件。
