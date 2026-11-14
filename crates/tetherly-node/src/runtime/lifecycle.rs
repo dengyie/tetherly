@@ -1045,6 +1045,7 @@ impl Node {
             };
             initial_caps.push(format!("fileport={file_port}"));
             initial_caps.push(format!("inputport={input_port}"));
+            initial_caps.push(tetherly_core::input_units_cap());
 
             initial_caps.push("screencodecs=zstd,h264".to_string());
             initial_caps.push(format!("screenport={screen_port}"));

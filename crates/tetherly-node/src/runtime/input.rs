@@ -4265,6 +4265,13 @@ impl Node {
             .expect("active_input_tunnel")
             .as_ref()
             .map(|s| s.pre_arm_epoch);
+        // Fine-grid Move frames (TYPE_INPUT_MOVE_FINE) only reach peers that
+        // advertise `inputunits=<SCREEN_UNITS>`; older builds get the legacy
+        // 1000-unit frame. Unknown caps (not received yet) downgrade too —
+        // legacy is understood by every build. Re-probed at most once a
+        // second until the peer is seen to support it.
+        let mut fine_ok = node.peer_supports_fine_input(&peer_id);
+        let mut fine_probe_at = std::time::Instant::now();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -4275,7 +4282,16 @@ impl Node {
                     }
                     outbound = rx.recv() => {
                         match outbound {
-                            Some(frame) => {
+                            Some(mut frame) => {
+                                if frame.ty == tetherly_core::TYPE_INPUT_MOVE_FINE && !fine_ok {
+                                    if fine_probe_at.elapsed() >= std::time::Duration::from_secs(1) {
+                                        fine_probe_at = std::time::Instant::now();
+                                        fine_ok = node.peer_supports_fine_input(&peer_id);
+                                    }
+                                    if !fine_ok {
+                                        frame = tetherly_core::legacy_compat_frame(frame);
+                                    }
+                                }
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 if sess.send_bounded(frame).await.is_err() {
                                     tracing::warn!("input server: peer send failed; closing");
@@ -4730,6 +4746,18 @@ impl Node {
     /// Append one decision to the input-engine trace ring (drops the oldest
     /// past [`INPUT_TRACE_CAP`]). Cheap: one short lock, no allocation
     /// beyond the entry itself; callers are per-decision, never per-frame.
+    /// Whether `peer` advertised the fine input grid
+    /// (`inputunits=<SCREEN_UNITS>`) in its last CapsUpdate.
+    pub(crate) fn peer_supports_fine_input(&self, peer: &DeviceId) -> bool {
+        let want = tetherly_core::input_units_cap();
+        self.shared
+            .live
+            .lock()
+            .expect("live")
+            .get(peer)
+            .is_some_and(|live| live.caps.contains(&want))
+    }
+
     pub(crate) fn trace_input(&self, kind: &'static str, detail: impl Into<String>) {
         let entry = InputTraceEntry {
             ts_ms: self.shared.clock.unix_ms(),
@@ -7496,5 +7524,54 @@ mod attach_channel_tests {
             node.shared.input_out.lock().unwrap().is_none(),
             "stale outbound channel must be dropped before send_to, not after"
         );
+    }
+
+    /// v0.2.47: fine Move frames go only to peers advertising the fine
+    /// input grid; this node itself advertises it in every caps report.
+    #[tokio::test]
+    async fn fine_input_grid_is_advertised_and_gated_on_peer_caps() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("fine-units");
+        let cap = tetherly_core::input_units_cap();
+        assert!(
+            node.local_caps_report().caps.contains(&cap),
+            "local caps must advertise {cap}"
+        );
+
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("fine-units-peer");
+        let peer_id = other.identity().device_id().clone();
+        assert!(
+            !node.peer_supports_fine_input(&peer_id),
+            "unknown peer must get legacy frames"
+        );
+        let live = |caps: Vec<String>| crate::runtime::trust::LivePeer {
+            device_id: peer_id.clone(),
+            name: "peer".into(),
+            platform: "test".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            handshake_hash: [0u8; 32],
+            file_port: None,
+            input_port: Some(45719),
+            screen_port: None,
+            caps,
+            path: tetherly_core::PathKind::Lan,
+            rtt_ms: None,
+            last_seen_ms: 0,
+        };
+        node.shared
+            .live
+            .lock()
+            .unwrap()
+            .insert(peer_id.clone(), live(vec!["inputport=45719".into()]));
+        assert!(
+            !node.peer_supports_fine_input(&peer_id),
+            "peer without the cap (pre-v0.2.47) must get legacy frames"
+        );
+        node.shared
+            .live
+            .lock()
+            .unwrap()
+            .insert(peer_id.clone(), live(vec![cap.clone()]));
+        assert!(node.peer_supports_fine_input(&peer_id));
     }
 }

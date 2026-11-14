@@ -3649,12 +3649,13 @@ mod input_tests {
     fn units_map_to_full_absolute_range() {
         use super::units_to_abs;
         assert_eq!(units_to_abs(0), 0);
-        assert_eq!(units_to_abs(1000), 65_535);
-        assert_eq!(units_to_abs(500), 32_767);
+        let su = tetherly_core::SCREEN_UNITS;
+        assert_eq!(units_to_abs(su), 65_535);
+        assert_eq!(units_to_abs(su / 2), 32_767);
         assert_eq!(units_to_abs(-5), 0);
-        assert_eq!(units_to_abs(2000), 65_535);
+        assert_eq!(units_to_abs(su * 2), 65_535);
         let mut prev = -1;
-        for u in 0..=1000 {
+        for u in 0..=su {
             let abs = units_to_abs(u);
             assert!(abs >= prev);
             prev = abs;

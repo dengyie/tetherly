@@ -715,6 +715,7 @@ impl Node {
             let mut all_caps = feats.clone();
             all_caps.push(format!("fileport={}", self.file_port()));
             all_caps.push(format!("inputport={}", self.input_port()));
+            all_caps.push(tetherly_core::input_units_cap());
             all_caps.push(format!("screenport={}", self.screen_port()));
             all_caps.push("screencodecs=zstd,h264".to_string());
             (all_caps, feats)

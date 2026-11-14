@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use tetherly_core::{CursorSeat, InputKind, VK_LCONTROL, VK_LWIN};
+use tetherly_core::{CursorSeat, InputKind, SCREEN_UNITS, VK_LCONTROL, VK_LWIN};
 use tetherly_net::session::{dial_session, SessionConfig, HANDSHAKE_TIMEOUT};
 use tetherly_net::NetError;
 use tetherly_node::{Node, NodeConfig, OverlayConfig};
@@ -416,16 +416,18 @@ async fn m3_5_four_directional_edge_roaming() {
     assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Top));
     assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
 
-    // Wait for client to focus and receive cursor entry at remote bottom (y = 1000)
+    // Wait for client to focus and receive cursor entry at remote bottom (y = SCREEN_UNITS)
     let start = std::time::Instant::now();
     loop {
         let sink = client.input_sink_snapshot();
-        if client.input_seat() == Some(CursorSeat::Remote) && sink.cursor.1 >= 990 {
+        if client.input_seat() == Some(CursorSeat::Remote)
+            && sink.cursor.1 >= SCREEN_UNITS * 99 / 100
+        {
             break;
         }
         if start.elapsed() > Duration::from_secs(3) {
             panic!(
-                "client never focused or cursor did not land at y=1000: seat={:?}, sink={:?}",
+                "client never focused or cursor did not land at y=SCREEN_UNITS: seat={:?}, sink={:?}",
                 client.input_seat(),
                 sink
             );
@@ -434,12 +436,12 @@ async fn m3_5_four_directional_edge_roaming() {
     }
 
     // Deskflow semantics: the entry x is the proportional map of the exit x
-    // (local x=50 on a 100px screen -> 50*1000/99 = 505), NOT a stale
+    // (local x=50 on a 100px screen -> 50*10000/99 = 5051), NOT a stale
     // remembered position from the previous roaming session.
     {
         let sink = client.input_sink_snapshot();
         assert_eq!(
-            sink.cursor.0, 505,
+            sink.cursor.0, 5051,
             "entry x must be proportional to the local exit x"
         );
     }
@@ -494,16 +496,16 @@ async fn m3_6_left_edge_roaming() {
     assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Left));
     assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
 
-    // Wait for client to focus and receive cursor entry at remote right (x = 1000)
+    // Wait for client to focus and receive cursor entry at remote right (x = SCREEN_UNITS)
     let start = std::time::Instant::now();
     loop {
         let sink = client.input_sink_snapshot();
-        if client.input_seat() == Some(CursorSeat::Remote) && sink.cursor.0 == 1000 {
+        if client.input_seat() == Some(CursorSeat::Remote) && sink.cursor.0 == SCREEN_UNITS {
             break;
         }
         if start.elapsed() > Duration::from_secs(3) {
             panic!(
-                "client never focused or cursor did not land at x=1000: seat={:?}, sink={:?}",
+                "client never focused or cursor did not land at x=SCREEN_UNITS: seat={:?}, sink={:?}",
                 client.input_seat(),
                 sink
             );
@@ -937,7 +939,7 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     let start = std::time::Instant::now();
     loop {
         let sink = server.input_sink_snapshot();
-        if server.input_seat() == Some(CursorSeat::Remote) && sink.cursor.0 >= 500 {
+        if server.input_seat() == Some(CursorSeat::Remote) && sink.cursor.0 >= SCREEN_UNITS / 2 {
             break;
         }
         // 10s: this window spans the takeover response round-trip, the grace

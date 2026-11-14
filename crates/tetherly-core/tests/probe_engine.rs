@@ -27,10 +27,10 @@ fn probe_top_edge_crossing_entry_x() {
         match &ev.kind {
             InputKind::Enter => saw_enter = true,
             InputKind::Move { x, y } if saw_enter => {
-                println!("entry Move: x={x} y={y} (expect x≈198, y=1000)");
+                println!("entry Move: x={x} y={y} (expect x≈1985, y=SCREEN_UNITS)");
                 assert_eq!(*y, SCREEN_UNITS, "entry y must be bottom");
                 assert!(
-                    (*x - 198).abs() <= 1,
+                    (*x - 1985).abs() <= 10,
                     "entry x must be proportional, got {x}"
                 );
                 return;
@@ -141,9 +141,9 @@ fn clear_stale_remote_resets_seat_but_keeps_position() {
             _ => None,
         })
         .expect("fresh Enter+Move after stale-seat clear");
-    // norm(400) with rounding = round(400*1000/1511) = 265 — proportional
+    // norm(400) with rounding = round(400*10000/1511) = 2647 — proportional
     // to the NEW position, not a delta from the old roam.
-    assert_eq!(mv.0, 265, "entry rem must be proportional to fresh x");
+    assert_eq!(mv.0, 2647, "entry rem must be proportional to fresh x");
     assert_eq!(mv.1, SCREEN_UNITS);
 }
 
@@ -167,7 +167,7 @@ fn crossing_batch_carries_no_stale_frames() {
     let _ = srv.drain();
 
     // Simulate the return (Leave batch): push back down through the entry
-    // edge (rem_y returns to 1000 with dy > 4).
+    // edge (rem_y returns to SCREEN_UNITS with dy > 4).
     assert_eq!(srv.local_move_delta(400, 40, 0, 60), Some(ScreenEdge::Top));
     let leave_batch = srv.drain();
     assert!(leave_batch.iter().any(|ev| ev.kind == InputKind::Leave));
@@ -188,7 +188,7 @@ fn crossing_batch_carries_no_stale_frames() {
     match &batch[enter_idx + 1].kind {
         InputKind::Move { x, y } => {
             assert_eq!(*y, SCREEN_UNITS, "entry at bottom edge");
-            assert_eq!(*x, 204, "fresh proportional rem (norm(300) on 1470)");
+            assert_eq!(*x, 2042, "fresh proportional rem (norm(300) on 1470)");
         }
         other => panic!("expected Move, got {other:?}"),
     }

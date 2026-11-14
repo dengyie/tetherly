@@ -18,6 +18,7 @@ pub const TYPE_INPUT_BUTTON: u16 = 0x0404;
 pub const TYPE_INPUT_WHEEL: u16 = 0x0405;
 pub const TYPE_INPUT_KEY: u16 = 0x0406;
 pub const TYPE_INPUT_CLIP_HINT: u16 = 0x0407;
+pub const TYPE_INPUT_MOVE_FINE: u16 = 0x0408;
 
 pub const INPUT_MAGIC: [u8; 4] = *b"TIN1";
 pub const INPUT_PROTO: u8 = 1;
@@ -36,8 +37,17 @@ pub const KEY_UP: u8 = 0;
 pub const BUTTON_DOWN: u8 = 1;
 pub const BUTTON_UP: u8 = 0;
 
-/// Logical screen in tenths of a percent (0..=1000). Avoids float on the wire.
-pub const SCREEN_UNITS: i32 = 1000;
+/// Logical screen in hundredths of a percent (0..=10000). Avoids float on
+/// the wire. v0.2.47: raised from 1000 — one legacy unit spanned 1.47 pt on
+/// a 1470-wide Mac, so a steady hand landed as uneven 0/1/2 pt cursor steps
+/// (production stutter 2026-11-14). 10000 keeps every peer pixel addressable
+/// up to 10K-wide screens.
+pub const SCREEN_UNITS: i32 = 10_000;
+
+/// Resolution of the original `TYPE_INPUT_MOVE` frame. Peers that do not
+/// advertise [`input_units_cap`] only understand this grid; see
+/// [`legacy_compat_frame`].
+pub const LEGACY_SCREEN_UNITS: i32 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputKind {
@@ -110,7 +120,7 @@ impl InputEvent {
         match self.kind {
             InputKind::Enter => TYPE_INPUT_ENTER,
             InputKind::Leave => TYPE_INPUT_LEAVE,
-            InputKind::Move { .. } => TYPE_INPUT_MOVE,
+            InputKind::Move { .. } => TYPE_INPUT_MOVE_FINE,
             InputKind::Button { .. } => TYPE_INPUT_BUTTON,
             InputKind::Wheel { .. } => TYPE_INPUT_WHEEL,
             InputKind::Key { .. } => TYPE_INPUT_KEY,
@@ -164,12 +174,56 @@ impl InputEvent {
     }
 }
 
+/// Rescale a wire coordinate between grids, rounding to nearest.
+fn rescale_units(v: i32, from: i32, to: i32) -> i32 {
+    ((v.clamp(0, from) as i64 * to as i64 + from as i64 / 2) / from as i64) as i32
+}
+
+/// Downgrade a fine `TYPE_INPUT_MOVE_FINE` frame to the legacy 0..=1000
+/// `TYPE_INPUT_MOVE` for a peer that does not advertise
+/// [`input_units_cap`]. Every other frame passes through untouched.
+pub fn legacy_compat_frame(frame: InnerFrame) -> InnerFrame {
+    if frame.ty != TYPE_INPUT_MOVE_FINE {
+        return frame;
+    }
+    match decode_event(frame.ty, &frame.payload) {
+        Ok(InputEvent {
+            seq,
+            kind: InputKind::Move { x, y },
+        }) => {
+            let mut payload = frame.payload;
+            payload.truncate(13);
+            payload.extend_from_slice(
+                &rescale_units(x, SCREEN_UNITS, LEGACY_SCREEN_UNITS).to_be_bytes(),
+            );
+            payload.extend_from_slice(
+                &rescale_units(y, SCREEN_UNITS, LEGACY_SCREEN_UNITS).to_be_bytes(),
+            );
+            debug_assert_eq!(payload[5..13], seq.to_be_bytes());
+            InnerFrame {
+                ty: TYPE_INPUT_MOVE,
+                flags: frame.flags,
+                msg_id: frame.msg_id,
+                payload,
+            }
+        }
+        _ => frame,
+    }
+}
+
+/// Capability token a node advertises when it decodes
+/// `TYPE_INPUT_MOVE_FINE` (wire grid = [`SCREEN_UNITS`]).
+pub fn input_units_cap() -> String {
+    format!("inputunits={SCREEN_UNITS}")
+}
+
 pub fn is_input_type(ty: u16) -> bool {
     matches!(
         ty,
         TYPE_INPUT_ENTER
             | TYPE_INPUT_LEAVE
             | TYPE_INPUT_MOVE
+            | TYPE_INPUT_MOVE_FINE
             | TYPE_INPUT_BUTTON
             | TYPE_INPUT_WHEEL
             | TYPE_INPUT_KEY
@@ -212,16 +266,28 @@ fn decode_event(ty: u16, payload: &[u8]) -> Result<InputEvent, CoreError> {
             }
             InputKind::ClipHint
         }
-        TYPE_INPUT_MOVE => {
+        TYPE_INPUT_MOVE | TYPE_INPUT_MOVE_FINE => {
             if rest.len() != 8 {
                 return Err(CoreError::TruncatedFrame);
             }
             let x = i32::from_be_bytes(rest[0..4].try_into().unwrap());
             let y = i32::from_be_bytes(rest[4..8].try_into().unwrap());
-            if !(0..=SCREEN_UNITS).contains(&x) || !(0..=SCREEN_UNITS).contains(&y) {
+            let grid = if ty == TYPE_INPUT_MOVE {
+                LEGACY_SCREEN_UNITS
+            } else {
+                SCREEN_UNITS
+            };
+            if !(0..=grid).contains(&x) || !(0..=grid).contains(&y) {
                 return Err(CoreError::InputFrame);
             }
-            InputKind::Move { x, y }
+            if ty == TYPE_INPUT_MOVE {
+                InputKind::Move {
+                    x: rescale_units(x, LEGACY_SCREEN_UNITS, SCREEN_UNITS),
+                    y: rescale_units(y, LEGACY_SCREEN_UNITS, SCREEN_UNITS),
+                }
+            } else {
+                InputKind::Move { x, y }
+            }
         }
         TYPE_INPUT_BUTTON => {
             if rest.len() != 2 {
@@ -945,7 +1011,7 @@ impl InputServer {
             let next_rem_x = (self.rem_x + delta_x).clamp(0, SCREEN_UNITS);
             let next_rem_y = (self.rem_y + delta_y).clamp(0, SCREEN_UNITS);
 
-            const REMOTE_INTERIOR_HYSTERESIS: i32 = 20;
+            const REMOTE_INTERIOR_HYSTERESIS: i32 = SCREEN_UNITS / 50;
             let is_interior = match crossed_edge {
                 ScreenEdge::Top => next_rem_y < SCREEN_UNITS - REMOTE_INTERIOR_HYSTERESIS,
                 ScreenEdge::Bottom => next_rem_y > REMOTE_INTERIOR_HYSTERESIS,
@@ -1474,7 +1540,7 @@ impl<S: InputSink> InputClient<S> {
                             ScreenEdge::Left
                         }
                     });
-                    const INTERIOR_HYSTERESIS: i32 = 20;
+                    const INTERIOR_HYSTERESIS: i32 = SCREEN_UNITS / 50;
                     let (is_interior, leaving) = match edge {
                         ScreenEdge::Left => (x > INTERIOR_HYSTERESIS, x <= 0 && self.interior),
                         ScreenEdge::Right => (
@@ -1635,10 +1701,19 @@ mod tests {
             }
             if cli.focused() {
                 seq = seq.saturating_add(1);
-                let _ = cli.apply(InputEvent::move_to(seq, 40, 400)).unwrap();
+                let _ = cli
+                    .apply(InputEvent::move_to(
+                        seq,
+                        SCREEN_UNITS / 25,
+                        SCREEN_UNITS * 2 / 5,
+                    ))
+                    .unwrap();
                 srv.note_seq(seq);
                 seq = seq.saturating_add(1);
-                if let Some(leave) = cli.apply(InputEvent::move_to(seq, 0, 400)).unwrap() {
+                if let Some(leave) = cli
+                    .apply(InputEvent::move_to(seq, 0, SCREEN_UNITS * 2 / 5))
+                    .unwrap()
+                {
                     srv.note_seq(leave.seq);
                     srv.on_remote_leave();
                     let _ = cli.apply(leave).unwrap();
@@ -1846,9 +1921,10 @@ mod tests {
         assert_eq!(srv.remote_pos(), before);
         assert_eq!(srv.seat(), CursorSeat::Remote);
 
-        // Sub-unit delta: 1 px on a 1920 px screen is 0.52 units — the first
-        // event carries the fraction without moving, the second crosses the
-        // unit boundary and pushes exactly one Move.
+        // Sub-unit delta: on a (synthetic) 19 200 px wide peer, 1 px is 0.52
+        // units — the first event carries the fraction without moving, the
+        // second crosses the unit boundary and pushes exactly one Move.
+        srv.set_remote_screen(Some((19_200, 1080)));
         assert_eq!(srv.local_move_delta(961, 540, 1, 0), None);
         assert!(
             srv.drain().is_empty(),
@@ -1895,29 +1971,24 @@ mod tests {
 
     #[test]
     fn four_directional_edge_crossing_and_round_trip() {
+        const H: i32 = SCREEN_UNITS / 2;
         let edges = [
-            (ScreenEdge::Right, (201, 50), (0, 500), (500, 500), (0, 500)),
+            (ScreenEdge::Right, (201, 50), (0, H), (H, H), (0, H)),
             (
                 ScreenEdge::Left,
                 (0, 50),
-                (SCREEN_UNITS, 500),
-                (500, 500),
-                (SCREEN_UNITS, 500),
+                (SCREEN_UNITS, H),
+                (H, H),
+                (SCREEN_UNITS, H),
             ),
             (
                 ScreenEdge::Top,
                 (100, 0),
-                (500, SCREEN_UNITS),
-                (500, 500),
-                (500, SCREEN_UNITS),
+                (H, SCREEN_UNITS),
+                (H, H),
+                (H, SCREEN_UNITS),
             ),
-            (
-                ScreenEdge::Bottom,
-                (100, 101),
-                (500, 0),
-                (500, 500),
-                (500, 0),
-            ),
+            (ScreenEdge::Bottom, (100, 101), (H, 0), (H, H), (H, 0)),
         ];
 
         for (edge, trigger_pos, expected_entry, interior_pos, leave_pos) in edges {
@@ -1988,7 +2059,7 @@ mod tests {
         assert_eq!(
             events[1].kind,
             InputKind::Move {
-                x: 500,
+                x: 5003,
                 y: SCREEN_UNITS
             }
         );
@@ -2206,7 +2277,7 @@ mod tests {
             Some(ScreenEdge::Bottom)
         );
         let diag = srv.last_return_diag().expect("return diag");
-        assert_eq!(diag.peak_depth, 100);
+        assert_eq!(diag.peak_depth, SCREEN_UNITS / 10);
         assert_eq!(diag.required_push, InputServer::FAR_PUSH_RETURN_PX);
         assert!(diag.push >= 50 && diag.push <= 60, "push={}", diag.push);
         assert!(diag.elapsed_ms < 1000);
@@ -2272,19 +2343,22 @@ mod tests {
         );
         srv.drain();
         let (rx0, ry0) = srv.remote_pos();
-        // 147 px = 10% of the remote width = 100 units.
+        // 147 px = 10% of the remote width = SCREEN_UNITS / 10.
         assert_eq!(srv.local_move_delta(960, 540, 147, 0), None);
-        // 478 px = 50% of the remote height = 500 units.
+        // 478 px = 50% of the remote height = SCREEN_UNITS / 2.
         assert_eq!(srv.local_move_delta(960, 540, 0, 478), None);
         let (rx1, ry1) = srv.remote_pos();
-        assert_eq!((rx1 - rx0, ry1 - ry0), (100, 500));
+        assert_eq!(
+            (rx1 - rx0, ry1 - ry0),
+            (SCREEN_UNITS / 10, SCREEN_UNITS / 2)
+        );
 
         // Clearing the peer screen falls back to the local normalization
         // (192 px = 10% of the local width).
         srv.set_remote_screen(None);
         assert_eq!(srv.local_move_delta(960, 540, 192, 0), None);
         let (rx2, _) = srv.remote_pos();
-        assert_eq!(rx2 - rx1, 100);
+        assert_eq!(rx2 - rx1, SCREEN_UNITS / 10);
     }
 
     /// v0.2.32: `remote_speed_percent` scales the normalized remote delta
@@ -2303,7 +2377,7 @@ mod tests {
         let (rx0, _) = srv.remote_pos();
         assert_eq!(srv.local_move_delta(500, 500, 100, 0), None);
         let (rx1, _) = srv.remote_pos();
-        assert_eq!(rx1 - rx0, 150);
+        assert_eq!(rx1 - rx0, SCREEN_UNITS * 15 / 100);
         // 0 is not a valid speed: it clamps to the minimum, never freezes.
         srv.set_remote_speed_percent(0);
         assert_eq!(srv.local_move_delta(500, 500, 100, 0), None);
@@ -2323,7 +2397,7 @@ mod tests {
         let events = srv.drain();
         assert_eq!(events[0].kind, InputKind::Enter);
         match events[1].kind {
-            InputKind::Move { x, y } => assert_eq!((x, y), (250, SCREEN_UNITS)),
+            InputKind::Move { x, y } => assert_eq!((x, y), (2503, SCREEN_UNITS)),
             other => panic!("expected Move, got {other:?}"),
         }
 
@@ -2344,7 +2418,7 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Local);
         let (lx, ly) = srv.local_pos();
         assert_eq!(ly, 48, "band-safe dock (band_px=0 -> floor 48)");
-        // denorm(250) = 250 with round-to-nearest; the old truncating map
+        // denorm(2503) = 250 with round-to-nearest; the old truncating map
         // gave 249 and sheared every round trip.
         assert_eq!(lx, 250, "return x = denorm(rem_x)");
 
@@ -2353,9 +2427,9 @@ mod tests {
         assert_eq!(srv.local_move_delta(750, 0, 0, -10), Some(ScreenEdge::Top));
         let events = srv.drain();
         match events[1].kind {
-            // norm(750) = 751 with round-to-nearest (750*1000/999 = 750.75);
-            // the truncating map gave 750 and sheared round trips.
-            InputKind::Move { x, y } => assert_eq!((x, y), (751, SCREEN_UNITS)),
+            // norm(750) = 7508 with round-to-nearest (750*10000/999 =
+            // 7507.5); denorm maps it back to exactly 750.
+            InputKind::Move { x, y } => assert_eq!((x, y), (7508, SCREEN_UNITS)),
             other => panic!("expected Move, got {other:?}"),
         }
 
@@ -2365,7 +2439,7 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Local);
         let (lx, ly) = srv.local_pos();
         assert_eq!(ly, 48, "force_local dock outside the band");
-        // norm(750) = 751 (rounded), denorm(751) = 750 (rounded): the round
+        // norm(750) = 7508 (rounded), denorm(7508) = 750 (rounded): the round
         // trip returns exactly to the origin — the truncating chain
         // (750 -> 749) walked a pixel per emergency return.
         assert_eq!(lx, 750, "force_local x = denorm(rem_x)");
@@ -2672,5 +2746,85 @@ mod tests {
             cli.sink().keys_down.is_empty(),
             "held keys must be flushed on peer gone"
         );
+    }
+
+    /// Map a wire Move coordinate to target pixels exactly like the
+    /// platform sinks do (round to nearest over `dim - 1`).
+    fn sink_px(u: i32, dim: i32) -> i32 {
+        ((u as i64 * (dim - 1) as i64 + SCREEN_UNITS as i64 / 2) / SCREEN_UNITS as i64) as i32
+    }
+
+    /// Production 2026-11-14: a Windows hand driving the 1470x956 Mac
+    /// stuttered horizontally. With 1000 wire units one unit spans 1.47 pt,
+    /// so a steady 1 px/event hand landed as uneven 0/1/2 pt cursor steps.
+    /// The wire resolution must carry every physical pixel of the peer.
+    #[test]
+    fn remote_motion_moves_narrow_peer_cursor_one_px_per_px() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+        srv.set_remote_screen(Some((1470, 956)));
+        assert_eq!(srv.local_move_delta(960, 0, 0, -4), Some(ScreenEdge::Top));
+        // Get well inside the peer before measuring.
+        assert_eq!(srv.local_move_delta(960, 540, 0, -200), None);
+        srv.drain();
+        let mut xs = Vec::new();
+        for _ in 0..400 {
+            assert_eq!(srv.local_move_delta(960, 540, 1, 0), None);
+            for ev in srv.drain() {
+                if let InputKind::Move { x, .. } = ev.kind {
+                    xs.push(sink_px(x, 1470));
+                }
+            }
+        }
+        assert_eq!(xs.len(), 400, "every 1 px hand event must emit a move");
+        let steps: Vec<i32> = xs.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            steps.iter().all(|&d| d == 1),
+            "cursor must advance exactly 1 px per hand px, got steps {:?}",
+            &steps[..steps.len().min(40)]
+        );
+    }
+
+    #[test]
+    fn move_frame_carries_full_wire_resolution() {
+        let ev = InputEvent::move_to(7, SCREEN_UNITS - 3, 1234);
+        let f = ev.to_frame().unwrap();
+        assert_eq!(f.ty, TYPE_INPUT_MOVE_FINE);
+        assert_eq!(InputEvent::from_frame(&f).unwrap(), ev);
+    }
+
+    /// Peers older than the fine wire only understand 0..=1000 moves: the
+    /// downgrade must round to that grid, and a legacy frame must decode
+    /// back onto the fine scale.
+    #[test]
+    fn legacy_move_frames_interoperate_with_fine_scale() {
+        let ev = InputEvent::move_to(9, SCREEN_UNITS / 2 + 4, SCREEN_UNITS);
+        let legacy = legacy_compat_frame(ev.to_frame().unwrap());
+        assert_eq!(legacy.ty, TYPE_INPUT_MOVE);
+        let rest = &legacy.payload[13..];
+        assert_eq!(i32::from_be_bytes(rest[0..4].try_into().unwrap()), 500);
+        assert_eq!(i32::from_be_bytes(rest[4..8].try_into().unwrap()), 1000);
+        let back = InputEvent::from_frame(&legacy).unwrap();
+        assert_eq!(back.seq, 9);
+        assert_eq!(
+            back.kind,
+            InputKind::Move {
+                x: SCREEN_UNITS / 2,
+                y: SCREEN_UNITS
+            }
+        );
+        // Non-move frames pass through untouched.
+        let key = InputEvent {
+            seq: 3,
+            kind: InputKind::Key {
+                code: 4,
+                down: true,
+                mods: 0,
+            },
+        }
+        .to_frame()
+        .unwrap();
+        assert_eq!(legacy_compat_frame(key.clone()), key);
+        assert_eq!(input_units_cap(), format!("inputunits={SCREEN_UNITS}"));
     }
 }
