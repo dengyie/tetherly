@@ -10567,7 +10567,14 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     while !actions_path.exists() || !policy_path.exists() {
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
-            "actions.json/action_policy.json must be persisted within 5s"
+            "actions.json/action_policy.json must be persisted within 5s \
+             (actions.json exists={}, action_policy.json exists={}, dir={:?}, entries={:?})",
+            actions_path.exists(),
+            policy_path.exists(),
+            g2.path(),
+            std::fs::read_dir(g2.path()).map(|rd| rd
+                .filter_map(|e| e.ok().map(|e| e.file_name()))
+                .collect::<Vec<_>>())
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
