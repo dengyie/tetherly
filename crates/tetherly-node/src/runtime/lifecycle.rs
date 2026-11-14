@@ -1736,11 +1736,8 @@ impl Node {
                                     {
                                         let _ = stream.set_nodelay(true);
                                         info!(peer = %peer_cloned, %target_addr, "lan probe succeeded; promoting from overlay to direct lan");
-                                        let mut cfg = node.session_config_inner(true);
-                                        cfg.pin = None;
-                                        if let Ok(sess) =
-                                            tetherly_net::dial_session(stream, target_addr, &cfg)
-                                                .await
+                                        if let Some(sess) =
+                                            node.dial_lan_promotion(stream, target_addr).await
                                         {
                                             node.attach(sess).await;
                                             if node.input_channel_open().await {
@@ -1896,6 +1893,24 @@ impl Node {
             .is_some_and(|p| p.path == PathKind::Overlay)
     }
 
+    /// Handshake for an overlay→LAN promotion on an already-connected probe
+    /// stream. `None` on failure; the overlay session stays in place.
+    /// Bounded by the reconnect timeout rather than the 20 s session
+    /// handshake timeout: a half-open promotion otherwise leaves the peer on
+    /// a dead LAN path (dropping our overlay reconnects) for 20 s.
+    async fn dial_lan_promotion(
+        &self,
+        stream: tokio::net::TcpStream,
+        target_addr: SocketAddr,
+    ) -> Option<ActiveSession> {
+        let mut cfg = self.session_config_inner(true);
+        cfg.pin = None;
+        cfg.handshake_timeout = super::RECONNECT_CONNECT_TIMEOUT;
+        tetherly_net::dial_session(stream, target_addr, &cfg)
+            .await
+            .ok()
+    }
+
     pub fn control_port(&self) -> u16 {
         self.shared.bound_control.load(Ordering::SeqCst)
     }
@@ -2041,6 +2056,35 @@ fn cleanup_old_binaries_in(parent: &std::path::Path, stem: &str, cutoff: std::ti
 
 #[cfg(test)]
 mod tests {
+    // Production 2026-11-14: a promotion handshake went half-open (the peer
+    // attached the LAN session, ours never completed) and sat on the 20 s
+    // session HANDSHAKE_TIMEOUT. Meanwhile the peer kept the dead LAN path
+    // and dropped every overlay reconnect, and the single-flight guard
+    // blocked a retry. The promotion handshake must give up quickly.
+    #[tokio::test]
+    async fn lan_promotion_dial_gives_up_on_silent_peer() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("promo-silent");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hold = tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            drop(s);
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let started = std::time::Instant::now();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            node.dial_lan_promotion(stream, addr),
+        )
+        .await
+        .expect("promotion handshake must be bounded well below 20 s");
+        assert!(res.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        hold.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_restart_rejects_replacement_outside_staging() {
         let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("restart-gate");
