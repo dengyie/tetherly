@@ -43,6 +43,7 @@ mod api_focus;
 mod api_handoff;
 mod api_input;
 mod api_locate;
+mod api_log;
 mod api_media;
 mod api_messages;
 mod api_mic;
@@ -1179,6 +1180,13 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             api_screen_tile::post_screen_tile_motion_reset(method, query_str, body, node).await
         }
         ("GET", "/api/input") => api_input::get_input(method, query_str, body, node).await,
+        ("GET", "/api/log") | ("GET", "/api/log/status") => {
+            api_log::get_log(method, query_str, body, node).await
+        }
+        ("GET", "/api/log/tail") => api_log::get_log_tail(method, query_str, body, node).await,
+        ("POST", "/api/log/level") | ("PUT", "/api/log/level") => {
+            api_log::post_log_level(method, query_str, body, node).await
+        }
         ("GET", "/api/input/trace") => {
             api_input::get_input_trace(method, query_str, body, node).await
         }
@@ -1842,6 +1850,26 @@ mod tests {
         let clock = Arc::new(ManualClock::new(5000));
         let node = Node::start_with_clock(cfg, clock).unwrap();
         (node, dir)
+    }
+
+    /// v0.2.49 log API: status is always served; tail and level answer 503
+    /// (not a panic, not a 404) when the process never installed file
+    /// logging — the library/test case. The live paths are covered by
+    /// `logging::tests`.
+    #[tokio::test]
+    async fn log_api_routes_are_wired_and_degrade_without_file_logging() {
+        let (node, _dir) = temp_test_node("log_api");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let (code, body) = loopback_get(port, "/api/log").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["cap_bytes"], crate::logsink::LOG_FILE_CAP);
+        let (code, _) = loopback_get(port, "/api/log/tail?lines=5").await.unwrap();
+        assert_eq!(code, 503);
+        let (code, _) = loopback_post(port, "/api/log/level", br#"{"filter":"debug"}"#)
+            .await
+            .unwrap();
+        assert_eq!(code, 503);
     }
 
     #[tokio::test]

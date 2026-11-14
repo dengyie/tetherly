@@ -1406,10 +1406,6 @@ pub(crate) mod system_cursor {
             total = SYSTEM_CURSOR_IDS.len(),
             "system_cursor: hidden"
         );
-        eprintln!(
-            "[cursor] hidden: replaced {replaced}/{} system cursors",
-            SYSTEM_CURSOR_IDS.len()
-        );
     }
 
     /// Reload the user's cursor scheme from the registry (undoes `hide`).
@@ -1431,7 +1427,6 @@ pub(crate) mod system_cursor {
             tracing::warn!("system_cursor: SystemParametersInfoW(SPI_SETCURSORS) failed");
         } else {
             tracing::info!(force, "system_cursor: restored");
-            eprintln!("[cursor] restored (force={force})");
         }
     }
 }

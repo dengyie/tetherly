@@ -363,9 +363,6 @@ impl Node {
         // branch while the user's roaming is alive.
         if self.active_tunnel_role() == Some(InputTunnelRole::Controller) {
             info!(peer = %peer_str, "input tunnel takeover: releasing local controller session");
-            eprintln!(
-                "[takeover] demote: releasing local controller session toward peer={peer_str}"
-            );
             let _ = self.input_stop().await;
             self.record_audit(
                 AuditCategory::Config,
@@ -589,18 +586,10 @@ impl Node {
                 .expect("active_input_tunnel");
             let Some(session) = guard.as_mut() else {
                 tracing::info!(session_id = %frame.session_id, peer = %peer_str, "input tunnel resp: no armed session; dropping stale resp");
-                eprintln!(
-                    "[takeover] resp: NO ARMED SESSION, dropped session={}",
-                    frame.session_id
-                );
                 return;
             };
             if session.session_id != frame.session_id {
                 tracing::info!(session_id = %frame.session_id, armed = %session.session_id, "input tunnel resp: session id mismatch; dropping stale resp");
-                eprintln!(
-                    "[takeover] resp: SESSION ID MISMATCH dropped={} armed={}",
-                    frame.session_id, session.session_id
-                );
                 return;
             }
             if frame.accepted {
@@ -613,9 +602,10 @@ impl Node {
         }
 
         if frame.accepted {
-            eprintln!(
-                "[takeover] resp: ACCEPTED session={} peer={peer_str}",
-                frame.session_id
+            info!(
+                session_id = %frame.session_id,
+                peer = %peer_str,
+                "input tunnel resp: accepted"
             );
             // v0.2.32: the accept carries the target's screen size; hand it
             // to the engine so remote deltas normalize against the PEER
@@ -727,11 +717,21 @@ impl Node {
                 .active_input_tunnel
                 .lock()
                 .expect("active_input_tunnel");
-            if let Some(session) = guard.take() {
+            // Match BEFORE taking: a stale/foreign release (other peer,
+            // other session) must leave the live grant untouched.
+            let matches = guard.as_ref().is_some_and(|session| {
                 session.session_id == frame.session_id || session.peer_id == peer_str
-            } else {
-                false
+            });
+            if matches {
+                guard.take();
+            } else if guard.is_some() {
+                tracing::info!(
+                    peer = %peer_str,
+                    session_id = %frame.session_id,
+                    "ignoring input tunnel release for a session that is not ours"
+                );
             }
+            matches
         };
 
         if was_active {
@@ -1508,11 +1508,9 @@ impl Node {
         *self.shared.input_out.lock().expect("input_out") = None;
         let inner = req_frame.to_frame()?;
         tracing::info!(session_id = %session_id, peer = %peer_str, "input tunnel attach: controller session pre-armed");
-        eprintln!("[takeover] attach: pre-armed session={session_id} peer={peer_str}");
         if let Err(e) = self.send_to(&peer_id, inner).await {
             // Roll the pre-arm back — no request on the wire, no grant.
             warn!(session_id = %session_id, peer = %peer_str, %e, "input tunnel attach: send failed; pre-arm rolled back");
-            eprintln!("[takeover] attach: SEND FAILED, rolled back session={session_id} err={e}");
             let mut guard = self
                 .shared
                 .active_input_tunnel
@@ -1685,9 +1683,12 @@ impl Node {
             guard.take()
         };
         let session = session?;
-        eprintln!(
-            "[takeover] release: tunnel grant released reason={reason} role={:?} peer={}",
-            session.role, session.peer_id
+        info!(
+            reason,
+            role = ?session.role,
+            peer = %session.peer_id,
+            session_id = %session.session_id,
+            "input tunnel grant released"
         );
         self.trace_input(
             "release",
@@ -3198,6 +3199,23 @@ impl Node {
             _ => tetherly_core::gesture_map::GestureId::Swipe4Right,
         };
 
+        // Lock order: every snapshot that takes another lock is read BEFORE
+        // `input_engine`. `input_tunnel_status` holds `active_input_tunnel`
+        // and then locks the engine, so reading the tunnel role under the
+        // engine lock was an ABBA deadlock that froze the hook thread
+        // (v0.2.49 review).
+        let session_receiving = self
+            .shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .as_ref()
+            .is_some_and(|s| s.role.is_receiving());
+        let tunnel_role = self.active_tunnel_role();
+        let tunnel_target = tunnel_role == Some(tetherly_core::InputTunnelRole::Target);
+        let target_platform = self.input_peer_platform().unwrap_or_default();
+        let map = self.gesture_map();
+
         let events = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             // Seat Remote alone is not enough: the CONTROLLED side is also in
@@ -3210,15 +3228,6 @@ impl Node {
             // roaming. Slot presence (tunnel/remote_session) is NOT the
             // source of truth here: a bare-channel controller (edge-crossing
             // roam without a tunnel session) owns no slot but still controls.
-            let session_receiving = self
-                .shared
-                .remote_session
-                .lock()
-                .expect("remote_session")
-                .as_ref()
-                .is_some_and(|s| s.role.is_receiving());
-            let tunnel_target =
-                self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target);
             if server.seat() != CursorSeat::Remote || session_receiving || tunnel_target {
                 let now = self.shared.clock.unix_ms();
                 let last = self
@@ -3233,14 +3242,8 @@ impl Node {
                         direction,
                         gesture = gesture.as_str(),
                         seat = ?server.seat(),
-                        tunnel_role = ?self.active_tunnel_role(),
-                        session_receiving = self
-                            .shared
-                            .remote_session
-                            .lock()
-                            .expect("remote_session")
-                            .as_ref()
-                            .is_some_and(|s| s.role.is_receiving()),
+                        tunnel_role = ?tunnel_role,
+                        session_receiving,
                         "four-finger swipe ignored: this node is the controlled side"
                     );
                 }
@@ -3252,8 +3255,6 @@ impl Node {
             // would turn Win+Tab into a browser tab switch). Empty result =
             // the gesture is mapped to `none`; that is a configured no-op,
             // not an error.
-            let target_platform = self.input_peer_platform().unwrap_or_default();
-            let map = self.gesture_map();
             let action = map.action_for(gesture);
             let steps = map.sequence_for(gesture, &target_platform);
             let base = server.next_seq();
@@ -4785,6 +4786,16 @@ impl Node {
             kind: kind.to_string(),
             detail: detail.into(),
         };
+        // Mirror to the file log at debug under its own target: off by
+        // default, switched on live with
+        // `POST /api/log/level {"filter":"…,tetherly::input_trace=debug","revert_after_secs":600}`
+        // so a field repro survives beyond the 64-entry in-memory ring.
+        tracing::debug!(
+            target: "tetherly::input_trace",
+            kind = entry.kind.as_str(),
+            detail = %entry.detail,
+            "input trace"
+        );
         let mut ring = self.shared.input_trace.lock().expect("input_trace");
         while ring.len() >= INPUT_TRACE_CAP {
             ring.pop_front();
@@ -7375,6 +7386,47 @@ mod tests {
         assert!(node.active_tunnel_role().is_none());
     }
 
+    /// v0.2.49 review: a release from a DIFFERENT peer for a DIFFERENT
+    /// session must not wipe the live grant. The old code `take()`-ed the
+    /// slot before checking, silently clearing it with no seat event, UI
+    /// event or audit row.
+    #[tokio::test]
+    async fn foreign_tunnel_release_keeps_the_live_grant() {
+        let (node, _dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("foreign-release");
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_live".to_string(),
+            peer_id: "tdev_aaaaaaaaaaaaaaaa".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        let stranger = DeviceId::parse("tdev_bbbbbbbbbbbbbbbb").unwrap();
+        node.receive_input_tunnel_release(
+            &stranger,
+            InputTunnelReleaseFrame {
+                session_id: "tun_old".to_string(),
+                exit_edge: None,
+                return_x: None,
+                return_y: None,
+                reason: "stale".to_string(),
+                timestamp_ms: 0,
+            },
+        )
+        .await;
+        assert_eq!(
+            node.active_tunnel_role(),
+            Some(InputTunnelRole::Controller),
+            "a foreign release must leave the live grant in place"
+        );
+    }
+
     /// v0.2.48: the watcher reconcile rescues a stranded Remote seat whose
     /// Controller grant outlived its channel with `release_grant = true`.
     /// `rescue_seat_to_local` held the engine lock across the release,
@@ -7382,6 +7434,31 @@ mod tests {
     /// std Mutex relock that froze the watcher (and every input path
     /// behind the engine lock). It must also warp home before the release
     /// restores the cursor, as the edge return does.
+    /// v0.2.49 review: `drive_gesture_swipe` took `input_engine` and then
+    /// `active_input_tunnel`, while `input_tunnel_status` (1s watcher, HTTP
+    /// status) takes them in the opposite order — an ABBA deadlock that
+    /// freezes the hook thread. The swipe path must read the tunnel slot
+    /// BEFORE it locks the engine, so a thread parked on the tunnel lock
+    /// never holds the engine.
+    #[test]
+    fn gesture_swipe_never_holds_engine_while_waiting_for_tunnel_lock() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("swipe-order");
+        let tunnel_guard = node.shared.active_input_tunnel.lock().unwrap();
+        let worker = node.clone_handle();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(worker.drive_gesture_swipe(1).is_ok());
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let engine_free = node.shared.input_engine.try_lock().is_ok();
+        drop(tunnel_guard);
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert!(
+            engine_free,
+            "swipe must not hold input_engine while blocked on active_input_tunnel"
+        );
+    }
+
     #[tokio::test]
     async fn reconcile_rescue_with_stale_controller_grant_releases_without_deadlock() {
         let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("rescue-release");

@@ -1426,25 +1426,7 @@ impl Node {
                     return;
                 }
             };
-            handle.block_on(async {
-                loop {
-                    if *stop.borrow() || *adv_rx.borrow() {
-                        break;
-                    }
-                    tokio::select! {
-                        _ = stop.changed() => {
-                            if *stop.borrow() {
-                                break;
-                            }
-                        }
-                        _ = adv_rx.changed() => {
-                            if *adv_rx.borrow() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
+            handle.block_on(hold_advertisement(&mut stop, &mut adv_rx));
         });
     }
 
@@ -1534,5 +1516,51 @@ impl Node {
         );
         self.attach(sess).await;
         Ok(())
+    }
+}
+
+/// Hold an mDNS registration until node shutdown or a re-advertise asks this
+/// one to stop. A dropped sender (a concurrent re-advertise overwrote
+/// `advertise_stop` without signalling) also ends the hold: `changed()` then
+/// errors immediately and the old loop spun a blocking thread at 100% CPU
+/// while keeping a stale record alive (v0.2.49 review).
+async fn hold_advertisement(stop: &mut watch::Receiver<bool>, adv_rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow() || *adv_rx.borrow() {
+            break;
+        }
+        tokio::select! {
+            r = stop.changed() => {
+                if r.is_err() || *stop.borrow() {
+                    break;
+                }
+            }
+            r = adv_rx.changed() => {
+                if r.is_err() || *adv_rx.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::watch;
+
+    #[tokio::test]
+    async fn advertisement_hold_ends_when_stop_sender_is_dropped() {
+        let (_shutdown_tx, mut stop) = watch::channel(false);
+        let (adv_tx, mut adv_rx) = watch::channel(false);
+        drop(adv_tx);
+        let ended = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::hold_advertisement(&mut stop, &mut adv_rx),
+        )
+        .await;
+        assert!(
+            ended.is_ok(),
+            "hold must end, not spin, once its stop sender is gone"
+        );
     }
 }

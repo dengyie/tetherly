@@ -110,30 +110,23 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(tetherly_node::store::default_data_dir);
     let _ = tetherly_node::store::ensure_dir(&data_dir);
-    let log_file = tetherly_node::logsink::RotatingFile::open(
-        &data_dir.join("tetherly.log"),
-        tetherly_node::logsink::LOG_FILE_CAP,
-    )
-    .ok();
     let stdout_tty = std::io::stdout().is_terminal();
-    let mirror = tetherly_node::logsink::mirror_stdout(log_file.is_some(), stdout_tty);
-    let sink = tetherly_node::logsink::LogSink::new(log_file, mirror);
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("tetherly=info".parse().unwrap())
-                // mdns-sd spams ERROR "Cannot find valid addrs for TYPE_SRV"
-                // on IPv6-only and TUN interfaces (sandbox-VPS soak logged it
-                // continuously); it is interface-enumeration noise, not a
-                // discovery failure — default it off so real errors surface.
-                // RUST_LOG still overrides for debugging.
-                .add_directive("mdns_sd=off".parse().unwrap()),
-        )
-        // Colour codes only for a human terminal; the file stays greppable.
-        .with_ansi(stdout_tty)
-        .with_writer(move || sink.clone())
-        .init();
+    // One tracing pipeline: rotating tetherly.log, live-reloadable filter
+    // (`POST /api/log/level`), panic hook. See `tetherly_node::logging`.
+    tetherly_node::logging::init(&data_dir, stdout_tty);
+    if matches!(&cli.cmd, Cmd::Run { .. }) {
+        tracing::info!(
+            version = env!("CARGO_PKG_VERSION"),
+            pid = std::process::id(),
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+            data_dir = %data_dir.display(),
+            filter = %tetherly_node::logging::control()
+                .map(|c| c.current())
+                .unwrap_or_default(),
+            "tetherly daemon starting"
+        );
+    }
     if std::env::var("TETHERLY_INSECURE_LOG").ok().as_deref() == Some("1") {
         tracing::warn!("TETHERLY_INSECURE_LOG=1 is set; debug profile only");
     }

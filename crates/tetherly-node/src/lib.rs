@@ -7,6 +7,7 @@ pub mod ancs;
 pub mod cred;
 pub mod events;
 pub mod lan;
+pub mod logging;
 pub mod logsink;
 pub mod platform;
 pub mod runtime;

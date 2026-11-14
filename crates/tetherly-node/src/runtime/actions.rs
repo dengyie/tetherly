@@ -720,13 +720,13 @@ impl Node {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let start_time = std::time::Instant::now();
-                let cmd_fut = tokio::process::Command::new(&target_action.command)
-                    .args(&target_action.args)
-                    .output();
-
                 let (success, exit_code, output_summary, error_message) =
-                    match tokio::time::timeout(Duration::from_secs(timeout_secs as u64), cmd_fut)
-                        .await
+                    match run_action_command(
+                        &target_action.command,
+                        &target_action.args,
+                        Duration::from_secs(timeout_secs as u64),
+                    )
+                    .await
                     {
                         Ok(Ok(output)) => {
                             let code = output.status.code();
@@ -853,5 +853,50 @@ impl Node {
             }
             cache.push_back(frame);
         }
+    }
+}
+
+/// Run an action command under its timeout. Without `kill_on_drop` a
+/// timed-out child kept running (as SYSTEM on Windows); dropping the
+/// timed-out `output()` future now kills it.
+async fn run_action_command(
+    command: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    let fut = tokio::process::Command::new(command)
+        .args(args)
+        .kill_on_drop(true)
+        .output();
+    tokio::time::timeout(timeout, fut).await
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    /// v0.2.49 review: the action timeout reported "timed out" but left the
+    /// child running (as SYSTEM on Windows) forever. Dropping the timed-out
+    /// future must kill the process.
+    #[tokio::test]
+    async fn timed_out_action_command_is_killed() {
+        let marker = std::env::temp_dir().join(format!(
+            "tetherly-action-kill-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let script = format!("sleep 2; touch '{}'", marker.display());
+        let res = super::run_action_command(
+            "sh",
+            &["-c".to_string(), script],
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        assert!(res.is_err(), "must time out");
+        tokio::time::sleep(std::time::Duration::from_millis(2800)).await;
+        let survived = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(!survived, "timed-out child kept running");
     }
 }

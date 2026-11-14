@@ -133,7 +133,7 @@ impl FileHub {
         now_ms: u64,
         resume_hint: Option<u64>,
     ) -> Result<IncomingTransfer, CoreError> {
-        if offer.transfer_id.is_empty() || offer.files.is_empty() {
+        if !is_safe_transfer_id(&offer.transfer_id) || offer.files.is_empty() {
             return Err(CoreError::UnknownTransfer);
         }
         self.prune(now_ms);
@@ -301,6 +301,16 @@ impl FileHub {
     }
 }
 
+/// A transfer id is spliced into inbox file names (`.{id}.part`,
+/// `.{id}.resume.json`), so it must never carry path syntax. Our own ids are
+/// `tr_<hex>`; anything outside `[A-Za-z0-9_-]{1,64}` is refused.
+pub fn is_safe_transfer_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +324,34 @@ mod tests {
                 sha256: "a".repeat(64),
             }],
         }
+    }
+
+    /// v0.2.49 review: `transfer_id` is spliced into inbox paths
+    /// (`.{id}.part`, `.{id}.resume.json`), so a peer-chosen id with path
+    /// separators or `..` escaped the inbox as SYSTEM on Windows. Only
+    /// `[A-Za-z0-9_-]{1,64}` is accepted.
+    #[test]
+    fn transfer_id_outside_safe_charset_is_rejected() {
+        let src = DeviceId::from_id_pk(&[4u8; 32]);
+        for bad in [
+            "/../../../../ProgramData/x",
+            "..",
+            "a/b",
+            "a\\b",
+            "a:b",
+            "a.b",
+            "x y",
+            &"a".repeat(65),
+        ] {
+            let mut hub = FileHub::default();
+            let mut o = offer("a.txt");
+            o.transfer_id = bad.to_string();
+            assert!(hub.offer(src.clone(), o, 1).is_err(), "accepted {bad:?}");
+        }
+        let mut hub = FileHub::default();
+        let mut o = offer("a.txt");
+        o.transfer_id = "tr_0123abcdEF-x".into();
+        hub.offer(src, o, 1).unwrap();
     }
 
     #[test]
