@@ -1,0 +1,22 @@
+{
+  "name": "tetherly-client",
+  "private": true,
+  "version": "0.2.58",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5",
+    "@testing-library/svelte": "^5.4.2",
+    "jsdom": "^31.0.1",
+    "svelte": "^5",
+    "svelte-check": "^4.7.8",
+    "typescript": "^5",
+    "vite": "^6",
+    "vitest": "^5.1.0"
+  }
+}
