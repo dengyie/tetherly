@@ -1544,6 +1544,15 @@ async fn clip_sync_and_send_via_live_node_api_reaches_peers() {
     let ui_port = host.spawn_ui().await.unwrap();
     let peer_id = peer.identity().device_id().clone();
 
+    // Manual mode: the 800 ms auto-sync poller must not race the explicit
+    // /api/clip/sync calls below — once the poller broadcasts a text, the
+    // echo suppression turns the explicit sync's sent_peers into 0 and the
+    // assertions flake (production 2026-11-16 Windows CI).
+    let mut manual_mode = host.clipboard_policy();
+    manual_mode.mode = tetherly_core::ClipSyncMode::Manual;
+    host.set_clipboard_policy(manual_mode.clone()).unwrap();
+    peer.set_clipboard_policy(manual_mode).unwrap();
+
     // 1. Initial GET /api/clip returns has_text: false when clipboard is empty
     let (code, body) = tetherly_node::loopback_get(ui_port, "/api/clip")
         .await
