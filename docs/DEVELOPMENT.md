@@ -9057,3 +9057,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - 受保护进程 3/3，pid 未变。
 - 两端都没有新增 WARN。
 - 体感验证待用户反馈。复核时看 Windows 日志：`owns it` 之后应紧接着出现 `local-owner fast push`，`pinned heartbeat completed the dwell` 应当很少出现。
+
+## 126. 独立控制客户端：调研与开发文档（设计阶段）
+
+- 调研了 Deskflow、Input Leap/Barrier、PowerToys MWB、RustDesk、LocalSend、KDE Connect/GSConnect、Tailscale 的 GUI 架构，结论写进 [ADR-139](adr/139-control-client-architecture.md)。
+- 完整开发文档在 [CONTROL_CLIENT_DEVELOPMENT.md](CONTROL_CLIENT_DEVELOPMENT.md)，内容包括：
+  - 现状盘点；
+  - `/api/v1` 契约，以及快照加增量的事件流；
+  - Tauri 2 + Svelte 5 桌面壳和 daemon 托管的 SPA；
+  - 信息架构：概览、设备、布局、传输、动态、设置、诊断；
+  - 多端适配；
+  - M0–M5 迁移计划、测试策略和风险。
+- 本节只涉及文档，没有代码改动；实施从 M0 开始。

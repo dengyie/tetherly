@@ -507,3 +507,5 @@
 - v0.2.50：tail 的 level 过滤会剥离 ANSI（v0.2.44 之前的彩色旧行），续行继承所属记录的级别。已部署：两端 0.2.50、path lan、受保护进程 3/3。当前生产版本为 v0.2.50。
 
 - v0.2.51 (2026-11-15): P0-2 fixed — superseded control sessions now close (keepalive holds WeakSender; replaced sender dropped after 2s grace); exit cleanup ownership by channel identity (same_channel) not addr. Verified prod: Mac↔Win 45717 connections 2→1. Next: P0-1 local API token auth (DEVELOPMENT.md §120/§121).
+
+- 2026-11-15: 控制客户端设计完成（ADR-139 + docs/CONTROL_CLIENT_DEVELOPMENT.md，DEVELOPMENT §126）：/api/v1 契约 + 快照/增量事件流 + Tauri2/Svelte5 托盘客户端 + daemon 托管 SPA；M0–M5 待实施。
