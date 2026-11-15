@@ -9180,3 +9180,18 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **测试契约修正**：SSE 测试 `v1_events_snapshot_replay_and_filters` 从期望 `invalidated` 改为 `transfers.changed`（新契约的直证）。
 - **验证**：cargo fmt 绿；clippy `--all-targets -- -D warnings` 原生 + windows-gnu 双 target 0 错；`cargo test --workspace` 全绿（含 tetherly-api 12、node lib 338）；vitest 16/16。
 - **边界**：四端点仅 GET 读；设置写（PATCH /settings）、传输动作（cancel/clear）、inbox 动作（delete/clear/open）留下一轮；activity 页继续等端点。
+
+## 132. 控制客户端 M2d：v1 写端点 + /next/ SPA 动作按钮（未发版，main 续）
+
+接 §131。M2d 目标：让 SPA 从"只读看板"升级为可操作面板——传输取消/清历史、收件箱打开/删除/清空、设置改名+自动接收开关，全部走 v1 契约。单提交 `f9fcf53`，CI 绿。
+
+- **契约层（tetherly-api）**：新增写请求类型 `SettingsPatch`（name/advertise/reconnect/auto_accept 全 optional，`deny_unknown_fields` 严格拒绝拼错字段，`is_empty()` 供 400 判定）与 `InboxOpenRequest { name }`（名字进 path，body 严格校验）。契约测试：空 patch 可解析、`{"nama":"x"}` 拒绝、open 载荷往返。TS 绑定重生成。
+- **v1 写端点（uihttp/v1.rs）**：
+  - `POST /api/v1/transfers/{id}/cancel` → `node.cancel_transfer()`（异步），`DELETE /api/v1/transfers` → `clear_terminal_transfers()`，均回全量 transfers 资源。
+  - `DELETE /api/v1/inbox/{name}` → `delete_inbox_file()`、`DELETE /api/v1/inbox` → `clear_inbox(None)`、`POST /api/v1/inbox/{name}/open` → `open_inbox_file()` 经 `spawn_blocking` + `node.opener()`，204 无体；body 空白视为缺省、非空须严格匹配 `InboxOpenRequest`。
+  - `PATCH /api/v1/settings` → 空 patch 400；name/advertise/reconnect 走 `update_config()`、auto_accept 走 `set_auto_accept_policy()`，回全量 settings。
+  - 路由分派链：device_action → transfer_action → inbox_open_action → inbox_item → allowed() 405/404 兜底；`allowed()` 补齐全部写方法的 Allow 表。
+- **错误码映射（core_error）**：`UnknownTransfer` → 404；`File(msg)` 含 "not found" → 404（照 legacy `/api/file/inbox` 既有判定）。测试先红（unknown cancel 得 500）后绿。
+- **client（Svelte 5）**：`Api` 层补 9 个写方法；Transfers 页接 取消（活跃项）/清空历史 按钮；Inbox 页接 打开（is_safe 才显）/删除/清空，均沿用 Devices 页 busyId+notice 模式；Settings 页改可写——节点名称输入+保存、自动接收开关点击翻转（结果经 settings.changed 事件回灌，本地仅持草稿）；App 导航加 收件箱/设置 两页并给三页传 `{api}`。svelte-check 0 错、vitest 16/16、build 绿（dist 进 git）。
+- **验证**：cargo fmt 绿；clippy `--all-targets -- -D warnings` 原生 + windows-gnu 双 target 0 错；`cargo test --workspace` 37 个测试段全绿（本地 phase1 曾两例 401 竞态 flake，复跑 ×1 全绿，与 §124 环境抖动判定同族）。
+- **边界**：inbox open 依赖 `OpenRefused` 场景时仍为 400/500 细分不足（低危）；activity 页数据源、Playwright e2e 留 M2e；legacy `/api/*` 冻结不动。

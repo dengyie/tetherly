@@ -1246,3 +1246,11 @@
 - 根因链条：host.clip().set_text() 只写 OS 剪贴板不动 hubs.clip.last_hash；800ms 自动同步 poller（spawn_clipboard_auto_sync → poll_clipboard_auto_sync）发现 change_token 变化后抢先广播（prepare_local 更新 last_hash）；显式 POST /api/clip/sync（send_clipboard_to → prepare_local）因 hash 未变返回 Ok(0)（echo 抑制）→ ==1 断言 flake。
 - 修复：测试开头把 host+peer 剪贴板策略切 Manual（can_send()=false，poller 直接退出），显式 sync 独占广播；peer 收到内容断言不变（权威判据）。本地 1.26s 绿，fmt/clippy 绿。
 - CI 43740506835（67239ed）盯守中。
+
+## 2026-11-16 M2d：v1 写端点 + SPA 动作（f9fcf53）
+- 契约：SettingsPatch（optional + deny_unknown_fields + is_empty()）、InboxOpenRequest{name}；契约测试（空 patch ok、拼错字段拒、open 载荷）；TS 绑定重生成。
+- v1 写路由：POST /transfers/{id}/cancel、DELETE /transfers、DELETE|POST /inbox/{name}(/open)、PATCH /settings（update_config + set_auto_accept_policy）；分派链 device→transfer→inbox_open→inbox_item；allowed() 补全。
+- core_error 补 404 映射：UnknownTransfer、File("not found")（照 legacy api_files.rs 判定）——测试先红（500≠404）后绿。
+- client：Api 9 个写方法；Transfers 取消/清历史、Inbox 打开（is_safe）/删除/清空、Settings 名称+auto_accept 可写（事件回灌，本地草稿）；App 导航加 收件箱/设置，三页传 {api}；svelte-check 0 错、vitest 16/16、build 绿。
+- 验证：fmt、clippy 双 target 0 错、workspace 全绿（phase1 两例 401 竞态 flake 复跑绿，§124 同族）；§132 已记。CI 盯守中。
+- 留下轮：activity 页数据、Playwright e2e（M2e）；M3 Tauri。
