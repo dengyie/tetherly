@@ -1205,3 +1205,8 @@
 - phase1 8 例 dial Timeout 判定与 §124 一致（默认并发下环境抖动，-j2 全绿 973 passed）。
 - 文档：DEVELOPMENT.md 基线块更新至 v0.2.58 + §129；vault projects 路由同步。
 - 下一步：推 main → CI → tag v0.2.58 → deploy；然后 M2b Web SPA。
+
+## 2026-11-15 v0.2.58 发布（§129）
+- CI 43718956135 全绿 → tag v0.2.58 → release 43719992315 绿 → deploy EXIT=0：Mac pid 7276；Windows hot-restart 308536→310860 SYSTEM；受保护进程 3/3。
+- v1 只读探测：health 开放 / diagnostics legacy_routes 计数生效 / devices 返回对端 / pin/rotate 新路由 201。
+- 下一步 M2b：client/ Svelte 5 SPA。

@@ -9145,3 +9145,11 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **本机验证**：`cargo fmt --check`、workspace 973 passed / 0 failed（`-j 2`）。commit `53c441b`。
 
 - **ubuntu CI 收尾修复（同一 §129）**：M2a 提交的 CI run 43707888954 ubuntu `test` 红——`phase2::dynamic_network_rescan_and_overlay_events_via_loopback_api` 断言 403 响应体时只做**单次 `read()`**，服务端 headers 与 body 分两次 `write_all`，CI 调度下 body（`loopback only`）落在第二个 TCP 段，第一次 read 只拿到 headers（macOS/Windows 未踩中属时序差）。403 行为本身正确，是**测试读法缺陷**：改 `read_to_end`（`Connection: close` 保证有界），本机 ×5 全绿。
+
+### 上线验证（2026-11-15，v0.2.58）
+
+- CI 43718956135（含 phase2 read_to_end 修复）五个 job 全绿；release 43719992315（macOS / Windows / Android / Linux / publish）成功。
+- `scripts/deploy.sh --target all --tag v0.2.58`：Windows 部署前可用内存 5089 MB → trim 27 进程 → 5382 MB；hot-restart old_pid 308536 → new_pid 310860，SYSTEM 身份；受保护进程 3/3（komari-agent / SRBMiner-MULTI / verge-mihomo）完好。Mac daemon pid 7276。
+- 双端 `/api/health` 均 0.2.58、live_peers=1。Mac 只读探测 v1：`/api/v1/health` 无 token 200（开放）、带 token 返回 `api:1`；`/api/v1/diagnostics` 的 `legacy_routes` 已开始计数（curl 调用按 UA 归类）；`/api/v1/devices` 返回 DESKTOP-VST7EIE（lan，7 ms）；`POST /api/v1/pairing/pin/rotate` 返回 PinGrant（新路由生效）。
+- 本节补丁提交：`53c441b`（路由对齐 + m3_11 flake 根治）、`37736c8`（phase2 read_to_end）、`28cc35e`（本节 + 基线块滚动）。
+- 下一步：M2b Web SPA（`client/` Svelte 5 工程，daemon 在 `/next/` 托管）。
