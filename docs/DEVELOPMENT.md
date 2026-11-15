@@ -1,8 +1,9 @@
 # Tetherly 开发文档
 
-## 当前接手基线（维护于 2026-11-14）
+## 当前接手基线（维护于 2026-11-15）
 
-- **发布基线：v0.2.39（tag → `5710b9f`，2026-11-14 双端已部署，见 §111），最高 ADR-138。** `Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。本块下方 2026-11-10 起的逐版本条目保留为历史演进记录，其中"未发布/未提交"措辞均为当时状态，v0.2.8–v0.2.30 已全部经 CI tag 发布并经 `scripts/deploy.sh --target all --tag vX.Y.Z` 部署。
+- **代码基线：v0.2.58（main → `53c441b`，ADR-139 M2a 门面 + 本节 §129 收尾，未发版未部署），最高 ADR-139。** 已发布部署基线 v0.2.57（§128）。`Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。本块下方 2026-11-10 起的逐版本条目保留为历史演进记录，其中"未发布/未提交"措辞均为当时状态，v0.2.8–v0.2.57 已全部经 CI tag 发布并经 `scripts/deploy.sh --target all --tag vX.Y.Z` 部署。
+- **ADR-139 控制客户端主线（§126–§129）：** M0 契约 v0.2.56 ✅ → M1 事件流 v0.2.57 ✅（`/api/v1/events` 快照+增量+seq+Last-Event-ID 续传）→ M2a v1 命令门面 v0.2.58 已提交（devices / pairing / input / diagnostics 端点 + legacy 路由命中计数，§129 补 `pin/rotate` `input/release` 路由对齐与 m3_11 flake 根治）→ **下一步 M2b Web SPA**（`client/` Svelte 5 工程，daemon `/next/` 托管）。旧 `/api/*` 自 M1 起冻结。
 - **🟢 Windows→Mac 鼠标方向已解决（v0.2.29，2026-11-13 真机验收）：** 2026-11-13 早间移交时的"Windows 物理鼠标不能驱动 Mac 光标"根因是 §101 的 7 秒弹回（entry placement 落在反向触发区 + pinned heartbeat 自动完成驻留）；`7b71531` zone-entered gate 修复后双端 `/api/health` version=v0.2.29，Mac 日志 `apply: enter` → 稳定 Remote 会话 → 用户正常推回，无弹回。生产机验收由用户实测确认（"Windows 鼠标已经可以接入 mac 了"）。
 - **v0.2.30（§102）：** (A) core Remote 座位冗余 Move 帧抑制（归一化远端坐标不变就不发帧，消灭 `lone edge-clamp move` 四连与零位移抖动帧）；(C) 输入引擎决策环 `GET /api/input/trace` + 双 CLI `tetherly input trace`（64 条内存环，覆盖 crossing / seat / attach_kick / park_warp / release / rescue / reconcile / apply_enter / push_*），SYSTEM 守护进程排障不再依赖 RUST_LOG 与 ssh 翻日志；(B) 回归后 attach-kick 冷却**明确不做**（理由见 §102）。
 - **v0.2.31（§103）：** 针对用户真机两症状——(1) Windows 鼠标首次进入 Mac 要很久（22:28 日志 8 s `dwell gated` + 进入后 0.9–3.3 s 弹回）：反向触发区闸门改锚定在控制器**已应用的 Enter**（预臂 accept 无 entry 坐标时闸门保持开启，Enter 关闸、Leave 重开），core 新增进入回归宽限 `entry_return_grace`（node 由 `EdgeCrossingConfig.entry_return_grace_ms` 配置，默认 1000 ms，`/api/topology/config` 可调，0 为旧即时回归）；(2) Windows 鼠标在 Mac 里左键点不动：macOS 注入 `move_abs` 在按键按住期间改发 `*MouseDragged`（选字/拖窗/拖放此前对 AppKit 不可见），并补 Button 链路埋点 `push_button` / `apply_button` / `apply_reject` 与 `/api/input` 新字段 `applied / dropped / rx_buttons / rx_wheel / rx_keys / tx_buttons`，外加 `channel_open` / `pump_exit` / `zone_gate` 决策环条目（§102.7 `m3_12` 取证前置）。Mac 再预臂冷却（选项 iii）按 §102.4 继续不做。
@@ -9134,3 +9135,11 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - `scripts/deploy.sh --target all --tag v0.2.57`：部署前清理 Windows 内存，可用内存从 3027 MB 升到 3740 MB，trim 34 个进程。Mac 进程 pid 87918；Windows 进程 pid 由 267572 变为 308536，仍以 SYSTEM 运行。两端 live_peers=1；komari / SRBMiner / mihomo 进程完好。
 - 只读探测：Mac 带 token 请求 `/api/v1/events`，先收到 `retry: 2000`，接着是 `snapshot` 帧（seq=1794740063968018）和 `device.updated`（DESKTOP-VST7EIE，lan，3 ms）；`?topics=bogus` 返回 400；`/api/v1/devices` 返回 1 台。Windows 不带 token 请求 events 返回 401，health 显示 0.2.57。
 - 遗留：客户端主动断开 SSE 时日志打 `WARN ui request e=Broken pipe`，这是正常断连，M2 中降为 debug。
+
+## 129. 控制客户端 M2a 收尾：v1 路由对齐 §4.2 契约 + m3_11 flake 根治 (v0.2.58 补丁)
+
+接手会话（2026-11-15）。M2a 门面主体已在 811fd84 提交，但两处遗留卡在工作区。
+
+- **路由重命名对齐契约**：`POST /api/v1/pairing/pin` → `/pairing/pin/rotate`、`POST /api/v1/input/stop` → `/input/release`，与 CONTROL_CLIENT_DEVELOPMENT.md §4.2 资源清单逐字一致（动作语义进路径动词段，不在 GET 管理的资源名上重载 POST）。`allowed()` 方法表、`route()` 分派、`rotate_pin` 文档注释、`uihttp.rs` 测试同步更新。
+- **m3_11 flake 根治**：`tests/phase3.rs::m3_11_auto_reverse_gates_block_accidental_flips` 用固定 12 次、间隔 30ms 的 push 事件流模拟持续推边。全 workspace 并发跑时调度抖动会把实际间隔拉过 `TOUCH_GAP_MS`（150ms），gap-continuity dwell 被重置，takeover 永不触发——与 ubuntu CI（runs 42866567283/42870492694）的 flake 同族，本机复现 m3_9/m3_5/m3_11 各一次。修复：push 流移入角色轮询循环，持续驱动直到 flip 落地或 10s 预算耗尽（真实的手也是推到达成为止）；不动生产 dwell 语义。验证：m3_11 ×5、phase3 全套 ×3、workspace `-j 2` 全绿（973 passed）。phase1 8 例 `dial()` Timeout 在默认并发下复现、`-j 2` 消失，与 §124 判定一致（环境抖动，握手 20s 预算被整机过载吃掉），不改。
+- **本机验证**：`cargo fmt --check`、workspace 973 passed / 0 failed（`-j 2`）。commit `53c441b`。

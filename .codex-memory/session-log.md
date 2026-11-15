@@ -1199,3 +1199,9 @@
 - 修复：`hook_move_state::advance(x, y, cur)`，增量 = `pt - GetCursorPos()`。RED 测试 `clamped_edge_push_deltas_measure_from_actual_cursor`。
 - CI 43693145564 绿；release 43694027234 绿。
 - 部署结果：两端 0.2.55，path lan；Windows pid 269800 SYSTEM；受保护进程 3/3；无新增 WARN。
+
+## 2026-11-15 M2a 收尾 + m3_11 flake（§129）
+- 接手会话。v1 路由对齐 §4.2（pin/rotate、input/release）+ m3_11 push 流改为循环内持续驱动（负载下超 TOUCH_GAP_MS 导致 dwell 重置的 flake 根治）。commit 53c441b。
+- phase1 8 例 dial Timeout 判定与 §124 一致（默认并发下环境抖动，-j2 全绿 973 passed）。
+- 文档：DEVELOPMENT.md 基线块更新至 v0.2.58 + §129；vault projects 路由同步。
+- 下一步：推 main → CI → tag v0.2.58 → deploy；然后 M2b Web SPA。
