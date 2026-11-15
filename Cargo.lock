@@ -2157,8 +2157,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
+]
+
+[[package]]
 name = "tetherly"
-version = "0.2.55"
+version = "0.2.56"
 dependencies = [
  "base64",
  "serde_json",
@@ -2173,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-android"
-version = "0.2.55"
+version = "0.2.56"
 dependencies = [
  "jni",
  "serde_json",
@@ -2187,8 +2196,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetherly-api"
+version = "0.2.56"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
 name = "tetherly-cli"
-version = "0.2.55"
+version = "0.2.56"
 dependencies = [
  "anyhow",
  "clap",
@@ -2206,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-core"
-version = "0.2.55"
+version = "0.2.56"
 dependencies = [
  "base64",
  "data-encoding",
@@ -2220,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-crypto"
-version = "0.2.55"
+version = "0.2.56"
 dependencies = [
  "argon2",
  "base64",
@@ -2240,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-loopback"
-version = "0.2.55"
+version = "0.2.56"
 dependencies = [
  "serde_json",
  "tokio",
@@ -2248,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-net"
-version = "0.2.55"
+version = "0.2.56"
 dependencies = [
  "mdns-sd",
  "proptest",
@@ -2264,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-node"
-version = "0.2.55"
+version = "0.2.56"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2288,6 +2306,7 @@ dependencies = [
  "security-framework-sys",
  "serde",
  "serde_json",
+ "tetherly-api",
  "tetherly-core",
  "tetherly-crypto",
  "tetherly-loopback",
@@ -2484,6 +2503,28 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "ts-rs"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
+dependencies = [
+ "thiserror 2.0.21",
+ "ts-rs-macros",
+]
+
+[[package]]
+name = "ts-rs-macros"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d90eea51bc7988ef9e674bf80a85ba6804739e535e9cab48e4bb34a8b652aa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "termcolor",
 ]
 
 [[package]]

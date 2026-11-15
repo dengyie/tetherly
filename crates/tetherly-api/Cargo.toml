@@ -1,0 +1,17 @@
+[package]
+name = "tetherly-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Versioned control-client contract (/api/v1 DTOs, events, error codes); single source for generated TS/Kotlin types (ADR-139)"
+publish = false
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# Test-only: the TS bindings are generated and drift-checked under `cargo test`,
+# so the daemon's dependency graph never carries the derive.
+ts-rs = "12"

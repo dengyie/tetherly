@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     ".",
+    "crates/tetherly-api",
     "crates/tetherly-core",
     "crates/tetherly-crypto",
     "crates/tetherly-net",
@@ -12,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.55"
+version = "0.2.56"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.82"
@@ -20,6 +21,7 @@ authors = ["Tetherly contributors"]
 description = "Personal-device mesh: LAN first, OTP on-device, desktop input later"
 
 [workspace.dependencies]
+tetherly-api = { path = "crates/tetherly-api" }
 tetherly-core = { path = "crates/tetherly-core" }
 tetherly-crypto = { path = "crates/tetherly-crypto" }
 tetherly-net = { path = "crates/tetherly-net" }

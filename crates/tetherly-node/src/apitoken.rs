@@ -60,6 +60,47 @@ pub fn requires_token(method: &str, path: &str) -> bool {
     )
 }
 
+/// Access tier of a `/api/v1` request (ADR-139). Ordered: a grant of a
+/// higher tier satisfies every lower one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// Observe state: every `GET`.
+    Read,
+    /// Change state: transfers, settings, layout, peers.
+    Write,
+    /// Process lifecycle and diagnostics knobs.
+    Admin,
+}
+
+/// Paths whose non-`GET` methods need [`Tier::Admin`].
+const V1_ADMIN_PATHS: &[&str] = &[
+    "/api/v1/system/restart",
+    "/api/v1/system/shutdown",
+    "/api/v1/diagnostics/log-level",
+];
+
+/// Tier a `/api/v1` request needs, or `None` when it is open. Only
+/// `GET /api/v1/health` is open, so a client can tell "daemon down" from
+/// "token wrong". `path` may carry a query string.
+pub fn v1_required_tier(method: &str, path: &str) -> Option<Tier> {
+    let path = path.split_once('?').map_or(path, |(p, _)| p);
+    if method == "GET" {
+        return (path != "/api/v1/health").then_some(Tier::Read);
+    }
+    Some(if V1_ADMIN_PATHS.contains(&path) {
+        Tier::Admin
+    } else {
+        Tier::Write
+    })
+}
+
+/// Tier a presented credential grants. The daemon-minted token grants
+/// [`Tier::Admin`]; anything else (including an unminted token) grants
+/// nothing.
+pub fn granted_tier(expected: &str, presented: &str) -> Option<Tier> {
+    token_matches(expected, presented).then_some(Tier::Admin)
+}
+
 /// Constant-time comparison of a presented token with the expected one.
 /// An empty expected token never matches (fail closed).
 pub fn token_matches(expected: &str, presented: &str) -> bool {
@@ -205,6 +246,34 @@ pub fn dashboard_url(ui_port: u16, token: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn v1_tiers_classify_health_open_reads_read_writes_write_admin_admin() {
+        use super::{v1_required_tier as t, Tier};
+        assert_eq!(t("GET", "/api/v1/health"), None);
+        assert_eq!(t("GET", "/api/v1/health?x=1"), None);
+        assert_eq!(t("GET", "/api/v1/system"), Some(Tier::Read));
+        assert_eq!(t("GET", "/api/v1/events"), Some(Tier::Read));
+        assert_eq!(t("POST", "/api/v1/transfers"), Some(Tier::Write));
+        assert_eq!(t("PATCH", "/api/v1/settings"), Some(Tier::Write));
+        assert_eq!(t("POST", "/api/v1/health"), Some(Tier::Write));
+        assert_eq!(t("POST", "/api/v1/system/restart"), Some(Tier::Admin));
+        assert_eq!(
+            t("PATCH", "/api/v1/diagnostics/log-level"),
+            Some(Tier::Admin)
+        );
+        assert!(Tier::Read < Tier::Write && Tier::Write < Tier::Admin);
+    }
+
+    #[test]
+    fn granted_tier_is_admin_for_the_daemon_token_and_none_otherwise() {
+        use super::{granted_tier, Tier};
+        let tok = "a".repeat(64);
+        assert_eq!(granted_tier(&tok, &tok), Some(Tier::Admin));
+        assert_eq!(granted_tier(&tok, &"b".repeat(64)), None);
+        assert_eq!(granted_tier(&tok, ""), None);
+        assert_eq!(granted_tier("", ""), None, "unminted token fails closed");
+    }
+
     use super::*;
 
     fn temp_dir(tag: &str) -> PathBuf {

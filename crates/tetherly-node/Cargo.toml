@@ -27,6 +27,7 @@ tetherly-core.workspace = true
 tetherly-crypto.workspace = true
 tetherly-net.workspace = true
 tetherly-loopback.workspace = true
+tetherly-api.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true

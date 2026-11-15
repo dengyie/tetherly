@@ -68,6 +68,7 @@ mod api_screen_tile;
 mod api_topology;
 mod dto;
 mod util;
+mod v1;
 
 // Re-exported so every handler module can reach the DTOs and helpers with a
 // plain `use super::*;`.
@@ -313,6 +314,29 @@ async fn handle(
         write_http(&mut stream, 401, "application/json", body).await?;
         return Ok(());
     }
+    if path == tetherly_api::PREFIX || path.starts_with("/api/v1/") || path.starts_with("/api/v1?")
+    {
+        if let Some(need) = crate::apitoken::v1_required_tier(method, path) {
+            let granted = crate::apitoken::granted_tier(token, presented.as_deref().unwrap_or(""));
+            if granted < Some(need) {
+                warn!(
+                    method,
+                    path = path.split_once('?').map_or(path, |(p, _)| p),
+                    presented = presented.is_some(),
+                    ?need,
+                    "v1 route refused: insufficient api token tier"
+                );
+                drain_request_body(&mut stream, content_len.saturating_sub(n - head_end)).await;
+                let resp = if granted.is_none() {
+                    v1::error(tetherly_api::ErrorCode::Unauthorized, "api token required")
+                } else {
+                    v1::error(tetherly_api::ErrorCode::Forbidden, "token tier too low")
+                };
+                write_http_response(&mut stream, &resp).await?;
+                return Ok(());
+            }
+        }
+    }
     if method == "GET"
         && (path == "/api/events"
             || path == "/api/events/stream"
@@ -410,11 +434,15 @@ async fn write_http_response(stream: &mut TcpStream, resp: &UiResponse) -> std::
     let reason = match resp.code {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
+        409 => "Conflict",
         413 => "Payload Too Large",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     let mut head = format!(
@@ -560,6 +588,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
         Some((p, q)) => (p, Some(q)),
         None => (path, None),
     };
+    if path_only == tetherly_api::PREFIX || path_only.starts_with("/api/v1/") {
+        return v1::route(method, path_only, query_str, body, node).await;
+    }
     match (method, path_only) {
         ("GET", "/") | ("GET", "/index.html") => {
             api_core::get_index(method, query_str, body, node).await
@@ -2110,6 +2141,75 @@ mod tests {
         let (code, _) = raw_request(port, "GET", "/api/health", None, b"").await;
         assert_eq!(code, 200);
         let (code, _) = raw_request(port, "GET", "/api/action/local", None, b"").await;
+        assert_eq!(code, 200);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Raw request returning the full response head as text plus status and
+    /// body, for asserting v1 version headers.
+    async fn raw_with_head(
+        port: u16,
+        method: &str,
+        path: &str,
+        extra_header: Option<&str>,
+    ) -> (String, u16, serde_json::Value) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let extra = extra_header.map(|h| format!("{h}\r\n")).unwrap_or_default();
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(head.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&out[..split]).to_string();
+        let (code, body) = tetherly_loopback::parse_http_response(&out);
+        let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (head, code, json)
+    }
+
+    /// ADR-139 M0: v1 health is open and versioned; everything else under
+    /// /api/v1 needs the token and answers with the typed error envelope.
+    #[tokio::test]
+    async fn v1_health_system_auth_and_error_envelope() {
+        let (node, dir) = temp_test_node("v1_m0");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("token");
+        let auth = format!("Authorization: Bearer {token}");
+
+        let (head, code, body) = raw_with_head(port, "GET", "/api/v1/health", None).await;
+        assert_eq!(code, 200, "{body}");
+        assert!(head.contains("Tetherly-Api: 1"), "{head}");
+        assert!(head.contains(&format!("Tetherly-Version: {}", env!("CARGO_PKG_VERSION"))));
+        let h: tetherly_api::Health = serde_json::from_value(body).unwrap();
+        assert_eq!(h, tetherly_api::Health::new(env!("CARGO_PKG_VERSION")));
+
+        let (head, code, body) = raw_with_head(port, "GET", "/api/v1/system", None).await;
+        assert_eq!(code, 401);
+        assert!(head.contains("Tetherly-Api: 1"), "{head}");
+        let e: tetherly_api::ErrorBody = serde_json::from_value(body).unwrap();
+        assert_eq!(e.error.code, tetherly_api::ErrorCode::Unauthorized);
+
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/system", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        let sys: tetherly_api::System = serde_json::from_value(body).unwrap();
+        assert_eq!(sys.device_id, node.identity().device_id().to_string());
+        assert_eq!(sys.api, tetherly_api::API_VERSION);
+        assert_eq!(sys.ports.ui, node.ui_port());
+
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/nope", Some(&auth)).await;
+        assert_eq!(code, 404);
+        assert_eq!(body["error"]["code"], "not_found");
+
+        let (_, code, body) = raw_with_head(port, "DELETE", "/api/v1/system", Some(&auth)).await;
+        assert_eq!(code, 405);
+        assert_eq!(body["error"]["code"], "method_not_allowed");
+
+        // Legacy routes keep their legacy shapes.
+        let (_, code, _) = raw_with_head(port, "GET", "/api/health", None).await;
         assert_eq!(code, 200);
         let _ = std::fs::remove_dir_all(&dir);
     }
