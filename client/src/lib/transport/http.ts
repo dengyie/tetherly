@@ -81,7 +81,7 @@ export class HttpTransport implements Transport {
           attempt += 1;
           // lastSeq survives the reconnect: the server replays or re-snapshots.
           setTimeout(connect, delay);
-          void err;
+          console.error("[events]", err);
         });
     };
     connect();
@@ -104,7 +104,14 @@ function parseFrame(frame: string): ServerEvent | null {
   }
   if (!data) return null;
   try {
-    return { id, type, data: JSON.parse(data) };
+    const parsed = JSON.parse(data);
+    // The wire data is the EventEnvelope (`{seq, type, data: …}`, §4.3);
+    // stores and MockTransport speak in bare payloads, so unwrap the inner
+    // `data` field and hand it over with the envelope's type.
+    if (parsed && typeof parsed === "object" && "seq" in parsed && "type" in parsed) {
+      return { id, type, data: parsed.data };
+    }
+    return { id, type, data: parsed };
   } catch {
     return null;
   }

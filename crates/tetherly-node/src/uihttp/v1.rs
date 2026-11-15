@@ -86,6 +86,7 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/pairing"
         | "/api/v1/input"
         | "/api/v1/layout"
+        | "/api/v1/activity"
         | "/api/v1/diagnostics"
         | "/api/v1/diagnostics/logs" => Some(&["GET"]),
         "/api/v1/transfers" => Some(&["GET", "DELETE"]),
@@ -186,6 +187,7 @@ pub(super) async fn route(
         ("GET", "/api/v1/inbox") => Ok(json(200, &crate::apiv1::model::inbox(node))),
         ("GET", "/api/v1/layout") => Ok(json(200, &crate::apiv1::model::layout(node))),
         ("GET", "/api/v1/settings") => Ok(json(200, &crate::apiv1::model::settings(node))),
+        ("GET", "/api/v1/activity") => Ok(json(200, &crate::apiv1::model::activity(node))),
         ("POST", "/api/v1/input/release") => match node.input_stop_reported().await {
             Ok(_) => Ok(json(200, &crate::apiv1::model::input(node).await)),
             Err(e) => Err(core_error(e)),

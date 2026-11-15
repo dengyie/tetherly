@@ -125,3 +125,63 @@ describe("settings store", () => {
     expect(evSettings(s, { id: 15, type: "layout.changed", data: layout() })).toBe(s);
   });
 });
+
+// ---- M2e: activity store ----
+import { initialActivity, applyEvent as evActivity } from "./activity";
+import type { Activity } from "../api/gen/api";
+
+const activity = (over: Partial<Activity> = {}): Activity => ({
+  candidates: [],
+  replies: [],
+  messages: [],
+  handoffs: [],
+  ...over,
+});
+
+describe("activity store", () => {
+  it("replaces the section on activity.changed", () => {
+    let s = initialActivity();
+    s = evActivity(s, {
+      id: 16,
+      type: "activity.changed",
+      data: activity({
+        messages: [
+          {
+            id: "m1",
+            peer: "tdev_a",
+            direction: "inbound",
+            text: "hi",
+            timestamp_ms: 1,
+            read: false,
+          },
+        ],
+        handoffs: [
+          {
+            id: "h1",
+            sender_id: "tdev_a",
+            sender_alias: "mac",
+            url: "https://x.test",
+            title: "page",
+            status: "pending",
+            received_ms: 2,
+            opened_ms: null,
+          },
+        ],
+      }),
+    });
+    expect(s.loaded).toBe(true);
+    expect(s.activity?.messages[0].text).toBe("hi");
+    expect(s.activity?.handoffs[0].status).toBe("pending");
+    s = evActivity(s, { id: 17, type: "activity.changed", data: activity() });
+    expect(s.activity?.messages).toHaveLength(0);
+  });
+
+  it("ignores unrelated events", () => {
+    const s = evActivity(initialActivity(), {
+      id: 18,
+      type: "activity.changed",
+      data: activity(),
+    });
+    expect(evActivity(s, { id: 19, type: "settings.changed", data: settings() })).toBe(s);
+  });
+});

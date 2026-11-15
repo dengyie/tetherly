@@ -2442,6 +2442,15 @@ mod tests {
         let (code, _) = v1_call(port, "POST", "/api/v1/settings", &auth, "").await;
         assert_eq!(code, 405);
 
+        // M2e: the activity feed answers with all four sub-lists.
+        let (code, body) = v1_call(port, "GET", "/api/v1/activity", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let a: tetherly_api::Activity = serde_json::from_value(body).unwrap();
+        assert!(a.candidates.is_empty() && a.replies.is_empty());
+        assert!(a.messages.is_empty() && a.handoffs.is_empty());
+        let (code, _) = v1_call(port, "POST", "/api/v1/activity", &auth, "").await;
+        assert_eq!(code, 405);
+
         // M2d: settings patch renames the node and flips auto-accept.
         let (code, body) = v1_call(
             port,

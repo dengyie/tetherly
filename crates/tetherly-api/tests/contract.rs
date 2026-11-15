@@ -221,6 +221,50 @@ mod events {
                 "settings.changed",
                 Some(Topic::Settings),
             ),
+            (
+                Event::ActivityChanged {
+                    activity: Activity {
+                        candidates: vec![ActivityCandidate {
+                            id: "c1".into(),
+                            source: "tdev_a".into(),
+                            app_id: "com.bank".into(),
+                            app_name: "Bank".into(),
+                            uid: "42".into(),
+                            title: "Your code".into(),
+                            has_otp: true,
+                            created_ms: 100,
+                            expires_ms: 200,
+                            actions: vec!["open".into()],
+                        }],
+                        replies: vec![ActivityReply {
+                            id: "r1".into(),
+                            source: "tdev_a".into(),
+                            app_id: "com.bank".into(),
+                            uid: "42".into(),
+                        }],
+                        messages: vec![ActivityMessage {
+                            id: "m1".into(),
+                            peer: "tdev_a".into(),
+                            direction: MessageDirection::Inbound,
+                            text: "hi".into(),
+                            timestamp_ms: 300,
+                            read: false,
+                        }],
+                        handoffs: vec![ActivityHandoff {
+                            id: "h1".into(),
+                            sender_id: "tdev_a".into(),
+                            sender_alias: "mac".into(),
+                            url: "https://x.test".into(),
+                            title: "page".into(),
+                            status: HandoffStatus::Pending,
+                            received_ms: 400,
+                            opened_ms: None,
+                        }],
+                    },
+                },
+                "activity.changed",
+                Some(Topic::Activity),
+            ),
         ];
         for (ev, name, topic) in cases {
             assert_eq!(ev.name(), name);

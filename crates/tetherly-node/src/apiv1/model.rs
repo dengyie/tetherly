@@ -7,9 +7,10 @@ use crate::store::BlockedPeer;
 use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
-    Device, Inbox, InboxFile, Input, Layout, LayoutEdge, LayoutPolicy, LinkPath, Pairing,
-    PeerCounts, Ports, Settings, SettingsGeneral, SettingsTransfer, Snapshot, System, Transfer,
-    TransferDirection, TransferPhase, Transfers, API_VERSION,
+    Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, Device,
+    HandoffStatus, Inbox, InboxFile, Input, Layout, LayoutEdge, LayoutPolicy, LinkPath,
+    MessageDirection, Pairing, PeerCounts, Ports, Settings, SettingsGeneral, SettingsTransfer,
+    Snapshot, System, Transfer, TransferDirection, TransferPhase, Transfers, API_VERSION,
 };
 use tetherly_core::{DisplayEdge, PathKind, TrustedPeer};
 
@@ -301,6 +302,79 @@ pub fn settings(node: &Node) -> Settings {
         transfer: SettingsTransfer {
             auto_accept: a.enabled,
         },
+    }
+}
+
+/// The activity resource: notification candidates, pending replies, the
+/// recent direct-message ring and the handoff inbox, in one report.
+pub fn activity(node: &Node) -> Activity {
+    let messages = match node.message_history(None, Some(50), false, false) {
+        Ok(r) => r
+            .messages
+            .into_iter()
+            .map(|m| ActivityMessage {
+                id: m.id,
+                peer: m.peer,
+                direction: match m.direction {
+                    crate::runtime::MessageDirection::Inbound => MessageDirection::Inbound,
+                    crate::runtime::MessageDirection::Outbound => MessageDirection::Outbound,
+                },
+                text: m.text,
+                timestamp_ms: m.timestamp_ms,
+                read: m.read,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let handoffs = node
+        .handoff_inbox_list(None)
+        .into_iter()
+        .map(|h| ActivityHandoff {
+            id: h.id,
+            sender_id: h.sender_id,
+            sender_alias: h.sender_alias,
+            url: h.url,
+            title: h.title,
+            status: match h.status {
+                tetherly_core::HandoffStatus::Pending => HandoffStatus::Pending,
+                tetherly_core::HandoffStatus::Opened => HandoffStatus::Opened,
+                tetherly_core::HandoffStatus::Dismissed => HandoffStatus::Dismissed,
+                tetherly_core::HandoffStatus::Rejected => HandoffStatus::Rejected,
+            },
+            received_ms: h.received_ms,
+            opened_ms: h.opened_ms,
+        })
+        .collect();
+    Activity {
+        candidates: node
+            .candidates()
+            .into_iter()
+            .map(|c| ActivityCandidate {
+                id: c.id,
+                source: c.source,
+                app_id: c.app_id,
+                app_name: c.app_name,
+                uid: c.uid,
+                title: c.title,
+                has_otp: c.has_otp,
+                created_ms: c.created_ms,
+                expires_ms: c.expires_ms,
+                actions: c.actions,
+            })
+            .collect(),
+        replies: node
+            .reply_views()
+            .into_iter()
+            .map(crate::events::ReplyViewDto::from)
+            .map(|r| ActivityReply {
+                id: r.id,
+                source: r.source,
+                app_id: r.app_id,
+                uid: r.uid,
+            })
+            .collect(),
+        messages,
+        handoffs,
     }
 }
 

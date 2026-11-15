@@ -314,6 +314,8 @@ pub enum Event {
     LayoutChanged { layout: Layout },
     #[serde(rename = "settings.changed")]
     SettingsChanged { settings: Settings },
+    #[serde(rename = "activity.changed")]
+    ActivityChanged { activity: Activity },
     #[serde(rename = "invalidated")]
     Invalidated { topic: Topic },
 }
@@ -332,6 +334,7 @@ impl Event {
             Event::InboxChanged { .. } => "inbox.changed",
             Event::LayoutChanged { .. } => "layout.changed",
             Event::SettingsChanged { .. } => "settings.changed",
+            Event::ActivityChanged { .. } => "activity.changed",
             Event::Invalidated { .. } => "invalidated",
         }
     }
@@ -348,6 +351,7 @@ impl Event {
             Event::InboxChanged { .. } => Some(Topic::Inbox),
             Event::LayoutChanged { .. } => Some(Topic::Layout),
             Event::SettingsChanged { .. } => Some(Topic::Settings),
+            Event::ActivityChanged { .. } => Some(Topic::Activity),
             Event::Invalidated { topic } => Some(*topic),
         }
     }
@@ -679,6 +683,96 @@ pub struct InboxOpenRequest {
     pub name: String,
 }
 
+// ---- M2e: activity feed ----
+
+/// Direction of a peer direct message relative to this node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum MessageDirection {
+    Inbound,
+    Outbound,
+}
+
+/// Lifecycle status of a resource handoff entry (mirrors the daemon's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffStatus {
+    Pending,
+    Opened,
+    Dismissed,
+    Rejected,
+}
+
+/// One notification candidate (ANCS banner, possibly carrying an OTP).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActivityCandidate {
+    pub id: String,
+    pub source: String,
+    pub app_id: String,
+    pub app_name: String,
+    pub uid: String,
+    pub title: String,
+    pub has_otp: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub created_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub expires_ms: u64,
+    pub actions: Vec<String>,
+}
+
+/// One quick reply waiting to be picked up (no text — the no-content rule).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActivityReply {
+    pub id: String,
+    pub source: String,
+    pub app_id: String,
+    pub uid: String,
+}
+
+/// One peer direct message (text included; both directions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActivityMessage {
+    pub id: String,
+    pub peer: String,
+    pub direction: MessageDirection,
+    pub text: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+    pub read: bool,
+}
+
+/// One resource handoff entry (URL handed over from a peer).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActivityHandoff {
+    pub id: String,
+    pub sender_id: String,
+    pub sender_alias: String,
+    pub url: String,
+    pub title: String,
+    pub status: HandoffStatus,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub received_ms: u64,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub opened_ms: Option<u64>,
+}
+
+/// The activity resource (§4.2 `GET /activity`): the four pending/recent
+/// feeds the SPA activity page renders, in one full-state event.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Activity {
+    pub candidates: Vec<ActivityCandidate>,
+    pub replies: Vec<ActivityReply>,
+    pub messages: Vec<ActivityMessage>,
+    pub handoffs: Vec<ActivityHandoff>,
+}
+
 #[cfg(test)]
 mod bindings {
     //! TypeScript drift check. Regenerate with
@@ -739,6 +833,13 @@ mod bindings {
             decl::<SettingsTransfer>(&cfg),
             decl::<SettingsPatch>(&cfg),
             decl::<InboxOpenRequest>(&cfg),
+            decl::<MessageDirection>(&cfg),
+            decl::<HandoffStatus>(&cfg),
+            decl::<ActivityCandidate>(&cfg),
+            decl::<ActivityReply>(&cfg),
+            decl::<ActivityMessage>(&cfg),
+            decl::<ActivityHandoff>(&cfg),
+            decl::<Activity>(&cfg),
         ] {
             out.push_str(&d);
             out.push('\n');

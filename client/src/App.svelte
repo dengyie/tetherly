@@ -10,6 +10,7 @@
   import { applyEvent as inboxEvent, initialInbox, type InboxState } from "./lib/stores/inbox";
   import { applyEvent as layoutEvent, initialLayout, type LayoutState } from "./lib/stores/layout";
   import { applyEvent as settingsEvent, initialSettings, type SettingsState } from "./lib/stores/settings";
+  import { applyEvent as activityEvent, initialActivity, type ActivityState } from "./lib/stores/activity";
   import type { Snapshot } from "./lib/api/gen/api";
   import { Api } from "./lib/api/client";
   import type { Transport } from "./lib/transport/transport";
@@ -20,6 +21,7 @@
   import Inbox from "./routes/Inbox.svelte";
   import Layout from "./routes/Layout.svelte";
   import Settings from "./routes/Settings.svelte";
+  import Activity from "./routes/Activity.svelte";
 
   // Token arrives via the daemon URL fragment (#token=…); read and strip it
   // immediately so it never stays in the address bar or history.
@@ -41,8 +43,9 @@
   let inbox: InboxState = $state(initialInbox());
   let layout: LayoutState = $state(initialLayout());
   let settings: SettingsState = $state(initialSettings());
+  let activity: ActivityState = $state(initialActivity());
   let api = $state<Api | null>(null);
-  let page: "overview" | "devices" | "transfers" | "inbox" | "settings" | "layout" | "diagnostics" = $state("overview");
+  let page: "overview" | "devices" | "transfers" | "inbox" | "activity" | "settings" | "layout" | "diagnostics" = $state("overview");
 
   onMount(() => {
     setApiToken(readFragmentToken() ?? sessionStorage.getItem("tetherly_token"));
@@ -58,6 +61,7 @@
     let ib = initialInbox();
     let la = initialLayout();
     let se = initialSettings();
+    let ac = initialActivity();
     const unsubscribe = t.subscribe(
       null,
       (ev) => {
@@ -77,6 +81,7 @@
           ib = inboxEvent(ib, ev);
           la = layoutEvent(la, ev);
           se = settingsEvent(se, ev);
+          ac = activityEvent(ac, ev);
         }
         devices = d;
         system = s;
@@ -86,6 +91,7 @@
         inbox = ib;
         layout = la;
         settings = se;
+        activity = ac;
       },
       (st) => linkState.set(st),
     );
@@ -110,6 +116,7 @@
     <button class:active={page === "devices"} onclick={() => (page = "devices")}>设备</button>
     <button class:active={page === "transfers"} onclick={() => (page = "transfers")}>传输</button>
     <button class:active={page === "inbox"} onclick={() => (page = "inbox")}>收件箱</button>
+    <button class:active={page === "activity"} onclick={() => (page = "activity")}>动态</button>
     <button class:active={page === "settings"} onclick={() => (page = "settings")}>设置</button>
     <button class:active={page === "layout"} onclick={() => (page = "layout")}>布局</button>
     <button class:active={page === "diagnostics"} onclick={() => (page = "diagnostics")}>诊断</button>
@@ -123,6 +130,8 @@
       <Transfers data={transfers.transfers} {api} />
     {:else if page === "inbox" && api}
       <Inbox data={inbox.inbox} {api} />
+    {:else if page === "activity"}
+      <Activity data={activity.activity} />
     {:else if page === "settings" && api}
       <Settings data={settings.settings} {api} />
     {:else if page === "layout"}

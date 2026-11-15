@@ -204,6 +204,9 @@ async fn resolve(hub: &EventHub, node: &Node, keys: Vec<Key>, known: &mut HashMa
                 Topic::Settings => hub.publish(&Event::SettingsChanged {
                     settings: model::settings(node),
                 }),
+                Topic::Activity => hub.publish(&Event::ActivityChanged {
+                    activity: model::activity(node),
+                }),
                 // No pushed form yet: keep asking the client to refetch.
                 _ => hub.publish(&Event::Invalidated { topic }),
             },
@@ -343,6 +346,43 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(f.name, "transfers.changed", "{}", f.data);
+        }
+
+        // M2e: an activity-source event resolves to the full activity feed.
+        // A real inbound handoff (records the entry + emits the mark).
+        let peer = tetherly_core::DeviceId::from_id_pk(&[9; 32]);
+        node.receive_resource_handoff(
+            &peer,
+            tetherly_core::ResourceHandoffFrame::new(
+                "h1",
+                "https://example.test/page",
+                "a page",
+                false,
+                1,
+            )
+            .unwrap(),
+        );
+        let f = loop {
+            let f = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            // The handoff also marks the Inbox topic; skip that frame.
+            if f.name == "activity.changed" {
+                break f;
+            }
+        };
+        let env: tetherly_api::EventEnvelope = serde_json::from_str(&f.data).unwrap();
+        match env.event {
+            Event::ActivityChanged { activity } => {
+                assert_eq!(activity.handoffs.len(), 1, "{:?}", activity.handoffs);
+                assert_eq!(activity.handoffs[0].id, "h1");
+                assert_eq!(
+                    activity.handoffs[0].status,
+                    tetherly_api::HandoffStatus::Pending
+                );
+            }
+            other => panic!("expected ActivityChanged, got {other:?}"),
         }
 
         // Clipboard has no pushed form: it must still come out invalidated.

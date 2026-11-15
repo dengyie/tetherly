@@ -11,6 +11,7 @@ import type {
   Health,
   Inbox,
   InboxOpenRequest,
+  Activity,
   Input,
   LogTail,
   LogLevel,
@@ -104,6 +105,9 @@ export class Api {
 
   settings(): Promise<Settings> {
     return this.t.request("GET", "/api/v1/settings");
+  }
+  activity(): Promise<Activity> {
+    return this.t.request("GET", "/api/v1/activity");
   }
   patchSettings(patch: SettingsPatch): Promise<Settings> {
     return this.t.request("PATCH", "/api/v1/settings", patch);

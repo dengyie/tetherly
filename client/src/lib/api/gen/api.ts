@@ -42,9 +42,9 @@ export type Snapshot = { system: System, devices: Array<Device>, pairing: Pairin
 
 export type Topic = "devices" | "pairing" | "input" | "system" | "layout" | "transfers" | "inbox" | "activity" | "clipboard" | "settings";
 
-export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "invalidated", topic: Topic, };
+export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "activity.changed", activity: Activity, } | { "type": "invalidated", topic: Topic, };
 
-export type EventEnvelope = { seq: number, } & ({ "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "invalidated", topic: Topic, });
+export type EventEnvelope = { seq: number, } & ({ "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "activity.changed", activity: Activity, } | { "type": "invalidated", topic: Topic, });
 
 export type DevicePatch = { alias?: string, tags?: Array<string>, };
 
@@ -131,4 +131,18 @@ auto_accept: boolean, };
 export type SettingsPatch = { name?: string, advertise?: boolean, reconnect?: boolean, auto_accept?: boolean, };
 
 export type InboxOpenRequest = { name: string, };
+
+export type MessageDirection = "inbound" | "outbound";
+
+export type HandoffStatus = "pending" | "opened" | "dismissed" | "rejected";
+
+export type ActivityCandidate = { id: string, source: string, app_id: string, app_name: string, uid: string, title: string, has_otp: boolean, created_ms: number, expires_ms: number, actions: Array<string>, };
+
+export type ActivityReply = { id: string, source: string, app_id: string, uid: string, };
+
+export type ActivityMessage = { id: string, peer: string, direction: MessageDirection, text: string, timestamp_ms: number, read: boolean, };
+
+export type ActivityHandoff = { id: string, sender_id: string, sender_alias: string, url: string, title: string, status: HandoffStatus, received_ms: number, opened_ms: number | null, };
+
+export type Activity = { candidates: Array<ActivityCandidate>, replies: Array<ActivityReply>, messages: Array<ActivityMessage>, handoffs: Array<ActivityHandoff>, };
 
