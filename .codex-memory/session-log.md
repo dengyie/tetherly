@@ -1210,3 +1210,11 @@
 - CI 43718956135 全绿 → tag v0.2.58 → release 43719992315 绿 → deploy EXIT=0：Mac pid 7276；Windows hot-restart 308536→310860 SYSTEM；受保护进程 3/3。
 - v1 只读探测：health 开放 / diagnostics legacy_routes 计数生效 / devices 返回对端 / pin/rotate 新路由 201。
 - 下一步 M2b：client/ Svelte 5 SPA。
+
+## 2026-11-15 M2b：Web SPA 脚手架 + daemon /next/ 托管
+- client/（Svelte 5 + Vite 6 + TS）：Transport seam（HttpTransport，手写 SSE 解析、last_event_id 重放、退避、#token= → sessionStorage）、纯 reducer devices/connection store（fold(snapshot, events) property 测试）、App shell + 概览/设备两页。vitest 4/4、svelte-check 0 错、build 46.5 kB。
+- Rust 侧 `uihttp/next.rs`：GET /next(/) 入口、/next/assets/* 固定名资产、未知 /next/* 回退入口（SPA 深链）；GET-only，旧控制台留 /，/api/* 冻结不动。4 单测 + fmt + clippy（原生 & windows-gnu）绿；lib 337 全绿。
+- client/dist 进 git（daemon 编译期嵌入，CI 无 node 步骤）；node_modules 进 .gitignore；vite 产物固定名（assets/app.js、assets/index.css）。
+- 临时实例（45816）冒烟 + 真实浏览器验证：页面渲染、hash 剥离、token 入 sessionStorage、SSE linkState=live、页面切换正常、旧控制台完好。生产 daemon 45716 全程未动。
+- 提交 89b6498（Rust 托管）+ 36311ea（client 脚手架）→ push main，CI 43725065383。
+- 下一步：system/pairing/input 等 store + api client 层 + 剩余 5 页；dashboard 链接指向 /next/（含 token fragment）留到 M4 切换前。

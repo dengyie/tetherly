@@ -3,6 +3,9 @@
   import { HttpTransport, setApiToken } from "./lib/transport/http";
   import { linkState, lastSeq } from "./lib/stores/connection";
   import { applyEvent, applySnapshot, initialDevices, type DevicesState } from "./lib/stores/devices";
+  import { applyEvent as sysEvent, applySnapshot as sysSnapshot, initialSystem, type SystemState } from "./lib/stores/system";
+  import { applyEvent as pairEvent, applySnapshot as pairSnapshot, initialPairing, type PairingState } from "./lib/stores/pairing";
+  import { applyEvent as inputEvent, applySnapshot as inputSnapshot, initialInput, type InputState } from "./lib/stores/input";
   import type { Snapshot } from "./lib/api/gen/api";
   import Overview from "./routes/Overview.svelte";
   import Devices from "./routes/Devices.svelte";
@@ -18,25 +21,43 @@
   }
 
   let devices: DevicesState = $state(initialDevices());
+  let system: SystemState = $state(initialSystem());
+  let pairing: PairingState = $state(initialPairing());
+  let input: InputState = $state(initialInput());
   let page: "overview" | "devices" = $state("overview");
 
   onMount(() => {
     setApiToken(readFragmentToken() ?? sessionStorage.getItem("tetherly_token"));
     const transport = new HttpTransport();
-    let state: DevicesState = initialDevices();
-    let seq: number | null = null;
+    // Reducer mirrors: mutated inside the event callback, assigned to the
+    // $state variables so Svelte 5 picks up the change.
+    let d = initialDevices();
+    let s = initialSystem();
+    let p = initialPairing();
+    let i = initialInput();
     const unsubscribe = transport.subscribe(
       null,
       (ev) => {
-        seq = ev.id;
         lastSeq.set(ev.id);
-        if (ev.type === "snapshot") state = applySnapshot(state, ev.data as Snapshot);
-        state = applyEvent(state, ev);
-        devices = state;
+        if (ev.type === "snapshot") {
+          const snap = ev.data as Snapshot;
+          d = applySnapshot(d, snap);
+          s = sysSnapshot(s, snap);
+          p = pairSnapshot(p, snap);
+          i = inputSnapshot(i, snap);
+        } else {
+          d = applyEvent(d, ev);
+          s = sysEvent(s, ev);
+          p = pairEvent(p, ev);
+          i = inputEvent(i, ev);
+        }
+        devices = d;
+        system = s;
+        pairing = p;
+        input = i;
       },
-      (s) => linkState.set(s),
+      (st) => linkState.set(st),
     );
-    void seq;
     return unsubscribe;
   });
 
@@ -59,7 +80,7 @@
   </nav>
   <main>
     {#if page === "overview"}
-      <Overview {devices} />
+      <Overview {devices} {system} {input} />
     {:else}
       <Devices {devices} />
     {/if}
