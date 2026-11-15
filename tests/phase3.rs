@@ -1029,15 +1029,16 @@ async fn m3_11_auto_reverse_gates_block_accidental_flips() {
             .drive_input_delta(10 + i * 12, 40, 0, 0, 100, 50)
             .unwrap();
     }
-    for _ in 0..12 {
-        client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
+    // Keep pushing until the flip lands, not for a fixed count: on a loaded
+    // runner a fixed 12-event stream can stretch past TOUCH_GAP_MS (150ms),
+    // the gap-continuity dwell resets, and the takeover never fires — the
+    // m3_11 flake on this machine (2026-11-15, runs with 3 other suites in
+    // parallel) and the ubuntu CI runs recorded above. A real hand holds
+    // the push as long as needed, so the stream continues inside the poll
+    // loop until either the role flips or the budget expires.
     let start = std::time::Instant::now();
+    let mut push_tick = 0u32;
     while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Controller) {
-        // 10s: the takeover rides the request/response round-trip and the
-        // demotion on the old controller — the same loaded-runner budget
-        // m3_10 uses; 3s flaked on ubuntu CI (runs 42866567283/42870492694).
         if start.elapsed() > Duration::from_secs(10) {
             panic!(
                 "sustained push never took over; server={:?}, client={:?}",
@@ -1045,8 +1046,13 @@ async fn m3_11_auto_reverse_gates_block_accidental_flips() {
                 client.active_tunnel_role()
             );
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // 30ms apart, well under TOUCH_GAP_MS; the dwell also has the
+        // pinned heartbeat to carry it while this task is descheduled.
+        client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+        push_tick += 1;
+        tokio::time::sleep(Duration::from_millis(30)).await;
     }
+    let _ = push_tick;
 
     server.shutdown();
     client.shutdown();

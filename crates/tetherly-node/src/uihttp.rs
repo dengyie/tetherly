@@ -2387,7 +2387,7 @@ mod tests {
         // Pairing PIN lifecycle.
         let (code, _) = v1_call(port, "GET", "/api/v1/pairing/pin", &auth, "").await;
         assert_eq!(code, 404);
-        let (code, body) = v1_call(port, "POST", "/api/v1/pairing/pin", &auth, "").await;
+        let (code, body) = v1_call(port, "POST", "/api/v1/pairing/pin/rotate", &auth, "").await;
         assert_eq!(code, 201, "{body}");
         let grant: tetherly_api::PinGrant = serde_json::from_value(body).unwrap();
         assert!(grant.expires_in_secs > 0);
@@ -2406,7 +2406,7 @@ mod tests {
         // Input.
         let (code, body) = v1_call(port, "GET", "/api/v1/input", &auth, "").await;
         assert_eq!((code, body["seat"].as_str()), (200, Some("local")));
-        let (code, body) = v1_call(port, "POST", "/api/v1/input/stop", &auth, "").await;
+        let (code, body) = v1_call(port, "POST", "/api/v1/input/release", &auth, "").await;
         assert_eq!(
             (code, body["seat"].as_str()),
             (200, Some("local")),

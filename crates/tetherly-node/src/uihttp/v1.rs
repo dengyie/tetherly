@@ -67,8 +67,8 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/input"
         | "/api/v1/diagnostics"
         | "/api/v1/diagnostics/logs" => Some(&["GET"]),
-        "/api/v1/pairing/pin" => Some(&["GET", "POST", "DELETE"]),
-        "/api/v1/input/stop" => Some(&["POST"]),
+        "/api/v1/pairing/pin" => Some(&["GET", "DELETE"]),
+        "/api/v1/pairing/pin/rotate" | "/api/v1/input/release" => Some(&["POST"]),
         "/api/v1/diagnostics/log-level" => Some(&["PATCH"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
         p => match device_action(p) {
@@ -140,13 +140,13 @@ pub(super) async fn route(
         ("GET", "/api/v1/devices") => Ok(json(200, &crate::apiv1::model::devices(node))),
         ("GET", "/api/v1/pairing") => Ok(json(200, &crate::apiv1::model::pairing(node))),
         ("GET", "/api/v1/pairing/pin") => Ok(get_pin(node)),
-        ("POST", "/api/v1/pairing/pin") => rotate_pin(node),
+        ("POST", "/api/v1/pairing/pin/rotate") => rotate_pin(node),
         ("DELETE", "/api/v1/pairing/pin") => {
             node.clear_pin();
             Ok(no_content())
         }
         ("GET", "/api/v1/input") => Ok(json(200, &crate::apiv1::model::input(node).await)),
-        ("POST", "/api/v1/input/stop") => match node.input_stop_reported().await {
+        ("POST", "/api/v1/input/release") => match node.input_stop_reported().await {
             Ok(_) => Ok(json(200, &crate::apiv1::model::input(node).await)),
             Err(e) => Err(core_error(e)),
         },
@@ -255,7 +255,7 @@ fn get_pin(node: &Node) -> UiResponse {
     }
 }
 
-/// `POST /pairing/pin`: a fresh PIN, replacing any active one.
+/// `POST /pairing/pin/rotate`: a fresh PIN, replacing any active one.
 fn rotate_pin(node: &Node) -> Handled {
     node.generate_pin().map_err(core_error)?;
     pin_grant(node)
