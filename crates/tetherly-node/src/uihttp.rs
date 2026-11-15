@@ -2668,14 +2668,14 @@ mod tests {
         assert_eq!(name, "pairing.changed");
         assert_eq!(id1, snap_id + 1);
         assert_eq!(data["type"], "pairing.changed");
-        assert!(data["pairing"]["pin_active"].is_boolean());
+        assert!(data["data"]["pairing"]["pin_active"].is_boolean());
         node.emit(crate::events::UiEvent::FileDone {
             transfer_id: "t1".into(),
         });
         // M2c: transfers now carries full state instead of invalidated.
         let (id2, name, data) = a.next().await;
         assert_eq!((id2, name.as_str()), (id1 + 1, "transfers.changed"));
-        assert!(data["transfers"]["active_count"].is_number());
+        assert!(data["data"]["transfers"]["active_count"].is_number());
 
         // The filtered stream never saw pairing.changed.
         let (fid, name, _) = filtered.next().await;

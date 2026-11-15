@@ -7,7 +7,7 @@
 //! which fails when `client/src/lib/api/gen/api.ts` drifts). This crate must
 //! not depend on `tetherly-node` internals.
 
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
 
 /// Major version of the `/api/v1` contract. Breaking changes bump this and
 /// move to a new path prefix.
@@ -357,15 +357,71 @@ impl Event {
     }
 }
 
-/// SSE `data:` payload: `{"seq":…,"type":…,…}`. `seq` is also the SSE `id:`
-/// and strictly increases within one daemon run; a run starts above any
-/// earlier run's range, so a stale `Last-Event-ID` resyncs via snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// SSE `data:` payload: `{"seq":…,"type":…,"data":<bare payload>}`. `seq` is
+/// also the SSE `id:` and strictly increases within one daemon run; a run
+/// starts above any earlier run's range, so a stale `Last-Event-ID` resyncs
+/// via snapshot. `data` is uniform across every event name so consumers do a
+/// single dumb unwrap instead of per-variant field lookup.
+impl EventEnvelope {
+    fn tagged(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(&self.event)
+    }
+}
+
+impl Serialize for EventEnvelope {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let event = self.tagged().map_err(serde::ser::Error::custom)?;
+        // The tagged event is `{type, <payload fields>}`; strip `type` and the
+        // rest becomes the uniform bare `data` payload.
+        let mut obj = event;
+        let ty = match obj {
+            serde_json::Value::Object(ref mut map) => map.remove("type"),
+            _ => None,
+        }
+        .unwrap_or(serde_json::Value::Null);
+        let mut st = s.serialize_struct("EventEnvelope", 3)?;
+        st.serialize_field("seq", &self.seq)?;
+        st.serialize_field("type", &ty)?;
+        st.serialize_field("data", &obj)?;
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for EventEnvelope {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            seq: u64,
+            #[serde(rename = "type")]
+            ty: String,
+            data: serde_json::Value,
+        }
+        let raw = Raw::deserialize(d)?;
+        let mut obj = match raw.data {
+            serde_json::Value::Null => serde_json::Value::Object(Default::default()),
+            v @ serde_json::Value::Object(_) => v,
+            other => serde_json::json!({ "value": other }),
+        };
+        let Some(map) = obj.as_object_mut() else {
+            return Err(serde::de::Error::custom("data must be an object"));
+        };
+        map.insert("type".into(), raw.ty.into());
+        let event = serde_json::from_value(obj).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            seq: raw.seq,
+            event,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct EventEnvelope {
     #[cfg_attr(test, ts(type = "number"))]
     pub seq: u64,
-    #[serde(flatten)]
+    // Serialized by hand (see the impl above): the wire carries the bare
+    // payload, not the nested event enum.
+    #[cfg_attr(test, ts(type = "unknown"))]
     pub event: Event,
 }
 

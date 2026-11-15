@@ -102,13 +102,14 @@ const server = http.createServer((req, res) => {
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
-    // Scripted stream: the full-state burst a fresh session receives.
+    // Scripted stream: the full-state burst a fresh session receives. Frames
+    // use the real EventEnvelope wire shape: {"seq","type","data"} (§4.3).
     const frames = [
       { type: "snapshot", data: snapshot },
       { type: "activity.changed", data: activity },
     ];
     for (const f of frames) {
-      res.write(`id: ${seq}\nevent: ${f.type}\ndata: ${JSON.stringify({ seq, ...f })}\n\n`);
+      res.write(`id: ${seq}\nevent: ${f.type}\ndata: ${JSON.stringify({ seq, type: f.type, data: f.data })}\n\n`);
       seq += 1;
     }
     const keep = setInterval(() => res.write(": ping\n\n"), 5000);

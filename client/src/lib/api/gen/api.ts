@@ -44,7 +44,7 @@ export type Topic = "devices" | "pairing" | "input" | "system" | "layout" | "tra
 
 export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "activity.changed", activity: Activity, } | { "type": "invalidated", topic: Topic, };
 
-export type EventEnvelope = { seq: number, } & ({ "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "activity.changed", activity: Activity, } | { "type": "invalidated", topic: Topic, });
+export type EventEnvelope = { seq: number, event: unknown, };
 
 export type DevicePatch = { alias?: string, tags?: Array<string>, };
 

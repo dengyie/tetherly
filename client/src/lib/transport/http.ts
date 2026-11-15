@@ -104,15 +104,16 @@ function parseFrame(frame: string): ServerEvent | null {
   }
   if (!data) return null;
   try {
-    const parsed = JSON.parse(data);
     // The wire data is the EventEnvelope (`{seq, type, data: …}`, §4.3);
     // stores and MockTransport speak in bare payloads, so unwrap the inner
     // `data` field and hand it over with the envelope's type.
+    const parsed = JSON.parse(data);
     if (parsed && typeof parsed === "object" && "seq" in parsed && "type" in parsed) {
       return { id, type, data: parsed.data };
     }
     return { id, type, data: parsed };
-  } catch {
+  } catch (err) {
+    console.error("[events]", err);
     return null;
   }
 }

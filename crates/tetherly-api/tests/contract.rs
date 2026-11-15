@@ -79,7 +79,10 @@ mod events {
     }
 
     #[test]
-    fn envelope_flattens_seq_and_type_tag() {
+    fn envelope_carries_type_tag_and_uniform_data() {
+        // Wire shape: `{"seq":…,"type":"…","data":<bare payload>}`. A uniform
+        // `data` key (not per-variant fields) keeps every consumer — the SPA
+        // parser, the Tauri SSE forwarder — a single dumb unwrap.
         let env = EventEnvelope {
             seq: 7,
             event: Event::DeviceUpdated { device: device() },
@@ -87,7 +90,8 @@ mod events {
         let v = serde_json::to_value(&env).unwrap();
         assert_eq!(v["seq"], 7);
         assert_eq!(v["type"], "device.updated");
-        assert_eq!(v["device"]["path"], "lan");
+        assert_eq!(v["data"]["device"]["path"], "lan");
+        assert!(v.get("device").is_none(), "payload must sit under data");
         let back: EventEnvelope = serde_json::from_value(v).unwrap();
         assert_eq!(back, env);
     }
