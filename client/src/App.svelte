@@ -7,6 +7,7 @@
   import { applyEvent as pairEvent, applySnapshot as pairSnapshot, initialPairing, type PairingState } from "./lib/stores/pairing";
   import { applyEvent as inputEvent, applySnapshot as inputSnapshot, initialInput, type InputState } from "./lib/stores/input";
   import type { Snapshot } from "./lib/api/gen/api";
+  import { Api } from "./lib/api/client";
   import Overview from "./routes/Overview.svelte";
   import Devices from "./routes/Devices.svelte";
 
@@ -24,11 +25,13 @@
   let system: SystemState = $state(initialSystem());
   let pairing: PairingState = $state(initialPairing());
   let input: InputState = $state(initialInput());
+  let api = $state<Api | null>(null);
   let page: "overview" | "devices" = $state("overview");
 
   onMount(() => {
     setApiToken(readFragmentToken() ?? sessionStorage.getItem("tetherly_token"));
     const transport = new HttpTransport();
+    api = new Api(transport);
     // Reducer mirrors: mutated inside the event callback, assigned to the
     // $state variables so Svelte 5 picks up the change.
     let d = initialDevices();
@@ -81,8 +84,8 @@
   <main>
     {#if page === "overview"}
       <Overview {devices} {system} {input} />
-    {:else}
-      <Devices {devices} />
+    {:else if api}
+      <Devices list={[...devices.byId.values()]} {api} />
     {/if}
   </main>
 </div>
