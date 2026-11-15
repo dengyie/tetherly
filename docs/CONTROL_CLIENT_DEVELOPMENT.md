@@ -347,7 +347,7 @@ export interface Transport {
 | 阶段 | 内容 | 交付和验收 |
 |---|---|---|
 | **M0 契约基础** ✅ v0.2.56（§127；schemars 推迟到 M5） | 新建 `tetherly-api` crate（DTO、`Event`、`Snapshot`、错误码），接入 `ts-rs` 和 `schemars`；`/api/v1/health` 和 `/system`；v1 的读写两级鉴权；CI 加类型漂移检查 | `cargo test` 覆盖 DTO 序列化往返；CI 绿 |
-| **M1 事件流** | `project()` 投影函数、`ProjectionState` 快照、`seq` 环形缓冲、`Last-Event-ID` 续传、主题过滤、高频节流；旧 `/api/*` 冻结 | 单元测试：投影纯函数、序号连续、缓冲溢出后重新发快照、节流；集成测试：断线续传 |
+| **M1 事件流** ✅ v0.2.57（§128；旧路由计数随 M2 diagnostics） | `project()` 投影函数、`ProjectionState` 快照、`seq` 环形缓冲、`Last-Event-ID` 续传、主题过滤、高频节流；旧 `/api/*` 冻结 | 单元测试：投影纯函数、序号连续、缓冲溢出后重新发快照、节流；集成测试：断线续传 |
 | **M2 门面 + Web SPA** | 实现 §4.2 全部端点；`client/` 工程搭好，包括 Transport、store、设计系统和 7 个页面；daemon 在 `/next/` 托管新 SPA，旧控制台留在 `/` | vitest 覆盖 reducer 和 store；Playwright 对接 MockTransport 跑主要流程；在真实 daemon 上冒烟测试 |
 | **M3 Tauri 桌面壳** | `src-tauri`：请求代理、事件流转发、token 读取（含 Windows 客户端 token 签发）、托盘、托盘面板、自启、系统通知、深链接；CI 的 release 产物增加 `.dmg` 和 `.msi` | 两端安装运行；托盘状态和事件同步；daemon 重启后客户端自动恢复；内存占用 < 120 MB |
 | **M4 切换** | `/` 改为新 SPA，旧控制台移到 `/legacy/` 保留两个版本；daemon 内置托盘的双击动作改为优先唤起客户端（深链接 `tetherly://open`），失败时再打开浏览器；`popover.rs` 退役 | 生产两端连续使用一周没有回退 |

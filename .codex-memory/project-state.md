@@ -510,3 +510,4 @@
 
 - 2026-11-15: 控制客户端设计完成（ADR-139 + docs/CONTROL_CLIENT_DEVELOPMENT.md，DEVELOPMENT §126）：/api/v1 契约 + 快照/增量事件流 + Tauri2/Svelte5 托盘客户端 + daemon 托管 SPA；M0–M5 待实施。
 - 2026-11-15: v0.2.56 控制客户端 M0 上线：tetherly-api crate + /api/v1/{health,system} + Read/Write/Admin 分级鉴权 + TS 漂移检查（DEVELOPMENT §127）。下一步 M1 事件流。
+- 2026-11-15: v0.2.57 控制客户端 M1 上线：/api/v1/events SSE（快照 + Last-Event-ID 回放 + topics 过滤 + 节流）、/api/v1/devices（DEVELOPMENT §128）。下一步 M2 门面 + Web SPA。

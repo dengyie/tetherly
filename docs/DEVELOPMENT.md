@@ -9109,3 +9109,28 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - 新增的 WARN 只有探测触发的 `v1 route refused`，属预期。
 - 顺带发现：uihttp/apitoken 测试的临时 data_dir 有部分没清理（`$TMPDIR/tetherly-uihttp-test-*`），留到 M5 清理。
 - 下一步：M1 事件流（`/api/v1/events`：先快照再增量，`seq`、`Last-Event-ID`、1024 环形缓冲，`project()` 映射）。
+
+## 128. 控制客户端 M1：事件流 (v0.2.57)
+
+按 [ADR-139](adr/139-control-client-architecture.md) 与 [CONTROL_CLIENT_DEVELOPMENT.md](CONTROL_CLIENT_DEVELOPMENT.md) 的 M1 落地。
+
+- **契约（`tetherly-api`）**：新增 `Device`、`LinkPath`、`Pairing`（不含 PIN 本身）、`Input`、`Snapshot`、`Topic`（10 个，`parse_list` 遇未知名返回 `Err(名字)`）、`Event`（`type` 标签：`snapshot` / `device.updated` / `device.removed` / `pairing.changed` / `input.changed` / `system.changed` / `invalidated`）、`EventEnvelope{seq, ...event}`。TS 绑定已重新生成。
+- **事件管线 `crates/tetherly-node/src/apiv1/`**：
+  - `project.rs`：`project(&UiEvent) -> Vec<Mark>`，**穷举 match**（新增 UiEvent 必须决定 v1 暴露方式）。设备生命周期 → `Device(id)`（上下线/封禁同时标 `System` 计数）；延迟、链路质量、网卡重扫为 noisy；pin → `Pairing`；输入座席/隧道 → `Input`；拓扑/传输/收件箱/活动/剪贴板/各类策略 → `Invalidate(topic)`；诊断类事件不暴露。
+  - `coalesce.rs`：按 key 合并，100 ms 一个 tick；只有 noisy 标记的 key 每秒最多一次，尾随发送，最终状态不丢；节流历史自动清理。
+  - `journal.rs`：`seq` 基数 = 启动时 `unix_ms*1000`，跨重启单调；1024 帧环形缓冲；`since(last)` 只在能证明完整时回放，否则（被挤出、旧进程的 id、未来 id）返回 `None` → 发快照。帧只序列化一次，多订阅者共享。
+  - `model.rs`：live / trusted / discovered / blocked 四源合并为 `Device`（纯函数 `merge`，名称优先级 live → mDNS → 别名 → id；revoked 不算 trusted），外加 `pairing` / `input` / `system` / `snapshot`。
+  - `hub.rs`：每个 UI 监听器一个 `EventHub` + pump 任务；设备按上次推送值做 diff，未变化不推；节点事件通道 Lagged 时全量重标；`publish` 在锁内 push + broadcast，保证顺序。
+- **HTTP**：
+  - `GET /api/v1/events`（Read 级）：先快照（或按 `Last-Event-ID` 头 / `?last_event_id=` 回放），再推增量；`?topics=a,b` 过滤（快照总是发），未知 topic 返回 400 `bad_request`；`retry: 2000`；15 s ping；订阅者跟不上广播缓冲时断开，客户端凭 id 续传。
+  - `GET /api/v1/devices`、`GET /api/v1/devices/{id}`（404 `not_found`）。
+  - `/api/v1/system` 改用 `apiv1::model::system`。
+- **旧 `/api/*` 冻结**：从本版起不再新增旧路由。旧路由命中计数（开发文档 §9）随 M2 的 `/api/v1/diagnostics` 一起做。
+- **测试**：project 6 项、coalesce 6 项、journal 5 项、model 4 项、hub 2 项；集成测试 `v1_events_snapshot_replay_and_filters`（401 / 400 / 405、快照首帧、seq 连续、topic 过滤、`Last-Event-ID` 回放、旧 id 重发快照）和 `v1_devices_list_and_item`；contract 新增 3 项。
+
+### 上线验证
+
+- CI 43704217784 五个 job 全绿；release 43705272270（macOS / Windows / Android / Linux / publish）成功。
+- `scripts/deploy.sh --target all --tag v0.2.57`：部署前清理 Windows 内存，可用内存从 3027 MB 升到 3740 MB，trim 34 个进程。Mac 进程 pid 87918；Windows 进程 pid 由 267572 变为 308536，仍以 SYSTEM 运行。两端 live_peers=1；komari / SRBMiner / mihomo 进程完好。
+- 只读探测：Mac 带 token 请求 `/api/v1/events`，先收到 `retry: 2000`，接着是 `snapshot` 帧（seq=1794740063968018）和 `device.updated`（DESKTOP-VST7EIE，lan，3 ms）；`?topics=bogus` 返回 400；`/api/v1/devices` 返回 1 台。Windows 不带 token 请求 events 返回 401，health 显示 0.2.57。
+- 遗留：客户端主动断开 SSE 时日志打 `WARN ui request e=Broken pipe`，这是正常断连，M2 中降为 debug。
