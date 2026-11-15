@@ -68,6 +68,7 @@ mod api_screen_session;
 mod api_screen_tile;
 mod api_topology;
 mod dto;
+mod next;
 mod util;
 mod v1;
 
@@ -639,6 +640,11 @@ async fn route(
         ("GET", "/") | ("GET", "/index.html") => {
             api_core::get_index(method, query_str, body, node).await
         }
+        // ADR-139 M2b: the new SPA lives at /next/ (legacy console stays at
+        // /). GET-only, assets 404, unknown /next/* paths fall back to the
+        // entry so deep links still boot the app.
+        ("GET", "/next") | ("GET", "/next/") => next::get_entry(),
+        ("GET", p) if p.starts_with("/next/") => next::get_asset(p),
         ("GET", "/api/state") => api_core::get_state(method, query_str, body, node).await,
         ("GET", "/api/config") => api_core::get_config(method, query_str, body, node).await,
         ("POST", "/api/config") | ("PUT", "/api/config") => {

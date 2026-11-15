@@ -22,3 +22,7 @@ android/app/src/main/jniLibs/
 # Local scratch for on-device smoke tests: holds a live identity.bin + trust
 # state. Never committed.
 .tmp-apk-test/
+# ADR-139 control client: dependencies are installed by pnpm, never committed
+# (client/dist IS committed — the daemon embeds it at compile time, same as
+# ui/index.html).
+client/node_modules/
