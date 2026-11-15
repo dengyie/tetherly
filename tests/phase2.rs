@@ -428,9 +428,18 @@ async fn dynamic_network_rescan_and_overlay_events_via_loopback_api() {
             .write_all(raw_req.as_bytes())
             .await
             .expect("write raw");
-        let mut buf = vec![0u8; 1024];
-        let n = raw_stream.read(&mut buf).await.expect("read raw");
-        let resp_str = String::from_utf8_lossy(&buf[..n]);
+        // Read to EOF, not a single read(): the server writes headers and
+        // body in separate write_all calls, and under CI scheduling the body
+        // ("loopback only") can land in a second TCP segment after the first
+        // read already returned the headers (ubuntu CI run 43707888954).
+        // Connection: close guarantees the stream ends, so read-to-EOF is
+        // bounded.
+        let mut buf = Vec::new();
+        raw_stream
+            .read_to_end(&mut buf)
+            .await
+            .expect("read raw to eof");
+        let resp_str = String::from_utf8_lossy(&buf);
         assert!(
             resp_str.contains("403 Forbidden") && resp_str.contains("loopback only"),
             "non-loopback host must be rejected with 403: {resp_str}"
