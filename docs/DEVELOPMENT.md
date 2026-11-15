@@ -9153,3 +9153,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - 双端 `/api/health` 均 0.2.58、live_peers=1。Mac 只读探测 v1：`/api/v1/health` 无 token 200（开放）、带 token 返回 `api:1`；`/api/v1/diagnostics` 的 `legacy_routes` 已开始计数（curl 调用按 UA 归类）；`/api/v1/devices` 返回 DESKTOP-VST7EIE（lan，7 ms）；`POST /api/v1/pairing/pin/rotate` 返回 PinGrant（新路由生效）。
 - 本节补丁提交：`53c441b`（路由对齐 + m3_11 flake 根治）、`37736c8`（phase2 read_to_end）、`28cc35e`（本节 + 基线块滚动）。
 - 下一步：M2b Web SPA（`client/` Svelte 5 工程，daemon 在 `/next/` 托管）。
+
+## 130. 控制客户端 M2b：Web SPA 脚手架 + daemon `/next/` 托管（未发版，main 5 提交）
+
+接手续作（2026-11-15）。M2b 目标（§351）：`client/` 工程搭好 Transport、store、设计系统与页面，daemon 在 `/next/` 托管新 SPA，旧控制台留在 `/`。本轮完成核心链路与首批页面；5 个提交全部 CI 绿。
+
+- **daemon `/next/` 托管（`89b6498`，Rust）**：新模块 `uihttp/next.rs`，`GET /next(/|)` 返回入口文档、`/next/assets/app.js|index.css` 按内容类型回包、未知 `/next/*` 回退入口（SPA 深链归 SPA 路由器）；GET-only，旧控制台 `/` 与全部 `/api/*` 冻结不动。产物以固定文件名编译期嵌入（`include_str!`，与 `ui/index.html` 同模式），`client/vite.config.ts` 配 hash-free 资产名，`client/dist` 进 git 使 CI 无需 node 步骤；`client/node_modules` 进 `.gitignore`。4 个单测 + fmt + clippy（原生 & windows-gnu）绿；node lib 337 全绿。
+- **client 脚手架（`36311ea`）**：Svelte 5 + Vite 6 + TS。`lib/transport`：Transport seam（今日 HttpTransport，测试/Tauri 走 Mock/TauriTransport）+ 手写 SSE 帧解析、`?last_event_id=` 续传、退避重连、`#token=` fragment → sessionStorage 即读即清；`lib/stores`：纯 reducer devices/connection，`fold(snapshot, events) == snapshot` property 测试，未知事件原样返回；App shell（linkState 头部）+ 概览/设备两页。vitest 4/4、svelte-check 0 错、build 46.5 kB。
+- **section stores + 真数据概览（`e4e4821`）**：system/pairing/input 三个同型 reducer store（6 新测试，10/10），App 把每个流事件扇出到全部 store；概览页渲染真实"本机"块（名称/版本/平台/运行时长/设备 ID）与输入归属。
+- **类型化 Api 层 + 设备动作（`f3ffef0`）**：`lib/api/client.ts` 逐端点封装当前全部 v1 合约（health/system/devices CRUD+connect+block/pairing pin 生命周期/input release/diagnostics），动作页按钮接 busy 与错误上浮。
+- **诊断页 + PIN 卡片（`fec98f3`）**：诊断页（事件流 seq、legacy `/api/*` 命中表——M2a 迁移监控、日志尾刷新、log-level 热更/恢复）；概览配对卡片（PIN 窗口状态 + 显示/轮换/撤销）。
+- **验证**：每个提交 CI 绿（43725065383 / 43725860017 / 43726288460 / 43726693094，共 4/4）。临时实例（45816/45826）真实浏览器冒烟：`/next/` 渲染、hash 剥离、token 入 sessionStorage、SSE `linkState=live`、页面切换、设备/诊断动作可用；`invalidated` 链路实测（config 写 → settings topic 帧到达）。生产 daemon 45716 全程未动。
+- **契约现状与边界**：snapshot 仅 4 section（system/devices/pairing/input）；layout/transfers/inbox/activity/settings 六类内部事件经 `apiv1/project.rs` 投影为 `invalidated`（topic），v1 无对应 GET 端点——四张对应页面等 M2c 端点扩展后接数据，客户端 store 已按"未知事件忽略"容错。
+- **剩余 M2b 收尾**：Playwright + MockTransport 主流程、dashboard 链接切 `/next/`（M4 切换前）、四张占位页的数据接入。

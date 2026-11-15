@@ -1218,3 +1218,11 @@
 - 临时实例（45816）冒烟 + 真实浏览器验证：页面渲染、hash 剥离、token 入 sessionStorage、SSE linkState=live、页面切换正常、旧控制台完好。生产 daemon 45716 全程未动。
 - 提交 89b6498（Rust 托管）+ 36311ea（client 脚手架）→ push main，CI 43725065383。
 - 下一步：system/pairing/input 等 store + api client 层 + 剩余 5 页；dashboard 链接指向 /next/（含 token fragment）留到 M4 切换前。
+
+## 2026-11-15 M2b 续：section stores / Api 层 / 诊断与 PIN（CI 4/4 绿）
+- e4e4821：system/pairing/input 纯 reducer store（6 新测试，10/10）；Overview 渲染真数据（本机块 + 输入归属）。
+- f3ffef0：client.ts 类型化 Api 层覆盖当前全部 v1 端点；设备页动作（连接/屏蔽/忘记/解除屏蔽）。
+- fec98f3：诊断页（seq、legacy 路由命中表、日志尾、log-level 热更）+ 概览配对 PIN 卡片（显示/轮换/撤销）。
+- CI 43725065383 / 43725860017 / 43726288460 / 43726693094 全绿。
+- 实测 invalidated 链路：config 写 → settings topic invalidated 帧到达 SSE 客户端（hub.project → coalescer → publish 验证通过）。
+- 契约现状：snapshot 仅 4 section；layout/transfers/inbox/activity/settings 只发 invalidated、无 GET 端点 —— 对应页面等 Rust 侧 M2c 扩展后接数据。
