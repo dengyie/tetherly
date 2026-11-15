@@ -10,6 +10,7 @@
   import { Api } from "./lib/api/client";
   import Overview from "./routes/Overview.svelte";
   import Devices from "./routes/Devices.svelte";
+  import Diagnostics from "./routes/Diagnostics.svelte";
 
   // Token arrives via the daemon URL fragment (#token=…); read and strip it
   // immediately so it never stays in the address bar or history.
@@ -26,7 +27,7 @@
   let pairing: PairingState = $state(initialPairing());
   let input: InputState = $state(initialInput());
   let api = $state<Api | null>(null);
-  let page: "overview" | "devices" = $state("overview");
+  let page: "overview" | "devices" | "diagnostics" = $state("overview");
 
   onMount(() => {
     setApiToken(readFragmentToken() ?? sessionStorage.getItem("tetherly_token"));
@@ -80,12 +81,15 @@
   <nav>
     <button class:active={page === "overview"} onclick={() => (page = "overview")}>概览</button>
     <button class:active={page === "devices"} onclick={() => (page = "devices")}>设备</button>
+    <button class:active={page === "diagnostics"} onclick={() => (page = "diagnostics")}>诊断</button>
   </nav>
   <main>
-    {#if page === "overview"}
-      <Overview {devices} {system} {input} />
-    {:else if api}
+    {#if page === "overview" && api}
+      <Overview {devices} {system} {input} {pairing} {api} />
+    {:else if page === "devices" && api}
       <Devices list={[...devices.byId.values()]} {api} />
+    {:else if page === "diagnostics" && api}
+      <Diagnostics {api} />
     {/if}
   </main>
 </div>

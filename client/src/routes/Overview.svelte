@@ -2,12 +2,22 @@
   import type { DevicesState } from "../lib/stores/devices";
   import type { SystemState } from "../lib/stores/system";
   import type { InputState } from "../lib/stores/input";
+  import type { PairingState } from "../lib/stores/pairing";
+  import type { Api } from "../lib/api/client";
 
   let {
     devices,
     system,
     input,
-  }: { devices: DevicesState; system: SystemState; input: InputState } = $props();
+    pairing,
+    api,
+  }: {
+    devices: DevicesState;
+    system: SystemState;
+    input: InputState;
+    pairing: PairingState;
+    api: Api;
+  } = $props();
   const online = $derived([...devices.byId.values()].filter((d) => d.online && d.trusted));
   const seatLabel = $derived.by(() => {
     const i = input.input;
@@ -15,6 +25,46 @@
     if (!i.channel_open) return "本机";
     return i.peer ? `对端 ${i.peer}` : i.seat;
   });
+
+  let pin = $state("");
+  let pinErr = $state("");
+  let pinBusy = $state(false);
+  async function showPin() {
+    pinBusy = true;
+    pinErr = "";
+    try {
+      const g = await api.pin();
+      pin = g.pin;
+    } catch (e) {
+      pinErr = e instanceof Error ? e.message : String(e);
+    } finally {
+      pinBusy = false;
+    }
+  }
+  async function rotatePin() {
+    pinBusy = true;
+    pinErr = "";
+    try {
+      const g = await api.rotatePin();
+      pin = g.pin;
+    } catch (e) {
+      pinErr = e instanceof Error ? e.message : String(e);
+    } finally {
+      pinBusy = false;
+    }
+  }
+  async function revokePin() {
+    pinBusy = true;
+    pinErr = "";
+    try {
+      await api.revokePin();
+      pin = "";
+    } catch (e) {
+      pinErr = e instanceof Error ? e.message : String(e);
+    } finally {
+      pinBusy = false;
+    }
+  }
 </script>
 
 <h1>概览</h1>
@@ -35,6 +85,23 @@
 <section class="card">
   <h2>输入归属</h2>
   <p>{seatLabel}</p>
+</section>
+<section class="card">
+  <h2>配对</h2>
+  {#if pairing.pairing?.pin_active}
+    <p>PIN 接受窗口开启中（{pairing.pairing.pin_expires_in_secs}s）</p>
+  {:else}
+    <p class="dim">PIN 未激活</p>
+  {/if}
+  {#if pin}
+    <p class="pin mono">{pin}</p>
+  {/if}
+  {#if pinErr}<p class="err">{pinErr}</p>{/if}
+  <div class="row">
+    <button disabled={pinBusy} onclick={showPin}>显示 PIN</button>
+    <button disabled={pinBusy} onclick={rotatePin}>轮换</button>
+    <button class="danger" disabled={pinBusy} onclick={revokePin}>撤销</button>
+  </div>
 </section>
 <section class="card">
   <h2>在线设备（{online.length}）</h2>
@@ -61,4 +128,14 @@
   li { padding: 4px 0; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
   .ok { background: var(--ok); }
+  .pin { font-size: 24px; letter-spacing: 6px; margin: 8px 0; }
+  .err { color: #c0392b; font-size: 13px; }
+  .row { display: flex; gap: 8px; }
+  button {
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    padding: 4px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.danger { color: #c0392b; }
+  .mono { font-family: ui-monospace, monospace; }
 </style>
