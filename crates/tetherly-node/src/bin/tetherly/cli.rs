@@ -855,6 +855,9 @@ pub(crate) enum Cmd {
         /// Open the URL in the default browser instead of printing it.
         #[arg(long)]
         open: bool,
+        /// Point at the ADR-139 SPA at /next/ (M2b) instead of the legacy console.
+        #[arg(long)]
+        next: bool,
     },
     /// Gracefully stop the running node daemon.
     Stop {

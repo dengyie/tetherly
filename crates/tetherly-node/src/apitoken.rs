@@ -244,6 +244,15 @@ pub fn dashboard_url(ui_port: u16, token: Option<&str>) -> String {
     }
 }
 
+/// Same contract as [`dashboard_url`] for the ADR-139 SPA at `/next/`
+/// (M2b). The legacy console stays the default until the M4 switch.
+pub fn next_url(ui_port: u16, token: Option<&str>) -> String {
+    match token {
+        Some(t) => format!("http://127.0.0.1:{ui_port}/next/#token={t}"),
+        None => format!("http://127.0.0.1:{ui_port}/next/"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -402,6 +411,11 @@ mod tests {
         assert_eq!(
             dashboard_url(45716, Some("abc")),
             "http://127.0.0.1:45716/#token=abc"
+        );
+        assert_eq!(next_url(45716, None), "http://127.0.0.1:45716/next/");
+        assert_eq!(
+            next_url(45716, Some("abc")),
+            "http://127.0.0.1:45716/next/#token=abc"
         );
     }
 }

@@ -922,7 +922,7 @@ pub(crate) async fn config(
 /// token was loaded at CLI startup (env `TETHERLY_API_TOKEN` or the data
 /// dir's `api.token`); without it the plain URL still serves every
 /// read-only view.
-pub(crate) fn dashboard(ui_port: u16, open: bool) -> Result<()> {
+pub(crate) fn dashboard(ui_port: u16, open: bool, next: bool) -> Result<()> {
     let token = tetherly_node::api_token();
     if token.is_none() {
         eprintln!(
@@ -930,7 +930,11 @@ pub(crate) fn dashboard(ui_port: u16, open: bool) -> Result<()> {
              privileged dashboard actions will answer 401"
         );
     }
-    let url = tetherly_node::apitoken::dashboard_url(ui_port, token.as_deref());
+    let url = if next {
+        tetherly_node::apitoken::next_url(ui_port, token.as_deref())
+    } else {
+        tetherly_node::apitoken::dashboard_url(ui_port, token.as_deref())
+    };
     if !open {
         println!("{url}");
         return Ok(());

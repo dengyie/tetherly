@@ -460,8 +460,12 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<()> {
         } => {
             cmd_peers::ping(peer, count, json, ui_port).await?;
         }
-        Cmd::Dashboard { ui_port, open } => {
-            cmd_core::dashboard(ui_port, open)?;
+        Cmd::Dashboard {
+            ui_port,
+            open,
+            next,
+        } => {
+            cmd_core::dashboard(ui_port, open, next)?;
         }
         Cmd::Stop { ui_port } => {
             cmd_core::stop(ui_port).await?;
