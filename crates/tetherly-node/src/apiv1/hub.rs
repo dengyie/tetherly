@@ -21,6 +21,8 @@ pub const FLUSH_TICK: Duration = Duration::from_millis(100);
 pub struct EventHub {
     journal: Mutex<Journal>,
     tx: broadcast::Sender<Arc<Frame>>,
+    /// Frozen `/api/*` route hits for `GET /api/v1/diagnostics`.
+    pub legacy: super::legacy::LegacyRoutes,
 }
 
 /// A new subscriber's starting point. `replay` is `None` when the client
@@ -37,6 +39,7 @@ impl EventHub {
         Arc::new(Self {
             journal: Mutex::new(Journal::new(base, REPLAY_FRAMES)),
             tx,
+            legacy: Default::default(),
         })
     }
 
@@ -57,6 +60,14 @@ impl EventHub {
         let frame = j.push(event);
         // Sent under the lock so receivers see frames in seq order.
         let _ = self.tx.send(frame);
+    }
+
+    /// Sequence number of the newest frame.
+    pub fn current(&self) -> u64 {
+        self.journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current()
     }
 
     pub fn subscribe(&self, last: Option<u64>) -> Subscription {

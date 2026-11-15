@@ -46,3 +46,29 @@ export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "dev
 
 export type EventEnvelope = { seq: number, } & ({ "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "invalidated", topic: Topic, });
 
+export type DevicePatch = { alias?: string, tags?: Array<string>, };
+
+export type ConnectRequest = { addr?: string, };
+
+export type BlockRequest = { reason?: string, };
+
+export type PinGrant = { pin: string, expires_in_secs: number, };
+
+export type LegacyRouteHits = { method: string, route: string, 
+/**
+ * `cli` | `browser` | `android` | `curl` | `other`.
+ */
+caller: string, count: number, };
+
+export type Diagnostics = { 
+/**
+ * Current event-stream sequence number.
+ */
+event_seq: number, legacy_routes: Array<LegacyRouteHits>, };
+
+export type LogTail = { lines: Array<string>, };
+
+export type LogLevel = { filter: string, baseline: string, revert_at_ms: number | null, };
+
+export type LogLevelRequest = { filter?: string, reset?: boolean, revert_after_secs?: number, };
+

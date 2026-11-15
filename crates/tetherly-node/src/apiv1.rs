@@ -8,5 +8,6 @@
 pub mod coalesce;
 pub mod hub;
 pub mod journal;
+pub mod legacy;
 pub mod model;
 pub mod project;

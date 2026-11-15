@@ -349,6 +349,111 @@ pub struct EventEnvelope {
     pub event: Event,
 }
 
+/// `PATCH /devices/{id}`: only the fields present change.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct DevicePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub tags: Option<Vec<String>>,
+}
+
+impl DevicePatch {
+    pub fn is_empty(&self) -> bool {
+        self.alias.is_none() && self.tags.is_none()
+    }
+}
+
+/// `POST /devices/{id}/connect`: optional explicit `ip:port` to dial.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ConnectRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub addr: Option<String>,
+}
+
+/// `POST /devices/{id}/block`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct BlockRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+/// The local pairing PIN (`GET`/`POST /pairing/pin`). Fetched on demand,
+/// never pushed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PinGrant {
+    pub pin: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub expires_in_secs: u64,
+}
+
+/// Hits on one frozen `/api/*` route, by caller class (ADR-139 §9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LegacyRouteHits {
+    pub method: String,
+    pub route: String,
+    /// `cli` | `browser` | `android` | `curl` | `other`.
+    pub caller: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+}
+
+/// `GET /diagnostics`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Diagnostics {
+    /// Current event-stream sequence number.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub event_seq: u64,
+    pub legacy_routes: Vec<LegacyRouteHits>,
+}
+
+/// `GET /diagnostics/logs?tail=&level=&grep=`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LogTail {
+    pub lines: Vec<String>,
+}
+
+/// Active log filter (`PATCH /diagnostics/log-level` response).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LogLevel {
+    pub filter: String,
+    pub baseline: String,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub revert_at_ms: Option<u64>,
+}
+
+/// `PATCH /diagnostics/log-level`: set `filter` (optionally auto-reverting)
+/// or `reset` to the baseline.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct LogLevelRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub filter: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(as = "Option<bool>", optional))]
+    pub reset: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub revert_after_secs: Option<u64>,
+}
+
 #[cfg(test)]
 mod bindings {
     //! TypeScript drift check. Regenerate with
@@ -384,6 +489,15 @@ mod bindings {
             decl::<Topic>(&cfg),
             decl::<Event>(&cfg),
             decl::<EventEnvelope>(&cfg),
+            decl::<DevicePatch>(&cfg),
+            decl::<ConnectRequest>(&cfg),
+            decl::<BlockRequest>(&cfg),
+            decl::<PinGrant>(&cfg),
+            decl::<LegacyRouteHits>(&cfg),
+            decl::<Diagnostics>(&cfg),
+            decl::<LogTail>(&cfg),
+            decl::<LogLevel>(&cfg),
+            decl::<LogLevelRequest>(&cfg),
         ] {
             out.push_str(&d);
             out.push('\n');

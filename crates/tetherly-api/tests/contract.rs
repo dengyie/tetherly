@@ -155,3 +155,57 @@ mod events {
         assert_eq!(Topic::parse_list("devices,bogus").unwrap_err(), "bogus");
     }
 }
+
+mod commands {
+    use serde_json::json;
+    use tetherly_api::*;
+
+    #[test]
+    fn device_patch_fields_are_optional_and_strict() {
+        let p: DevicePatch = serde_json::from_value(json!({"alias": "Desk"})).unwrap();
+        assert_eq!(p.alias.as_deref(), Some("Desk"));
+        assert_eq!(p.tags, None);
+        let p: DevicePatch = serde_json::from_value(json!({})).unwrap();
+        assert!(p.is_empty());
+        assert!(serde_json::from_value::<DevicePatch>(json!({"alais": "x"})).is_err());
+    }
+
+    #[test]
+    fn optional_request_bodies_accept_empty_objects() {
+        let c: ConnectRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(c.addr, None);
+        let b: BlockRequest = serde_json::from_value(json!({"reason": "spam"})).unwrap();
+        assert_eq!(b.reason.as_deref(), Some("spam"));
+        assert!(serde_json::from_value::<BlockRequest>(json!({"why": 1})).is_err());
+    }
+
+    #[test]
+    fn diagnostics_wire_shape() {
+        let d = Diagnostics {
+            event_seq: 9,
+            legacy_routes: vec![LegacyRouteHits {
+                method: "GET".into(),
+                route: "/api/peers".into(),
+                caller: "cli".into(),
+                count: 3,
+            }],
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["legacy_routes"][0]["caller"], "cli");
+        assert_eq!(v["legacy_routes"][0]["count"], 3);
+    }
+
+    #[test]
+    fn log_level_request_needs_filter_or_reset() {
+        let r: LogLevelRequest = serde_json::from_value(json!({"filter": "debug"})).unwrap();
+        assert_eq!(r.filter.as_deref(), Some("debug"));
+        assert!(!r.reset);
+        let r: LogLevelRequest = serde_json::from_value(json!({"reset": true})).unwrap();
+        assert!(r.reset);
+        let g = PinGrant {
+            pin: "1234-5678".into(),
+            expires_in_secs: 60,
+        };
+        assert_eq!(serde_json::to_value(&g).unwrap()["pin"], "1234-5678");
+    }
+}

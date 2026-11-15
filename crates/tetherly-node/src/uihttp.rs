@@ -193,7 +193,18 @@ async fn accept_loop(
                 let hub = hub.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle(stream, node, ui_port, &token, &hub).await {
-                        warn!(%e, "ui request");
+                        // Clients hanging up mid-response (closed SSE tabs,
+                        // aborted fetches) are routine, not daemon faults.
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) {
+                            debug!(%e, "ui request: client went away");
+                        } else {
+                            warn!(%e, "ui request");
+                        }
                     }
                 });
             }
@@ -249,6 +260,7 @@ async fn handle(
     let mut sec_fetch_site: Option<String> = None;
     let mut presented: Option<String> = None;
     let mut last_event_id: Option<u64> = None;
+    let mut user_agent: Option<String> = None;
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
             continue;
@@ -266,6 +278,7 @@ async fn handle(
             "origin" => origin = Some(value.to_string()),
             "sec-fetch-site" => sec_fetch_site = Some(value.to_ascii_lowercase()),
             "last-event-id" => last_event_id = value.parse().ok(),
+            "user-agent" => user_agent = Some(value.to_string()),
             crate::apitoken::TOKEN_HEADER => presented = Some(value.to_string()),
             "authorization" => {
                 if let Some(t) = value.strip_prefix("Bearer ") {
@@ -279,6 +292,7 @@ async fn handle(
         write_http(&mut stream, 403, "text/plain", b"loopback only").await?;
         return Ok(());
     }
+    hub.legacy.record(method, path, user_agent.as_deref());
     // CSRF / DNS-rebinding gate: a browser page on any other origin cannot
     // forge loopback requests. curl/CLI send no Origin and stay allowed;
     // `Sec-Fetch-Site: cross-site` rejects even Origin-less browser requests.
@@ -378,7 +392,7 @@ async fn handle(
         body.extend_from_slice(&more[..k]);
     }
     body.truncate(content_len);
-    let resp = route(method, path, &body, &node).await;
+    let resp = route(method, path, &body, &node, hub).await;
     write_http_response(&mut stream, &resp).await
 }
 
@@ -448,6 +462,8 @@ impl From<(u16, &'static str, Vec<u8>)> for UiResponse {
 async fn write_http_response(stream: &mut TcpStream, resp: &UiResponse) -> std::io::Result<()> {
     let reason = match resp.code {
         200 => "OK",
+        201 => "Created",
+        204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -460,19 +476,26 @@ async fn write_http_response(stream: &mut TcpStream, resp: &UiResponse) -> std::
         503 => "Service Unavailable",
         _ => "Error",
     };
-    let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
-        resp.code,
-        reason,
-        resp.ctype,
-        resp.body.len()
-    );
+    // RFC 9110 §8.6: no Content-Length (or body) on a 204.
+    let mut head = if resp.code == 204 {
+        format!("HTTP/1.1 204 {reason}\r\nConnection: close\r\nCache-Control: no-store\r\n")
+    } else {
+        format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
+            resp.code,
+            reason,
+            resp.ctype,
+            resp.body.len()
+        )
+    };
     for (k, v) in &resp.headers {
         head.push_str(&format!("{k}: {v}\r\n"));
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes()).await?;
-    stream.write_all(&resp.body).await?;
+    if resp.code != 204 {
+        stream.write_all(&resp.body).await?;
+    }
     stream.flush().await
 }
 
@@ -598,13 +621,19 @@ async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> 
 // Generated router: every arm pattern stays here so the (method, path) table
 // remains greppable in one place, while the bodies live in feature modules.
 
-async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse {
+async fn route(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    node: &Node,
+    hub: &Arc<EventHub>,
+) -> UiResponse {
     let (path_only, query_str) = match path.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (path, None),
     };
     if path_only == tetherly_api::PREFIX || path_only.starts_with("/api/v1/") {
-        return v1::route(method, path_only, query_str, body, node).await;
+        return v1::route(method, path_only, query_str, body, node, hub).await;
     }
     match (method, path_only) {
         ("GET", "/") | ("GET", "/index.html") => {
@@ -2249,6 +2278,164 @@ mod tests {
         let (_, code, _) = raw_with_head(port, "POST", "/api/v1/devices", Some(&auth)).await;
         assert_eq!(code, 405);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1 call with a JSON body; returns status and parsed body.
+    async fn v1_call(
+        port: u16,
+        method: &str,
+        path: &str,
+        auth: &str,
+        body: &str,
+    ) -> (u16, serde_json::Value) {
+        let (code, out) = raw_request(port, method, path, Some(auth), body.as_bytes()).await;
+        (
+            code,
+            serde_json::from_slice(&out).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// ADR-139 M2a: device commands, pairing PIN, input stop, diagnostics.
+    #[tokio::test]
+    async fn v1_m2a_commands() {
+        use tetherly_core::TrustedPeer;
+        let (node, dir) = temp_test_node("v1_m2a");
+        let (other, other_dir) = temp_test_node("v1_m2a_other");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let auth = format!(
+            "Authorization: Bearer {}",
+            crate::apitoken::read(&dir).expect("token")
+        );
+        let id = other.identity().device_id().to_string();
+        node.seed_trusted_peer(TrustedPeer {
+            device_id: other.identity().device_id().clone(),
+            id_pk: *other.identity().id_pk(),
+            n_pk: *other.identity().n_pk(),
+            alias: "peer".into(),
+            paired_at: 1,
+            revoked: false,
+        })
+        .unwrap();
+        let item = format!("/api/v1/devices/{id}");
+
+        // PATCH: alias + tags, strict body, unknown device.
+        let (code, body) = v1_call(
+            port,
+            "PATCH",
+            &item,
+            &auth,
+            r#"{"alias":"Desk","tags":["lab"]}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        let d: tetherly_api::Device = serde_json::from_value(body).unwrap();
+        assert_eq!(d.alias.as_deref(), Some("Desk"));
+        assert_eq!(d.tags, vec!["lab".to_string()]);
+        let (code, body) = v1_call(port, "PATCH", &item, &auth, "{}").await;
+        assert_eq!(
+            (code, body["error"]["code"].as_str()),
+            (400, Some("bad_request"))
+        );
+        let (code, _) = v1_call(port, "PATCH", &item, &auth, r#"{"alais":"x"}"#).await;
+        assert_eq!(code, 400);
+        let (code, _) = v1_call(
+            port,
+            "PATCH",
+            "/api/v1/devices/tdev_nope",
+            &auth,
+            r#"{"alias":"x"}"#,
+        )
+        .await;
+        assert_eq!(code, 404);
+
+        // Block / unblock round trip.
+        let (code, body) = v1_call(
+            port,
+            "POST",
+            &format!("{item}/block"),
+            &auth,
+            r#"{"reason":"test"}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["blocked"], true);
+        let (code, body) = v1_call(port, "DELETE", &format!("{item}/block"), &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["blocked"], false);
+
+        // Connect with a bad address is a client error, not a hang.
+        let (code, _) = v1_call(
+            port,
+            "POST",
+            &format!("{item}/connect"),
+            &auth,
+            r#"{"addr":"nope"}"#,
+        )
+        .await;
+        assert_eq!(code, 400);
+        let (code, _) = v1_call(port, "GET", &format!("{item}/connect"), &auth, "").await;
+        assert_eq!(code, 405);
+
+        // Forget.
+        let (code, _) = v1_call(port, "DELETE", &item, &auth, "").await;
+        assert_eq!(code, 204);
+        let (code, _) = v1_call(port, "GET", &item, &auth, "").await;
+        assert_eq!(code, 404);
+        let (code, _) = v1_call(port, "DELETE", &item, &auth, "").await;
+        assert_eq!(code, 404);
+
+        // Pairing PIN lifecycle.
+        let (code, _) = v1_call(port, "GET", "/api/v1/pairing/pin", &auth, "").await;
+        assert_eq!(code, 404);
+        let (code, body) = v1_call(port, "POST", "/api/v1/pairing/pin", &auth, "").await;
+        assert_eq!(code, 201, "{body}");
+        let grant: tetherly_api::PinGrant = serde_json::from_value(body).unwrap();
+        assert!(grant.expires_in_secs > 0);
+        let (code, body) = v1_call(port, "GET", "/api/v1/pairing/pin", &auth, "").await;
+        assert_eq!(
+            (code, body["pin"].as_str()),
+            (200, Some(grant.pin.as_str()))
+        );
+        let (code, body) = v1_call(port, "GET", "/api/v1/pairing", &auth, "").await;
+        assert_eq!((code, body["pin_active"].as_bool()), (200, Some(true)));
+        let (code, _) = v1_call(port, "DELETE", "/api/v1/pairing/pin", &auth, "").await;
+        assert_eq!(code, 204);
+        let (_, body) = v1_call(port, "GET", "/api/v1/pairing", &auth, "").await;
+        assert_eq!(body["pin_active"], false);
+
+        // Input.
+        let (code, body) = v1_call(port, "GET", "/api/v1/input", &auth, "").await;
+        assert_eq!((code, body["seat"].as_str()), (200, Some("local")));
+        let (code, body) = v1_call(port, "POST", "/api/v1/input/stop", &auth, "").await;
+        assert_eq!(
+            (code, body["seat"].as_str()),
+            (200, Some("local")),
+            "{body}"
+        );
+
+        // Diagnostics: legacy hits are counted per caller; v1 calls are not.
+        let _ = raw_request(port, "GET", "/api/health", Some("User-Agent: curl/8"), b"").await;
+        let (code, body) = v1_call(port, "GET", "/api/v1/diagnostics", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let d: tetherly_api::Diagnostics = serde_json::from_value(body).unwrap();
+        assert!(d
+            .legacy_routes
+            .iter()
+            .any(|h| h.route == "/api/health" && h.caller == "curl" && h.count == 1));
+        assert!(d
+            .legacy_routes
+            .iter()
+            .all(|h| !h.route.starts_with("/api/v1")));
+        assert!(d.event_seq > 0);
+
+        // Log level is admin-tier and validates its body before anything else.
+        let (code, _) = v1_call(port, "PATCH", "/api/v1/diagnostics/log-level", &auth, "{}").await;
+        assert_eq!(code, 400);
+        let (code, _) = v1_call(port, "GET", "/api/v1/diagnostics/logs?tail=abc", &auth, "").await;
+        assert_eq!(code, 400);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other_dir);
     }
 
     /// Minimal SSE client for the v1 stream tests.
