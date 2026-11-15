@@ -5,6 +5,7 @@
 
 pub mod ancs;
 pub mod apitoken;
+pub mod apiv1;
 pub mod cred;
 pub mod events;
 pub mod lan;

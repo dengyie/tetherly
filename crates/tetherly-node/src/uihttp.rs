@@ -2,6 +2,7 @@
 //! Loopback-only desktop shell. Never bind 0.0.0.0. Bodies/OTP/PIN are not
 //! written to logs. Full Tauri packaging is the next desktop-shell iteration.
 
+use crate::apiv1::hub::EventHub;
 use crate::runtime::{Node, OutboxStatus};
 use crate::store::{ActionAccessMode, LocalActionDefinition};
 use serde::Serialize;
@@ -124,8 +125,9 @@ pub async fn bind_and_spawn_with_token(
         "ui listening (loopback only)"
     );
     let gate: Arc<str> = token.clone().unwrap_or_else(|| Arc::from(""));
+    let hub = EventHub::spawn(node.clone_handle());
     tokio::spawn(async move {
-        if let Err(e) = accept_loop(listener, node, bound, gate).await {
+        if let Err(e) = accept_loop(listener, node, bound, gate, hub).await {
             warn!(%e, "ui http");
         }
     });
@@ -171,6 +173,7 @@ async fn accept_loop(
     node: Node,
     ui_port: u16,
     token: Arc<str>,
+    hub: Arc<EventHub>,
 ) -> std::io::Result<()> {
     let mut stop = node.shutdown_signal();
     loop {
@@ -187,8 +190,9 @@ async fn accept_loop(
                 }
                 let node = node.clone_handle();
                 let token = token.clone();
+                let hub = hub.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle(stream, node, ui_port, &token).await {
+                    if let Err(e) = handle(stream, node, ui_port, &token, &hub).await {
                         warn!(%e, "ui request");
                     }
                 });
@@ -203,6 +207,7 @@ async fn handle(
     node: Node,
     ui_port: u16,
     token: &str,
+    hub: &Arc<EventHub>,
 ) -> std::io::Result<()> {
     let deadline = tokio::time::Instant::now() + REQUEST_READ_TIMEOUT;
     let mut buf = vec![0u8; 4096];
@@ -243,6 +248,7 @@ async fn handle(
     let mut origin: Option<String> = None;
     let mut sec_fetch_site: Option<String> = None;
     let mut presented: Option<String> = None;
+    let mut last_event_id: Option<u64> = None;
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
             continue;
@@ -259,6 +265,7 @@ async fn handle(
             }
             "origin" => origin = Some(value.to_string()),
             "sec-fetch-site" => sec_fetch_site = Some(value.to_ascii_lowercase()),
+            "last-event-id" => last_event_id = value.parse().ok(),
             crate::apitoken::TOKEN_HEADER => presented = Some(value.to_string()),
             "authorization" => {
                 if let Some(t) = value.strip_prefix("Bearer ") {
@@ -335,6 +342,14 @@ async fn handle(
                 write_http_response(&mut stream, &resp).await?;
                 return Ok(());
             }
+        }
+    }
+    if method == "GET" {
+        let (path_only, query) = path
+            .split_once('?')
+            .map_or((path, None), |(p, q)| (p, Some(q)));
+        if path_only == "/api/v1/events" {
+            return v1::events(&mut stream, &node, hub, query, last_event_id).await;
         }
     }
     if method == "GET"
@@ -2211,6 +2226,170 @@ mod tests {
         // Legacy routes keep their legacy shapes.
         let (_, code, _) = raw_with_head(port, "GET", "/api/health", None).await;
         assert_eq!(code, 200);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-139 M1: device collection and item share the event DTO.
+    #[tokio::test]
+    async fn v1_devices_list_and_item() {
+        let (node, dir) = temp_test_node("v1_m1_devices");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("token");
+        let auth = format!("Authorization: Bearer {token}");
+        let (_, code, _) = raw_with_head(port, "GET", "/api/v1/devices", None).await;
+        assert_eq!(code, 401);
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/devices", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        let list: Vec<tetherly_api::Device> = serde_json::from_value(body).unwrap();
+        assert!(list.is_empty());
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/devices/tdev_nope", Some(&auth)).await;
+        assert_eq!(code, 404);
+        assert_eq!(body["error"]["code"], "not_found");
+        let (_, code, _) = raw_with_head(port, "POST", "/api/v1/devices", Some(&auth)).await;
+        assert_eq!(code, 405);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Minimal SSE client for the v1 stream tests.
+    struct V1Sse {
+        s: tokio::net::TcpStream,
+        buf: Vec<u8>,
+        head: String,
+    }
+
+    impl V1Sse {
+        async fn open(port: u16, path: &str, headers: &[&str]) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let extra: String = headers.iter().map(|h| format!("{h}\r\n")).collect();
+            let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}\r\n");
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let split = loop {
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i;
+                }
+                let k = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut chunk))
+                    .await
+                    .expect("sse head timeout")
+                    .unwrap();
+                assert!(k > 0, "closed before head");
+                buf.extend_from_slice(&chunk[..k]);
+            };
+            let head = String::from_utf8_lossy(&buf[..split]).to_string();
+            let rest = buf[split + 4..].to_vec();
+            Self { s, buf: rest, head }
+        }
+
+        /// Next event frame `(id, event, data)`, skipping comments/retry.
+        async fn next(&mut self) -> (u64, String, serde_json::Value) {
+            use tokio::io::AsyncReadExt;
+            let mut chunk = [0u8; 8192];
+            loop {
+                while let Some(i) = self.buf.windows(2).position(|w| w == b"\n\n") {
+                    let block = String::from_utf8_lossy(&self.buf[..i]).to_string();
+                    self.buf.drain(..i + 2);
+                    let (mut id, mut ev, mut data) = (None, None, None);
+                    for line in block.lines() {
+                        if let Some(v) = line.strip_prefix("id: ") {
+                            id = v.parse::<u64>().ok();
+                        } else if let Some(v) = line.strip_prefix("event: ") {
+                            ev = Some(v.to_string());
+                        } else if let Some(v) = line.strip_prefix("data: ") {
+                            data = serde_json::from_str(v).ok();
+                        }
+                    }
+                    if let (Some(id), Some(ev), Some(data)) = (id, ev, data) {
+                        return (id, ev, data);
+                    }
+                }
+                let k = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.s.read(&mut chunk),
+                )
+                .await
+                .expect("sse frame timeout")
+                .unwrap();
+                assert!(k > 0, "sse closed");
+                self.buf.extend_from_slice(&chunk[..k]);
+            }
+        }
+    }
+
+    /// ADR-139 M1: snapshot first, coalesced full-state events with
+    /// contiguous seq, Last-Event-ID replay, topic filter, auth.
+    #[tokio::test]
+    async fn v1_events_snapshot_replay_and_filters() {
+        let (node, dir) = temp_test_node("v1_m1_events");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("token");
+        let auth = format!("Authorization: Bearer {token}");
+
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/events", None).await;
+        assert_eq!(code, 401, "{body}");
+        let (_, code, body) = raw_with_head(
+            port,
+            "GET",
+            "/api/v1/events?topics=devices,bogus",
+            Some(&auth),
+        )
+        .await;
+        assert_eq!(code, 400, "{body}");
+        assert_eq!(body["error"]["code"], "bad_request");
+        let (_, code, _) = raw_with_head(port, "POST", "/api/v1/events", Some(&auth)).await;
+        assert_eq!(code, 405);
+
+        let mut a = V1Sse::open(port, "/api/v1/events", &[&auth]).await;
+        assert!(a.head.starts_with("HTTP/1.1 200"), "{}", a.head);
+        assert!(a.head.contains("text/event-stream"), "{}", a.head);
+        assert!(a.head.contains("Tetherly-Api: 1"), "{}", a.head);
+        let (snap_id, name, data) = a.next().await;
+        assert_eq!(name, "snapshot");
+        assert_eq!(data["seq"], snap_id);
+        let snap: tetherly_api::EventEnvelope = serde_json::from_value(data).unwrap();
+        let tetherly_api::Event::Snapshot { snapshot } = snap.event else {
+            panic!("first frame must be a snapshot");
+        };
+        assert_eq!(
+            snapshot.system.device_id,
+            node.identity().device_id().to_string()
+        );
+        assert!(!snapshot.pairing.pin_active);
+
+        let mut filtered = V1Sse::open(port, "/api/v1/events?topics=transfers", &[&auth]).await;
+        assert_eq!(filtered.next().await.1, "snapshot");
+
+        node.emit(crate::events::UiEvent::PinStateChanged { active: true });
+        let (id1, name, data) = a.next().await;
+        assert_eq!(name, "pairing.changed");
+        assert_eq!(id1, snap_id + 1);
+        assert_eq!(data["type"], "pairing.changed");
+        assert!(data["pairing"]["pin_active"].is_boolean());
+        node.emit(crate::events::UiEvent::FileDone {
+            transfer_id: "t1".into(),
+        });
+        let (id2, name, data) = a.next().await;
+        assert_eq!((id2, name.as_str()), (id1 + 1, "invalidated"));
+        assert_eq!(data["topic"], "transfers");
+
+        // The filtered stream never saw pairing.changed.
+        let (fid, name, _) = filtered.next().await;
+        assert_eq!((fid, name.as_str()), (id2, "invalidated"));
+
+        // Resume: replay after id1, no snapshot.
+        let resume = format!("Last-Event-ID: {id1}");
+        let mut b = V1Sse::open(port, "/api/v1/events", &[&auth, &resume]).await;
+        let (rid, name, _) = b.next().await;
+        assert_eq!((rid, name.as_str()), (id2, "invalidated"));
+
+        // A stale id (earlier daemon run) resyncs with a snapshot.
+        let mut c = V1Sse::open(port, "/api/v1/events?last_event_id=5", &[&auth]).await;
+        let (cid, name, _) = c.next().await;
+        assert_eq!((cid, name.as_str()), (id2, "snapshot"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
