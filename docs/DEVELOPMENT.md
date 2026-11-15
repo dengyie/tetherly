@@ -9069,3 +9069,43 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
   - 多端适配；
   - M0–M5 迁移计划、测试策略和风险。
 - 本节只涉及文档，没有代码改动；实施从 M0 开始。
+
+## 127. 控制客户端 M0：契约基础 (v0.2.56)
+
+按 [ADR-139](adr/139-control-client-architecture.md) 与 [CONTROL_CLIENT_DEVELOPMENT.md](CONTROL_CLIENT_DEVELOPMENT.md) 的 M0 落地。
+
+- **`crates/tetherly-api`**：v1 唯一的 DTO 来源，不依赖 tetherly-node。
+  - 包含 `ErrorCode`（10 个，snake_case，`http_status()`）、`ErrorBody{error:{code,message}}`、`Health`、`System`、`Ports`、`PeerCounts`。
+  - 常量：`API_VERSION=1`、`PREFIX`、`Tetherly-Api` / `Tetherly-Version` 头名。
+- **TS 漂移检查**：
+  - `ts-rs` 只作为 dev-dependency（`cfg_attr(test)`），生产二进制不带。
+  - `bindings::typescript_bindings_are_current` 比对 `client/src/lib/api/gen/api.ts`，在 `cargo test --workspace` 里跑，所以 CI 天然覆盖。
+  - 重新生成：`TETHERLY_API_BLESS=1 cargo test -p tetherly-api bindings`。新类型要加进 `render()` 列表。
+  - schemars/Kotlin 推迟到 M5。
+- **daemon 侧**：`uihttp/v1.rs`。
+  - `GET /api/v1/health`：开放。
+  - `GET /api/v1/system`：由 `health_report()` + `local_caps_report()` 组装。
+  - 未知路径返回 404 `not_found`；已知路径用错方法返回 405 `method_not_allowed`，并带 `Allow` 头。
+  - 所有 v1 响应（包括错误）都带 `Tetherly-Api: 1` 和 `Tetherly-Version`。
+  - reason 表补了 401/409/500/503。
+- **分级鉴权**（`apitoken::Tier{Read<Write<Admin}`）：
+  - `v1_required_tier`：health 开放；其余 GET 需要 Read；`/api/v1/system/{restart,shutdown}` 和 `/api/v1/diagnostics/log-level` 需要 Admin；其它写操作需要 Write。
+  - `granted_tier`：当前 daemon token 授予 Admin；token 未生成或不匹配时 fail closed。
+  - 鉴权在 `handle()` 里、SSE 分流之前执行：无凭据返回 401 `unauthorized`，等级不足返回 403 `forbidden`。
+  - 旧 `/api/*` 路由和旧 401 形状保持不变。
+- **测试**：
+  - `v1_tiers_classify_*`、`granted_tier_*`；
+  - `v1_health_system_auth_and_error_envelope`：真 socket，断言头部、401/404/405 包络、System 字段；
+  - `tetherly-api/tests/contract.rs` 4 项。
+
+**上线验证（2026-11-15）**
+
+- CI 43699524027 五个 job 全绿；release 43700397457 全绿。
+- 首次 `deploy.sh` 在拉取产物时遇到 GitHub API 503，两端都没有改动；重试后成功。
+- 部署前清理 Windows 内存：可用内存从 4202 MB 升到 4910 MB，裁剪 37 个进程。
+- 两端 health 均为 0.2.56，live_peers=1。Windows 新 pid 为 267572，身份 SYSTEM，受保护进程 3/3 且 pid 未变。
+- 两端 `/api/v1/health` 均返回 200，带 `Tetherly-Api: 1` 和 `Tetherly-Version: 0.2.56`；`/api/v1/system` 无 token 时返回 401。
+- Mac 带 token 时 `/api/v1/system` 返回正确的 device_id，13 个 caps；405 和 404 包络正确。
+- 新增的 WARN 只有探测触发的 `v1 route refused`，属预期。
+- 顺带发现：uihttp/apitoken 测试的临时 data_dir 有部分没清理（`$TMPDIR/tetherly-uihttp-test-*`），留到 M5 清理。
+- 下一步：M1 事件流（`/api/v1/events`：先快照再增量，`seq`、`Last-Event-ID`、1024 环形缓冲，`project()` 映射）。
