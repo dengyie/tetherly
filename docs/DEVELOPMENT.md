@@ -9195,3 +9195,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **client（Svelte 5）**：`Api` 层补 9 个写方法；Transfers 页接 取消（活跃项）/清空历史 按钮；Inbox 页接 打开（is_safe 才显）/删除/清空，均沿用 Devices 页 busyId+notice 模式；Settings 页改可写——节点名称输入+保存、自动接收开关点击翻转（结果经 settings.changed 事件回灌，本地仅持草稿）；App 导航加 收件箱/设置 两页并给三页传 `{api}`。svelte-check 0 错、vitest 16/16、build 绿（dist 进 git）。
 - **验证**：cargo fmt 绿；clippy `--all-targets -- -D warnings` 原生 + windows-gnu 双 target 0 错；`cargo test --workspace` 37 个测试段全绿（本地 phase1 曾两例 401 竞态 flake，复跑 ×1 全绿，与 §124 环境抖动判定同族）。
 - **边界**：inbox open 依赖 `OpenRefused` 场景时仍为 400/500 细分不足（低危）；activity 页数据源、Playwright e2e 留 M2e；legacy `/api/*` 冻结不动。
+
+## 133. 控制客户端 M2e：activity 喂给 + Playwright 浏览器层 e2e（未发版，main 续）
+
+接 §132。M2e 目标：把最后一个停在 `invalidated` 的粗粒度 topic（activity）升级为全量状态事件，/next/ SPA 补上动态页——至此 ADR-139 §4.2 资源清单全部落进 SPA；并引入 Playwright 浏览器层 e2e（过程中揪出一个 jsdom 层不可能发现的 wire 解包 bug）。
+
+- **契约层（tetherly-api）**：新增 `Activity`（candidates/replies/messages/handoffs 四列表）与子类型 `ActivityCandidate`（OTP 横幅候选，照 `CandidateViewDto`）、`ActivityReply`（无文本，照 no-content 规则）、`ActivityMessage`（照 `PeerMessage`，方向枚举 `MessageDirection`）、`ActivityHandoff`（照 `HandoffEntry`，状态枚举 `HandoffStatus` 四值 snake_case）。`Event::ActivityChanged`（`activity.changed`，topic=Activity）。u64 时间戳补 `ts(type="number")`。契约测试事件表扩到 10 例。
+- **model + hub**：`model::activity(node)` 组装四数据源——`node.candidates()`、`node.reply_views()`、`node.message_history(None,Some(50),false,false)`、`node.handoff_inbox_list(None)`，纯映射；hub `resolve()` 的 `Topic::Activity` 从 `_ => invalidated` 提升为全量状态发布。hub 测试用真实入站 handoff（`receive_resource_handoff`）驱动断言——注意一个事件同时 mark Inbox+Activity 两主题，测试须按 frame name 过滤而非取首帧。
+- **v1 端点**：`GET /api/v1/activity`（GET-only 入 allowed() 表）；门面测试补 200 + 四空列表断言 + POST 405。
+- **client**：`activity.ts` reducer store（同型 event-only）；`Activity.svelte` 四卡片（通知候选/待取回复/直连消息/资源投递）；App 导航加 动态。svelte-check 0 错、vitest 18/18。
+- **Playwright e2e（browser tier，§7 的第三层）**：`client/playwright.config.ts` + `e2e/server.mjs`（Node http 静态服 dist 于 `/next/` + 脚本化 SSE mock daemon：snapshot + activity.changed 后 5s ping 保活）+ `e2e/app.spec.ts` 4 条流程（概览真数据渲染、动态页四喂给、全页导航无错、`#token=` 剥离入 sessionStorage）。走系统 Chrome（`channel:"chrome"`，免 CDN 下载；`PW_CHANNEL` 可覆盖）。
+- **HttpTransport 解包修复（e2e 的直接产出）**：真实 wire 的 SSE `data:` 是 `EventEnvelope`（`{seq,type,data}` 扁平化），HttpTransport 原样把 envelope 当 payload 上抛 → `applySnapshot` 收到 `{data:…}` 而非本体 → `devices is not iterable` → 读循环断流重连死循环。jsdom MockTransport 层喂的是裸 payload，永远暴露不了这个差异——Playwright 挂系统 Chrome 一跑就现形（且 `void err` 吞错误导致静默 offline，改为 `console.error("[events]", err)` 留痕）。`parseFrame` 现在统一解包 `parsed.data`，与 MockTransport 的 payload 约定对齐。
+- **验证**：fmt、clippy 双 target 0 错；tetherly-api 13 + node lib 338 全绿；workspace 37 段 ok（本机 phase1 出现跨不同测试的 loopback 竞态 flake——inbox 持久化 5s 超时、401、actions.json 持久化等，§124/§129 同族环境抖动，复跑全绿，M2e 未触碰相关代码路径）；vitest 18/18、svelte-check 0 错、Playwright 4/4。
+- **边界**：activity 页仍是只读展示（候选 dismiss/回复取回/消息已读等动作留后续轮）；e2e 依赖系统 Chrome 的机器可设 `PW_CHANNEL`；`void err` 已改为留痕日志。

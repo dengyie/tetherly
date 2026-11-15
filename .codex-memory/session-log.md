@@ -1254,3 +1254,13 @@
 - client：Api 9 个写方法；Transfers 取消/清历史、Inbox 打开（is_safe）/删除/清空、Settings 名称+auto_accept 可写（事件回灌，本地草稿）；App 导航加 收件箱/设置，三页传 {api}；svelte-check 0 错、vitest 16/16、build 绿。
 - 验证：fmt、clippy 双 target 0 错、workspace 全绿（phase1 两例 401 竞态 flake 复跑绿，§124 同族）；§132 已记。CI 盯守中。
 - 留下轮：activity 页数据、Playwright e2e（M2e）；M3 Tauri。
+
+## 2026-11-16 M2e：activity 喂给 + Playwright e2e（92a4ba4）
+- 契约：Activity 四列表（candidates/replies/messages/handoffs）+ 子类型 + MessageDirection/HandoffStatus；Event::ActivityChanged；测试表 10 例；绑定重生成。
+- model::activity 四数据源组装；hub Topic::Activity 升级全量状态；v1 GET /activity；门面测试补 200。
+- 注意：一个事件（ResourceHandoffReceived）同时 mark Inbox+Activity，测试按 frame name 过滤取帧，勿取首帧。
+- client：activity store + Activity.svelte 四卡片 + App 导航 动态；vitest 18/18。
+- **HttpTransport 解包 bug（Playwright 揪出）**：wire SSE data 是 EventEnvelope{seq,type,data}，原样上抛 → applySnapshot 收到 {data:…} → devices not iterable → 断流重连循环。jsdom MockTransport 喂裸 payload 暴露不了；parseFrame 统一解包 parsed.data；void err 改 console.error 留痕（吞错误曾致静默 offline）。
+- Playwright e2e：config + e2e/server.mjs（dist 静态服 + SSE mock）+ 4 条流程；系统 Chrome（channel:"chrome"）绕 CDN 下载失败；4/4 绿。
+- 验证：fmt/clippy 双 target 0 错、api 13 + node 338 绿、workspace 37 段 ok（phase1 本机 flake 跨测试，§124 同族，复跑绿）。§133 已记。CI 盯守中。
+- 留下轮：activity 动作（dismiss/reply/mark-read）、M3 Tauri、M4 默认切 /next/。
