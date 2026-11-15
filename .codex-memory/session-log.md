@@ -1240,3 +1240,9 @@
 - 测试契约修正：SSE replay 测试改期望 transfers.changed（新契约直证）；hub 新投影测试 state_topics_project_full_state_and_others_stay_invalidated。
 - 验证：fmt 绿、clippy 双 target 0 错、cargo test --workspace 全绿、vitest 16/16。§131 已记。
 - 留下轮：PATCH /settings、传输/inbox 动作端点、activity 页数据、Playwright e2e。
+
+## 2026-11-16 M2c 收尾：CI flake 根因修复（67239ed）
+- M2c 提交 0553826 首轮 CI：Windows phase1 `clip_sync_and_send_via_live_node_api_reaches_peers` 失败（sent_peers 0 != 1）；重跑 failed job 全绿 → flake 坐实。
+- 根因链条：host.clip().set_text() 只写 OS 剪贴板不动 hubs.clip.last_hash；800ms 自动同步 poller（spawn_clipboard_auto_sync → poll_clipboard_auto_sync）发现 change_token 变化后抢先广播（prepare_local 更新 last_hash）；显式 POST /api/clip/sync（send_clipboard_to → prepare_local）因 hash 未变返回 Ok(0)（echo 抑制）→ ==1 断言 flake。
+- 修复：测试开头把 host+peer 剪贴板策略切 Manual（can_send()=false，poller 直接退出），显式 sync 独占广播；peer 收到内容断言不变（权威判据）。本地 1.26s 绿，fmt/clippy 绿。
+- CI 43740506835（67239ed）盯守中。

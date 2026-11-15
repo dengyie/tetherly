@@ -128,3 +128,7 @@ export type SettingsTransfer = {
  */
 auto_accept: boolean, };
 
+export type SettingsPatch = { name?: string, advertise?: boolean, reconnect?: boolean, auto_accept?: boolean, };
+
+export type InboxOpenRequest = { name: string, };
+

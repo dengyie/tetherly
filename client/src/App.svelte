@@ -42,7 +42,7 @@
   let layout: LayoutState = $state(initialLayout());
   let settings: SettingsState = $state(initialSettings());
   let api = $state<Api | null>(null);
-  let page: "overview" | "devices" | "transfers" | "layout" | "diagnostics" = $state("overview");
+  let page: "overview" | "devices" | "transfers" | "inbox" | "settings" | "layout" | "diagnostics" = $state("overview");
 
   onMount(() => {
     setApiToken(readFragmentToken() ?? sessionStorage.getItem("tetherly_token"));
@@ -109,6 +109,8 @@
     <button class:active={page === "overview"} onclick={() => (page = "overview")}>概览</button>
     <button class:active={page === "devices"} onclick={() => (page = "devices")}>设备</button>
     <button class:active={page === "transfers"} onclick={() => (page = "transfers")}>传输</button>
+    <button class:active={page === "inbox"} onclick={() => (page = "inbox")}>收件箱</button>
+    <button class:active={page === "settings"} onclick={() => (page = "settings")}>设置</button>
     <button class:active={page === "layout"} onclick={() => (page = "layout")}>布局</button>
     <button class:active={page === "diagnostics"} onclick={() => (page = "diagnostics")}>诊断</button>
   </nav>
@@ -117,8 +119,12 @@
       <Overview {devices} {system} {input} {pairing} {api} />
     {:else if page === "devices" && api}
       <Devices list={[...devices.byId.values()]} {api} />
-    {:else if page === "transfers"}
-      <Transfers data={transfers.transfers} />
+    {:else if page === "transfers" && api}
+      <Transfers data={transfers.transfers} {api} />
+    {:else if page === "inbox" && api}
+      <Inbox data={inbox.inbox} {api} />
+    {:else if page === "settings" && api}
+      <Settings data={settings.settings} {api} />
     {:else if page === "layout"}
       <Layout data={layout.layout} />
     {:else if page === "diagnostics" && api}

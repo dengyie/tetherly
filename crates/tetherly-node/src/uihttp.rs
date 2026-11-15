@@ -2442,6 +2442,81 @@ mod tests {
         let (code, _) = v1_call(port, "POST", "/api/v1/settings", &auth, "").await;
         assert_eq!(code, 405);
 
+        // M2d: settings patch renames the node and flips auto-accept.
+        let (code, body) = v1_call(
+            port,
+            "PATCH",
+            "/api/v1/settings",
+            &auth,
+            r#"{"name":"v1-renamed","auto_accept":true}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        let s: tetherly_api::Settings = serde_json::from_value(body).unwrap();
+        assert_eq!(s.general.name, "v1-renamed");
+        assert!(s.transfer.auto_accept);
+        assert_eq!(node.name(), "v1-renamed");
+        // Empty patch is rejected.
+        let (code, body) = v1_call(port, "PATCH", "/api/v1/settings", &auth, "{}").await;
+        assert_eq!(code, 400, "{body}");
+        assert_eq!(body["error"]["code"], "bad_request");
+        // Unknown field is rejected (deny_unknown_fields).
+        let (code, _) = v1_call(port, "PATCH", "/api/v1/settings", &auth, r#"{"nama":"x"}"#).await;
+        assert_eq!(code, 400);
+
+        // M2d: transfers clear (empty list is a no-op but answers 200).
+        let (code, body) = v1_call(port, "DELETE", "/api/v1/transfers", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let t: tetherly_api::Transfers = serde_json::from_value(body).unwrap();
+        assert!(t.transfers.is_empty());
+        // Unknown transfer cancel answers 404 envelope.
+        let (code, body) = v1_call(
+            port,
+            "POST",
+            "/api/v1/transfers/tdev_nope/cancel",
+            &auth,
+            "",
+        )
+        .await;
+        assert_eq!(code, 404, "{body}");
+        assert_eq!(body["error"]["code"], "not_found");
+
+        // M2d: inbox delete/clear round-trip against a real file.
+        let inbox_dir = dir.join("inbox");
+        std::fs::create_dir_all(&inbox_dir).unwrap();
+        let inbox_file = inbox_dir.join("v1-inbox-test.txt");
+        std::fs::write(&inbox_file, b"hello").unwrap();
+        let (code, body) = v1_call(port, "GET", "/api/v1/inbox", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let i: tetherly_api::Inbox = serde_json::from_value(body).unwrap();
+        assert_eq!(i.count, 1);
+        // Delete one segment that does not exist -> 404.
+        let (code, _) = v1_call(port, "DELETE", "/api/v1/inbox/nope.txt", &auth, "").await;
+        assert_eq!(code, 404);
+        // Clear the whole inbox -> 200, file gone.
+        let (code, body) = v1_call(port, "DELETE", "/api/v1/inbox", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let i: tetherly_api::Inbox = serde_json::from_value(body).unwrap();
+        assert_eq!((i.count, i.total_bytes), (0, 0));
+        assert!(!inbox_file.exists());
+        // POST /inbox/{name} is not allowed.
+        let (code, _) = v1_call(port, "POST", "/api/v1/inbox/x.txt", &auth, "").await;
+        assert_eq!(code, 405);
+        // Open a missing file -> 404; a real one -> 204 (MemoryOpener records).
+        let (code, _) = v1_call(port, "POST", "/api/v1/inbox/nope.txt/open", &auth, "").await;
+        assert_eq!(code, 404);
+        let inbox_file2 = inbox_dir.join("v1-open-test.txt");
+        std::fs::write(&inbox_file2, b"open me").unwrap();
+        let (code, _) = v1_call(
+            port,
+            "POST",
+            "/api/v1/inbox/v1-open-test.txt/open",
+            &auth,
+            "",
+        )
+        .await;
+        assert_eq!(code, 204);
+
         // Diagnostics: legacy hits are counted per caller; v1 calls are not.
         let _ = raw_request(port, "GET", "/api/health", Some("User-Agent: curl/8"), b"").await;
         let (code, body) = v1_call(port, "GET", "/api/v1/diagnostics", &auth, "").await;

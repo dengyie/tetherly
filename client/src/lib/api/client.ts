@@ -9,13 +9,18 @@ import type {
   DevicePatch,
   Diagnostics,
   Health,
+  Inbox,
+  InboxOpenRequest,
   Input,
   LogTail,
   LogLevel,
   LogLevelRequest,
   Pairing,
   PinGrant,
+  Settings,
+  SettingsPatch,
   System,
+  Transfers,
 } from "./gen/api";
 import type { Transport } from "../transport/transport";
 
@@ -72,6 +77,36 @@ export class Api {
   }
   releaseInput(): Promise<void> {
     return this.t.request("POST", "/api/v1/input/release");
+  }
+
+  transfers(): Promise<Transfers> {
+    return this.t.request("GET", "/api/v1/transfers");
+  }
+  cancelTransfer(id: string): Promise<Transfers> {
+    return this.t.request("POST", `/api/v1/transfers/${encodeURIComponent(id)}/cancel`);
+  }
+  clearTransfers(): Promise<Transfers> {
+    return this.t.request("DELETE", "/api/v1/transfers");
+  }
+
+  inbox(): Promise<Inbox> {
+    return this.t.request("GET", "/api/v1/inbox");
+  }
+  openInboxFile(name: string, req: InboxOpenRequest = { name }): Promise<void> {
+    return this.t.request("POST", `/api/v1/inbox/${encodeURIComponent(name)}/open`, req);
+  }
+  deleteInboxFile(name: string): Promise<Inbox> {
+    return this.t.request("DELETE", `/api/v1/inbox/${encodeURIComponent(name)}`);
+  }
+  clearInbox(): Promise<Inbox> {
+    return this.t.request("DELETE", "/api/v1/inbox");
+  }
+
+  settings(): Promise<Settings> {
+    return this.t.request("GET", "/api/v1/settings");
+  }
+  patchSettings(patch: SettingsPatch): Promise<Settings> {
+    return this.t.request("PATCH", "/api/v1/settings", patch);
   }
 
   diagnostics(): Promise<Diagnostics> {

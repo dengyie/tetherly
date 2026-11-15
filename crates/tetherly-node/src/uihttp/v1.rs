@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use tetherly_api::{
     BlockRequest, ConnectRequest, DevicePatch, Diagnostics, ErrorBody, ErrorCode, Event, Health,
-    LogLevel, LogLevelRequest, LogTail, PinGrant, Topic, API_VERSION,
+    LogLevel, LogLevelRequest, LogTail, PinGrant, SettingsPatch, Topic, API_VERSION,
 };
 use tetherly_core::CoreError;
 use tokio::io::AsyncWriteExt;
@@ -56,6 +56,26 @@ fn device_action(path: &str) -> Option<(&str, &str)> {
     (!id.is_empty() && !action.contains('/')).then_some((id, action))
 }
 
+/// `/api/v1/transfers/{id}/{action}` -> (`id`, `action`).
+fn transfer_action(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("/api/v1/transfers/")?;
+    let (id, action) = rest.split_once('/')?;
+    (!id.is_empty() && !action.contains('/')).then_some((id, action))
+}
+
+/// `/api/v1/inbox/{name}` -> name (single segment, may contain dots).
+fn inbox_item(path: &str) -> Option<&str> {
+    path.strip_prefix("/api/v1/inbox/")
+        .filter(|n| !n.is_empty() && !n.contains('/'))
+}
+
+/// `/api/v1/inbox/{name}/open` -> name.
+fn inbox_open_action(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/v1/inbox/")?;
+    let (name, action) = rest.split_once('/')?;
+    (action == "open" && !name.is_empty()).then_some(name)
+}
+
 /// Methods each known v1 path answers; drives 404 vs 405.
 fn allowed(path: &str) -> Option<&'static [&'static str]> {
     match path {
@@ -65,12 +85,12 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/devices"
         | "/api/v1/pairing"
         | "/api/v1/input"
-        | "/api/v1/transfers"
-        | "/api/v1/inbox"
         | "/api/v1/layout"
-        | "/api/v1/settings"
         | "/api/v1/diagnostics"
         | "/api/v1/diagnostics/logs" => Some(&["GET"]),
+        "/api/v1/transfers" => Some(&["GET", "DELETE"]),
+        "/api/v1/inbox" => Some(&["GET", "DELETE"]),
+        "/api/v1/settings" => Some(&["GET", "PATCH"]),
         "/api/v1/pairing/pin" => Some(&["GET", "DELETE"]),
         "/api/v1/pairing/pin/rotate" | "/api/v1/input/release" => Some(&["POST"]),
         "/api/v1/diagnostics/log-level" => Some(&["PATCH"]),
@@ -78,7 +98,16 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         p => match device_action(p) {
             Some((_, "connect")) => Some(&["POST"]),
             Some((_, "block")) => Some(&["POST", "DELETE"]),
-            _ => None,
+            _ => match transfer_action(p) {
+                Some((_, "cancel")) => Some(&["POST"]),
+                _ => match inbox_open_action(p) {
+                    Some(_) => Some(&["POST"]),
+                    None => match inbox_item(p) {
+                        Some(_) => Some(&["DELETE"]),
+                        None => None,
+                    },
+                },
+            },
         },
     }
 }
@@ -103,7 +132,10 @@ fn parse_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, UiRespons
 /// Map a node error onto the v1 envelope.
 fn core_error(e: CoreError) -> UiResponse {
     let code = match &e {
-        CoreError::PeerNotFound(_) => ErrorCode::NotFound,
+        CoreError::PeerNotFound(_) | CoreError::UnknownTransfer => ErrorCode::NotFound,
+        // Inbox lookups surface missing files as File("file not found…");
+        // legacy /api/file/inbox maps the same shape to 404.
+        CoreError::File(ref msg) if msg.contains("not found") => ErrorCode::NotFound,
         CoreError::InvalidAlias(_)
         | CoreError::InvalidProfile(_)
         | CoreError::InvalidRoute(_)
@@ -167,6 +199,15 @@ pub(super) async fn route(
         )),
         ("GET", "/api/v1/diagnostics/logs") => log_tail(query).await,
         ("PATCH", "/api/v1/diagnostics/log-level") => log_level(body),
+        ("PATCH", "/api/v1/settings") => patch_settings(node, body),
+        ("DELETE", "/api/v1/transfers") => {
+            node.clear_terminal_transfers();
+            Ok(json(200, &crate::apiv1::model::transfers(node)))
+        }
+        ("DELETE", "/api/v1/inbox") => match node.clear_inbox(None) {
+            Ok(_) => Ok(json(200, &crate::apiv1::model::inbox(node))),
+            Err(e) => Err(core_error(e)),
+        },
         ("GET", p) if device_item(p).is_some() => {
             Ok(device_json(node, device_item(p).unwrap_or_default()))
         }
@@ -180,20 +221,91 @@ pub(super) async fn route(
             ("POST", Some((id, "connect"))) => connect_device(node, id, body).await,
             ("POST", Some((id, "block"))) => block_device(node, id, body).await,
             ("DELETE", Some((id, "block"))) => unblock_device(node, id).await,
-            _ => Ok(match allowed(path) {
-                Some(methods) => error(
-                    ErrorCode::MethodNotAllowed,
-                    format!("{method} not allowed; use {}", methods.join(", ")),
-                )
-                .with_header("Allow", methods.join(", ")),
-                None => error(ErrorCode::NotFound, format!("no such resource: {path}")),
-            }),
+            _ => match (m, transfer_action(p)) {
+                ("POST", Some((id, "cancel"))) => cancel_transfer(node, id).await,
+                _ => match (m, inbox_open_action(p)) {
+                    ("POST", Some(name)) => open_inbox_file(node, name, body).await,
+                    _ => match (m, inbox_item(p)) {
+                        ("DELETE", Some(name)) => delete_inbox_file(node, name),
+                        _ => Ok(match allowed(path) {
+                            Some(methods) => error(
+                                ErrorCode::MethodNotAllowed,
+                                format!("{method} not allowed; use {}", methods.join(", ")),
+                            )
+                            .with_header("Allow", methods.join(", ")),
+                            None => error(ErrorCode::NotFound, format!("no such resource: {path}")),
+                        }),
+                    },
+                },
+            },
         },
     };
     result.unwrap_or_else(|e| e)
 }
 
 type Handled = Result<UiResponse, UiResponse>;
+
+/// `PATCH /settings`: applies general config writes and the auto-accept
+/// master toggle, then returns the full settings resource.
+fn patch_settings(node: &Node, body: &[u8]) -> Handled {
+    let patch: SettingsPatch = parse_body(body)?;
+    if patch.is_empty() {
+        return Err(error(ErrorCode::BadRequest, "patch sets no field"));
+    }
+    if patch.name.is_some() || patch.advertise.is_some() || patch.reconnect.is_some() {
+        node.update_config(patch.name.as_deref(), patch.advertise, patch.reconnect)
+            .map_err(core_error)?;
+    }
+    if let Some(enabled) = patch.auto_accept {
+        let mut policy = node.auto_accept_policy();
+        policy.enabled = enabled;
+        node.set_auto_accept_policy(policy).map_err(core_error)?;
+    }
+    Ok(json(200, &crate::apiv1::model::settings(node)))
+}
+
+/// `POST /transfers/{id}/cancel`: aborts one active transfer; returns the
+/// updated transfers resource.
+async fn cancel_transfer(node: &Node, id: &str) -> Handled {
+    node.cancel_transfer(id).await.map_err(core_error)?;
+    Ok(json(200, &crate::apiv1::model::transfers(node)))
+}
+
+/// `DELETE /inbox/{name}`: removes one received file; returns the updated
+/// inbox resource.
+fn delete_inbox_file(node: &Node, name: &str) -> Handled {
+    node.delete_inbox_file(name).map_err(core_error)?;
+    Ok(json(200, &crate::apiv1::model::inbox(node)))
+}
+
+/// `POST /inbox/{name}/open`: reveals the file with the OS opener.
+async fn open_inbox_file(node: &Node, name: &str, body: &[u8]) -> Handled {
+    // Name comes from the path; the body (optional) is parsed for strictness
+    // parity with other v1 POSTs but carries nothing today.
+    let _req: Option<tetherly_api::InboxOpenRequest> = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        Some(parse_body(body)?)
+    };
+    if node
+        .inbox_report(None, None)
+        .files
+        .iter()
+        .all(|f| f.name != name)
+    {
+        return Err(error(
+            ErrorCode::NotFound,
+            format!("no such inbox file: {name}"),
+        ));
+    }
+    let opener = node.opener();
+    let (name, node) = (name.to_string(), node.clone_handle());
+    tokio::task::spawn_blocking(move || node.open_inbox_file(Some(&name), opener.as_ref()))
+        .await
+        .map_err(|_| error(ErrorCode::Internal, "open task failed"))?
+        .map_err(core_error)?;
+    Ok(no_content())
+}
 
 fn patch_device(node: &Node, id: &str, body: &[u8]) -> Handled {
     let patch: DevicePatch = parse_body(body)?;

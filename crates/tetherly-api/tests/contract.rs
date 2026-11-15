@@ -296,4 +296,25 @@ mod commands {
         };
         assert_eq!(serde_json::to_value(&g).unwrap()["pin"], "1234-5678");
     }
+
+    #[test]
+    fn settings_patch_fields_are_optional_and_strict() {
+        let p: SettingsPatch = serde_json::from_value(json!({"name": "Desk"})).unwrap();
+        assert_eq!(p.name.as_deref(), Some("Desk"));
+        assert_eq!(p.advertise, None);
+        assert!(serde_json::from_value::<SettingsPatch>(json!({}))
+            .unwrap()
+            .is_empty());
+        assert!(serde_json::from_value::<SettingsPatch>(json!({"nama": "x"})).is_err());
+        let p: SettingsPatch = serde_json::from_value(json!({"auto_accept": true})).unwrap();
+        assert_eq!(p.auto_accept, Some(true));
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn inbox_open_request_carries_the_name() {
+        let r: InboxOpenRequest = serde_json::from_value(json!({"name": "a.txt"})).unwrap();
+        assert_eq!(r.name, "a.txt");
+        assert!(serde_json::from_value::<InboxOpenRequest>(json!({"id": 1})).is_err());
+    }
 }

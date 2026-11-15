@@ -640,6 +640,45 @@ pub struct SettingsTransfer {
     pub auto_accept: bool,
 }
 
+// ---- M2d: write requests (transfers / inbox / settings) ----
+
+/// `PATCH /settings`: every field optional; omitted fields stay untouched.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct SettingsPatch {
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_accept: Option<bool>,
+}
+
+impl SettingsPatch {
+    /// `true` when the patch sets no field.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.advertise.is_none()
+            && self.reconnect.is_none()
+            && self.auto_accept.is_none()
+    }
+}
+
+/// `POST /inbox/open`: reveal one inbox file with the OS opener.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct InboxOpenRequest {
+    pub name: String,
+}
+
 #[cfg(test)]
 mod bindings {
     //! TypeScript drift check. Regenerate with
@@ -698,6 +737,8 @@ mod bindings {
             decl::<Settings>(&cfg),
             decl::<SettingsGeneral>(&cfg),
             decl::<SettingsTransfer>(&cfg),
+            decl::<SettingsPatch>(&cfg),
+            decl::<InboxOpenRequest>(&cfg),
         ] {
             out.push_str(&d);
             out.push('\n');
