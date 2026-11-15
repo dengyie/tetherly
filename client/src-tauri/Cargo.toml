@@ -1,0 +1,22 @@
+[package]
+name = "tetherly-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Tauri 2 desktop shell for the Tetherly control client (M3)"
+publish = false
+
+[lib]
+name = "tetherly_shell"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.9", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

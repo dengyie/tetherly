@@ -1,0 +1,7 @@
+{
+  "$schema": "gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The shell's only window; core event + invoke surface. Custom commands (api) need no capability entries; third-party plugins are added here one permission at a time.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

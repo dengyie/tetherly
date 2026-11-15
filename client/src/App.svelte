@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { HttpTransport, setApiToken } from "./lib/transport/http";
+  import { TauriTransport, isTauri } from "./lib/transport/tauri";
   import { linkState, lastSeq } from "./lib/stores/connection";
   import { applyEvent, applySnapshot, initialDevices, type DevicesState } from "./lib/stores/devices";
   import { applyEvent as sysEvent, applySnapshot as sysSnapshot, initialSystem, type SystemState } from "./lib/stores/system";
@@ -49,7 +50,9 @@
 
   onMount(() => {
     setApiToken(readFragmentToken() ?? sessionStorage.getItem("tetherly_token"));
-    const t: Transport = transport ?? new HttpTransport();
+    // In the Tauri shell the Rust side owns the token and the SSE
+    // connection; the browser build keeps same-origin fetch + fragment auth.
+    const t: Transport = transport ?? (isTauri() ? new TauriTransport() : new HttpTransport());
     api = new Api(t);
     // Reducer mirrors: mutated inside the event callback, assigned to the
     // $state variables so Svelte 5 picks up the change.

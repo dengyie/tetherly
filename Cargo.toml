@@ -10,6 +10,10 @@ members = [
     "crates/tetherly-node",
     "crates/tetherly-android",
     "bins/tetherly-cli",
+    # Tauri 2 desktop shell (M3, ADR-139 §5.1): independent member, daemon
+    # build graph never depends on it. Requires client/dist to exist (it is
+    # committed, same as the daemon's embed).
+    "client/src-tauri",
 ]
 
 [workspace.package]
