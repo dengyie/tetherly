@@ -1121,14 +1121,21 @@ mod hook_move_state {
         }
     }
 
-    /// Derive the (dx, dy) of a move to (x, y) from the previous hook
-    /// position and advance the baseline to it.
-    pub(super) fn advance(x: i32, y: i32) -> (i32, i32) {
+    /// Derive the (dx, dy) of a move to (x, y) and advance the baseline to
+    /// it. `cur` is the ACTUAL cursor position at hook time (GetCursorPos —
+    /// an LL hook runs before the move is applied): `pt` is the system's
+    /// proposal = actual + hand delta, so `pt - cur` is the hand's motion
+    /// even when the OS clamps the cursor at a screen edge. Differencing
+    /// consecutive proposals instead turns a held edge push into a sawtooth
+    /// (+3, -1, +2 …; production v0.2.54 reverse lag). Without `cur` the
+    /// previous hook position is the baseline (cold start: no motion).
+    pub(super) fn advance(x: i32, y: i32, cur: Option<(i32, i32)>) -> (i32, i32) {
         LAST_MOVE_POS.with(|p| {
             let mut p = p.borrow_mut();
-            let (dx, dy) = match *p {
-                Some((lx, ly)) => (x - lx, y - ly),
-                None => (0, 0),
+            let (dx, dy) = match (cur, *p) {
+                (Some((cx, cy)), _) => (x - cx, y - cy),
+                (None, Some((lx, ly))) => (x - lx, y - ly),
+                (None, None) => (0, 0),
             };
             *p = Some((x, y));
             (dx, dy)
@@ -2183,7 +2190,16 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                         // takeover's direction discipline (`Bottom => dy > 0`)
                         // both consume these — hard zeros here silently dead
                         // the Windows→Mac takeover (production regression).
-                        let (mut dx, mut dy) = hook_move_state::advance(mi.pt.x, mi.pt.y);
+                        //
+                        // v0.2.55: measured against the ACTUAL cursor (the
+                        // relay branch's `pt - GetCursorPos()`), not the
+                        // previous proposal — at a clamped edge consecutive
+                        // proposals differ by the difference of two hand
+                        // deltas, a sawtooth that reset the reverse dwell
+                        // and hid every fast push.
+                        let mut cur = POINT { x: 0, y: 0 };
+                        let cur = (GetCursorPos(&mut cur) != 0).then_some((cur.x, cur.y));
+                        let (mut dx, mut dy) = hook_move_state::advance(mi.pt.x, mi.pt.y, cur);
                         // Deskflow bogus-motion filter: a delta spanning the
                         // center-to-edge distance is the leaked displacement
                         // of a recenter/park warp racing this hook's FIFO
@@ -3773,8 +3789,8 @@ mod input_tests {
 
         // 1. Real user motion: baseline established at (500, 400).
         let _gate = super::warp_state_test_gate();
-        assert_eq!(hook_move_state::advance(500, 400), (0, 0)); // cold start: no baseline
-        assert_eq!(hook_move_state::advance(510, 404), (10, 4));
+        assert_eq!(hook_move_state::advance(500, 400, None), (0, 0)); // cold start: no baseline
+        assert_eq!(hook_move_state::advance(510, 404, None), (10, 4));
 
         // 2. Programmatic warp to screen center (roaming recenter); the hook
         //    sees the echo at the warp target and must swallow it (not
@@ -3786,25 +3802,57 @@ mod input_tests {
         //    from the anchored baseline at the warp target: delta = the
         //    genuine hand motion since the warp — not zero, and not the
         //    teleport displacement.
-        assert_eq!(hook_move_state::advance(966, 544), (6, 4));
+        assert_eq!(hook_move_state::advance(966, 544, None), (6, 4));
 
         // 4. Baseline re-established: deltas track again.
-        assert_eq!(hook_move_state::advance(976, 548), (10, 4));
+        assert_eq!(hook_move_state::advance(976, 548, None), (10, 4));
 
         // 5. A position that is NOT the warp target never matches the
         //    marker: no echo, and the baseline is left alone (anchor happens
         //    only when an echo is actually consumed).
         super::mark_pending_warp(100, 100);
         assert!(!hook_move_state::take_warp_echo_reset_baseline(5000, 5000));
-        assert_eq!(hook_move_state::advance(5000, 5004), (4024, 4456));
+        assert_eq!(hook_move_state::advance(5000, 5004, None), (4024, 4456));
 
         // 6. Only the echo at the marker's target consumes it and anchors
         //    the baseline; misses in between don't.
         super::mark_pending_warp(20, 30);
         assert!(!hook_move_state::take_warp_echo_reset_baseline(5020, 5030));
-        assert_eq!(hook_move_state::advance(5030, 5040), (30, 36));
+        assert_eq!(hook_move_state::advance(5030, 5040, None), (30, 36));
         assert!(hook_move_state::take_warp_echo_reset_baseline(20, 30));
-        assert_eq!(hook_move_state::advance(26, 33), (6, 3));
+        assert_eq!(hook_move_state::advance(26, 33, None), (6, 3));
+    }
+
+    // v0.2.55 (production 2026-11-15 07:56:16/07:56:55): the Windows hook's
+    // `pt` is the system's PROPOSAL (actual cursor + hand delta), not the
+    // post-clamp position. Pushing into the bottom edge with the cursor
+    // clamped at y=1079 yields proposals 1082, 1081, 1083 … — differencing
+    // consecutive proposals produced a sawtooth (+3, -1, +2) whose negative
+    // ticks reset the reverse dwell and pinned anchor, and no tick could ever
+    // reach the 6 px fast push: the Windows hand's reverse waited 2.7-3.6 s
+    // for a lucky heartbeat. Measured against the actual cursor, every tick
+    // is the hand's real downward motion.
+    #[cfg(all(target_os = "macos", test))]
+    #[test]
+    fn clamped_edge_push_deltas_measure_from_actual_cursor() {
+        use super::hook_move_state;
+
+        let _gate = super::warp_state_test_gate();
+        let cur = Some((960, 1079));
+        // Cursor already resting on the clamp row.
+        assert_eq!(hook_move_state::advance(960, 1079, cur), (0, 0));
+        assert_eq!(hook_move_state::advance(960, 1082, cur), (0, 3));
+        assert_eq!(hook_move_state::advance(960, 1081, cur), (0, 2));
+        assert_eq!(hook_move_state::advance(960, 1087, cur), (0, 8));
+        // Free motion away from the clamp: identical to consecutive diffs.
+        assert_eq!(
+            hook_move_state::advance(965, 1070, Some((960, 1079))),
+            (5, -9)
+        );
+        assert_eq!(
+            hook_move_state::advance(970, 1060, Some((965, 1070))),
+            (5, -10)
+        );
     }
 
     /// Deskflow bogus-motion filter (MSWindowsComputer::onMouseMove): with
