@@ -8,6 +8,7 @@
   import { applyEvent as inputEvent, applySnapshot as inputSnapshot, initialInput, type InputState } from "./lib/stores/input";
   import type { Snapshot } from "./lib/api/gen/api";
   import { Api } from "./lib/api/client";
+  import type { Transport } from "./lib/transport/transport";
   import Overview from "./routes/Overview.svelte";
   import Devices from "./routes/Devices.svelte";
   import Diagnostics from "./routes/Diagnostics.svelte";
@@ -22,6 +23,8 @@
     return t;
   }
 
+  let { transport = null }: { transport?: Transport | null } = $props();
+
   let devices: DevicesState = $state(initialDevices());
   let system: SystemState = $state(initialSystem());
   let pairing: PairingState = $state(initialPairing());
@@ -31,15 +34,15 @@
 
   onMount(() => {
     setApiToken(readFragmentToken() ?? sessionStorage.getItem("tetherly_token"));
-    const transport = new HttpTransport();
-    api = new Api(transport);
+    const t: Transport = transport ?? new HttpTransport();
+    api = new Api(t);
     // Reducer mirrors: mutated inside the event callback, assigned to the
     // $state variables so Svelte 5 picks up the change.
     let d = initialDevices();
     let s = initialSystem();
     let p = initialPairing();
     let i = initialInput();
-    const unsubscribe = transport.subscribe(
+    const unsubscribe = t.subscribe(
       null,
       (ev) => {
         lastSeq.set(ev.id);
