@@ -1264,3 +1264,11 @@
 - Playwright e2e：config + e2e/server.mjs（dist 静态服 + SSE mock）+ 4 条流程；系统 Chrome（channel:"chrome"）绕 CDN 下载失败；4/4 绿。
 - 验证：fmt/clippy 双 target 0 错、api 13 + node 338 绿、workspace 37 段 ok（phase1 本机 flake 跨测试，§124 同族，复跑绿）。§133 已记。CI 盯守中。
 - 留下轮：activity 动作（dismiss/reply/mark-read）、M3 Tauri、M4 默认切 /next/。
+
+## 2026-11-16 M3 首轮：Tauri 2 壳切片 + EventEnvelope wire 修正（552dfce + d302351）
+- **wire 修正（552dfce）**：EventEnvelope 弃 flatten，改手写 Serialize/Deserialize——wire 唯一形状 {seq,type,data:<裸负载>}。教训：M2e 三方（parseFrame/e2e mock/stores）一致地错，mock 是消费者拷贝照不出生产者契约漂移；SSOT 必须是 contract 测试直证的 wire。
+- **壳（d302351）**：client/src-tauri workspace member `tetherly-shell`（tauri 2.9/build 2.6，无 HTTP 客户端 crate，代理手写 HTTP/1.1 照仓库惯例）；invoke('api') 路径白名单 /api/v1、token 只在 Rust State；单 SSE 连接退避续传 emit tetherly://event|link；token 发现镜像 daemon（~/.local/share/tetherly/api.token，**§211 的 ~/Library/Application Support 是错的**）；TauriTransport TS 走 window.__TAURI__ 零 npm 依赖，App isTauri() 自动切换。
+- 测试：Rust 11（含 mock daemon 逐字往返断言）、vitest 6（stub 桥）；env 竞态用共享 ENV_LOCK 串行（§124 壳侧预防）。CI Linux 加 webkit2gtk 系统库。
+- generate_context! 需 frontendDist 存在——client/dist 本就进 git（daemon include_str! 先例），无 CI 顺序问题。图标：Node zlib 手写 RGBA PNG + sips + 自拼 ICO/ICNS（tauri-build 强制 RGBA）。
+- 验证：fmt/clippy workspace 0 错、40 段 ok（phase1 两例 m3_* flake 复跑绿，§124 同族）；壳对活 daemon 冒烟 4 秒干净。§134 已记。CI 盯守中。
+- 留下轮：托盘/托盘面板、自启、通知、深链接、.dmg/.msi、daemon 重启恢复与 <120MB 实测、Windows client.token 签发。
