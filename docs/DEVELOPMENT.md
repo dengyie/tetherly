@@ -9018,3 +9018,42 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - 两端启动后都没有新增 WARN。
 - R2、R3 以及 logsink truncate 回退这三项的 Windows 路径，只由 CI windows-latest 编译与测试覆盖。生产上没有做 inbox 打开探测（SYSTEM 会话会弹窗）。
 - §120 路线图中的 P0、P1、P2 至此全部清零。
+
+## 125. Windows 钩子增量改按真实光标计算：修复 Mac 进入后 Windows 手回切卡顿 (v0.2.55)
+
+**现象**：Mac 鼠标进入 Windows 后，用 Windows 物理鼠标往下推回 Mac，偶尔要 3–4 s 才切过去（比 §113 之前好，但仍明显）。
+
+**证据**（Windows 日志，2026-11-15）：
+
+- 快的回合（07:56:14 / 07:56:25 / 07:56:29）：`owns it` 之后约 0.1 s 出现 `local-owner fast push into=6..10`。
+- 慢的回合 A（07:56:16）：`owns it accum_px=1261` 后没有 fast push，到 20.853 才由 `pinned heartbeat completed the dwell` 触发，用时约 4 s。
+- 慢的回合 B（07:56:55）：`owns it accum_px=65` 后同样没有 fast push。58.327 由心跳触发，58.343 accept，但 `engine crossing fired` 要到 59.658，accept 之后又多等了 1.3 s。
+
+**根因**：
+
+- Windows LL 钩子非 relay 分支（Windows 为 Target 或本地空闲时走这条）用**相邻两次钩子 `pt` 之差**作为增量。`pt` 是系统的提议位置（真实光标 + 手的位移），不是 clamp 之后的位置。
+- 光标贴在 y=1079 继续往下推时，提议依次为 1082、1081、1083…，相邻差变成锯齿 +3、−1、+2。
+  - 负的 tick 让 `pushing_in=false`，dwell 和 pinned 锚点一起被清掉。
+  - 单个 tick 永远达不到 6 px，fast push 不会触发。
+  - 结果只能等心跳碰巧连上。
+- accept 之后 engine 的 Bottom band gate 读的也是同一套增量，所以穿越同样被拖慢（回合 B 多出的 1.3 s）。
+- relay 分支早已使用 `pt - GetCursorPos()`，不受影响。
+
+**修复**：`hook_move_state::advance(x, y, cur)`。
+
+- Windows 在钩子回调内调用 `GetCursorPos`。LL 钩子在移动生效之前执行，此时拿到的就是真实位置。
+- 增量 = `pt - cur`，与 relay 分支一致。
+- `GetCursorPos` 失败时退回旧的相邻差。
+- warp echo 锚定和 bogus 过滤的语义不变。
+
+**测试**：`clamped_edge_push_deltas_measure_from_actual_cursor`。用生产序列 1082/1081/1087 做 RED，旧实现得到 −1；GREEN 后为 3/2/8。自由运动时结果与相邻差一致。
+
+**上线验证（2026-11-15）**
+
+- CI 43693145564 五个 job 全绿；release 43694027234 全绿。
+- `deploy.sh --target all --tag v0.2.55` 完成。部署前清理了 Windows 内存：可用内存从 4356 MB 升到 4992 MB，裁剪了 41 个进程。
+- 两端 health 均为 0.2.55，live_peers=1，path=lan（192.168.1.6 ↔ 192.168.1.7）。
+- Windows 新 pid 为 269800，身份 SYSTEM。
+- 受保护进程 3/3，pid 未变。
+- 两端都没有新增 WARN。
+- 体感验证待用户反馈。复核时看 Windows 日志：`owns it` 之后应紧接着出现 `local-owner fast push`，`pinned heartbeat completed the dwell` 应当很少出现。

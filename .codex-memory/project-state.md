@@ -1,6 +1,7 @@
 # Project State
 
 ## Release Baseline (2026-11-14)
+- **v0.2.55**（§125，2026-11-15 双端已部署）：Windows 钩子在非 relay 分支的增量改为 `pt - GetCursorPos()`。原来用相邻两次提议之差，光标贴在被 clamp 的边上时会算出锯齿增量，导致 Mac 进入 Windows 后 Windows 手回切要等 3–4 s。
 - **v0.2.54**（§124，2026-11-15 双端已部署）：深度 review 三项加 §120 P2 十项，§120 路线图全部清零。
   - R1：inbox open 改为被动类型白名单。
   - R2：收到的文件先在 .part 上打来源标记（MOTW / quarantine），再进入 inbox。

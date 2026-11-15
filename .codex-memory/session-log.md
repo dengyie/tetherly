@@ -1190,3 +1190,12 @@
 - phase1 偶发 Timeout：负载 50+ 时出现；stash 基线与改动后各跑 3 次均 68/68，判定为环境抖动。
 - CI 43641398837 的 android 红：cfg 属性被新插入的函数占用。修复后 CI 43642452118 绿；release 43643501170 绿。
 - 部署结果：两端 0.2.54，path lan；Windows pid 293340 SYSTEM；受保护进程 3/3；无新增 WARN。DEVELOPMENT §124。
+
+## 2026-11-15 v0.2.55 Windows 手回切卡顿（§125）
+
+- 用户反馈：Mac 鼠标进入 Windows 后，用 Windows 鼠标回切仍然卡。
+- 日志：两次慢回合都没有 fast push，最后靠 pinned 心跳触发（约 4 s）；回合 B 在 accept 之后，engine 穿越又多等了 1.3 s。
+- 根因：Windows LL 钩子非 relay 分支对相邻两次 `pt` 提议取差。光标在 1079 被 clamp 时得到 +3/−1/+2 的锯齿，负值清空 dwell，单个 tick 达不到 6 px。
+- 修复：`hook_move_state::advance(x, y, cur)`，增量 = `pt - GetCursorPos()`。RED 测试 `clamped_edge_push_deltas_measure_from_actual_cursor`。
+- CI 43693145564 绿；release 43694027234 绿。
+- 部署结果：两端 0.2.55，path lan；Windows pid 269800 SYSTEM；受保护进程 3/3；无新增 WARN。
