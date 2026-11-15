@@ -189,7 +189,24 @@ async fn resolve(hub: &EventHub, node: &Node, keys: Vec<Key>, known: &mut HashMa
             Key::Input => hub.publish(&Event::InputChanged {
                 input: model::input(node).await,
             }),
-            Key::Invalidate(topic) => hub.publish(&Event::Invalidated { topic }),
+            Key::Invalidate(topic) => match topic {
+                Topic::Transfers => {
+                    hub.publish(&Event::TransfersChanged {
+                        transfers: model::transfers(node),
+                    });
+                }
+                Topic::Inbox => hub.publish(&Event::InboxChanged {
+                    inbox: model::inbox(node),
+                }),
+                Topic::Layout => hub.publish(&Event::LayoutChanged {
+                    layout: model::layout(node),
+                }),
+                Topic::Settings => hub.publish(&Event::SettingsChanged {
+                    settings: model::settings(node),
+                }),
+                // No pushed form yet: keep asking the client to refetch.
+                _ => hub.publish(&Event::Invalidated { topic }),
+            },
         }
     }
 }
@@ -270,5 +287,77 @@ mod tests {
         let f = live.rx.recv().await.unwrap();
         assert_eq!(f.seq, 503);
         assert_eq!(f.topic, Some(Topic::Settings));
+    }
+
+    /// M2c: the four state topics resolve to full-state events, not
+    /// `invalidated`; other coarse topics keep the refetch form.
+    #[tokio::test]
+    async fn state_topics_project_full_state_and_others_stay_invalidated() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("hub_m2c");
+        let hub = EventHub::spawn(node.clone_handle());
+
+        // Let the pump's initial full-state burst flush; then drain whatever
+        // arrived before we start asserting (order/count is a pump detail).
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let sub = hub.subscribe(None);
+        let mut rx = sub.rx;
+        while let Ok(f) = rx.try_recv() {
+            let _ = f;
+        }
+
+        // A settings-source event marks System + Settings; consume frames
+        // until the settings form surfaces (system.changed flushes first).
+        node.update_config(Some("hub-m2c-name"), None, None)
+            .unwrap();
+        let env = loop {
+            let f = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if f.name == "settings.changed" {
+                let env: tetherly_api::EventEnvelope = serde_json::from_str(&f.data).unwrap();
+                break env;
+            }
+        };
+        match env.event {
+            Event::SettingsChanged { settings } => {
+                assert_eq!(settings.general.name, "hub-m2c-name");
+            }
+            other => panic!("expected SettingsChanged, got {other:?}"),
+        }
+
+        // A transfers-source event resolves to state too.
+        node.emit(crate::events::UiEvent::FileDone {
+            transfer_id: "t1".into(),
+        });
+        let mut got = None;
+        while let Ok(f) = rx.try_recv() {
+            if f.name == "transfers.changed" {
+                got = Some(f);
+            }
+        }
+        if got.is_none() {
+            let f = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(f.name, "transfers.changed", "{}", f.data);
+        }
+
+        // Clipboard has no pushed form: it must still come out invalidated.
+        node.emit(crate::events::UiEvent::ClipboardCleared { timestamp_ms: 1 });
+        let f = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let env: tetherly_api::EventEnvelope = serde_json::from_str(&f.data).unwrap();
+        match env.event {
+            Event::Invalidated { topic } => assert_eq!(topic, Topic::Clipboard),
+            other => panic!("expected Invalidated, got {other:?}"),
+        }
+
+        drop(rx);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -7,9 +7,11 @@ use crate::store::BlockedPeer;
 use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
-    Device, Input, LinkPath, Pairing, PeerCounts, Ports, Snapshot, System, API_VERSION,
+    Device, Inbox, InboxFile, Input, Layout, LayoutEdge, LayoutPolicy, LinkPath, Pairing,
+    PeerCounts, Ports, Settings, SettingsGeneral, SettingsTransfer, Snapshot, System, Transfer,
+    TransferDirection, TransferPhase, Transfers, API_VERSION,
 };
-use tetherly_core::{PathKind, TrustedPeer};
+use tetherly_core::{DisplayEdge, PathKind, TrustedPeer};
 
 #[derive(Default)]
 struct Parts {
@@ -174,6 +176,131 @@ pub async fn snapshot(node: &Node) -> Snapshot {
         devices: devices(node),
         pairing: pairing(node),
         input: input(node).await,
+    }
+}
+
+/// The transfers resource: daemon report mapped 1:1 onto the contract.
+pub fn transfers(node: &Node) -> Transfers {
+    let r = node.transfers_report();
+    Transfers {
+        active_count: r.active_count as u64,
+        terminal_count: r.terminal_count as u64,
+        transfers: r
+            .transfers
+            .iter()
+            .map(|t| Transfer {
+                transfer_id: t.transfer_id.clone(),
+                peer: t.peer.to_string(),
+                direction: match t.direction {
+                    crate::runtime::TransferDirection::Inbound => TransferDirection::Inbound,
+                    crate::runtime::TransferDirection::Outbound => TransferDirection::Outbound,
+                },
+                filename: t.filename.clone(),
+                total: t.total,
+                transferred: t.transferred,
+                speed_bps: t.speed_bps,
+                phase: match t.phase {
+                    crate::runtime::TransferPhase::Transferring => TransferPhase::Transferring,
+                    crate::runtime::TransferPhase::Verifying => TransferPhase::Verifying,
+                    crate::runtime::TransferPhase::Completed => TransferPhase::Completed,
+                    crate::runtime::TransferPhase::Failed => TransferPhase::Failed,
+                },
+                error: t.error.clone(),
+                started_ms: t.started_ms,
+                updated_ms: t.updated_ms,
+            })
+            .collect(),
+    }
+}
+
+/// The inbox resource: files waiting in `data_dir/inbox`.
+pub fn inbox(node: &Node) -> Inbox {
+    let r = node.inbox_report(None, None);
+    Inbox {
+        count: r.count as u64,
+        total_bytes: r.total_bytes,
+        files: r
+            .files
+            .iter()
+            .map(|f| InboxFile {
+                name: f.name.clone(),
+                size: f.size,
+                modified_at_secs: f.modified_at_secs,
+                is_safe: f.is_safe,
+            })
+            .collect(),
+    }
+}
+
+/// The layout resource: local display, configured edges and crossing knobs.
+pub fn layout(node: &Node) -> Layout {
+    let l = node.topology_layout();
+    let policy = node.topology_policy();
+    let mut edges: Vec<LayoutEdge> = l
+        .neighbors
+        .iter()
+        .map(|(edge, n)| LayoutEdge {
+            edge: edge.as_str().to_string(),
+            peer: Some(n.peer_id.clone()),
+        })
+        .collect();
+    if edges.is_empty() {
+        // Keep all four edges visible so a fresh install still renders a grid.
+        for edge in [
+            DisplayEdge::Left,
+            DisplayEdge::Right,
+            DisplayEdge::Top,
+            DisplayEdge::Bottom,
+        ] {
+            edges.push(LayoutEdge {
+                edge: edge.as_str().to_string(),
+                peer: None,
+            });
+        }
+    }
+    edges.sort_by(|a, b| a.edge.cmp(&b.edge));
+    Layout {
+        display: tetherly_api::DisplayRect {
+            width: l.display.width,
+            height: l.display.height,
+            scale_factor: l.display.scale_factor,
+        },
+        edges,
+        config: tetherly_api::CrossingConfig {
+            resistance_px: l.config.resistance_px,
+            delay_ms: l.config.delay_ms,
+            corner_lock_size_px: l.config.corner_lock_size_px,
+            wrap_around: l.config.wrap_around,
+            redundancy_band_px: l.config.redundancy_band_px,
+            slow_dwell_ms: l.config.slow_dwell_ms,
+            fast_push_delta_px: l.config.fast_push_delta_px,
+            entry_return_grace_ms: l.config.entry_return_grace_ms,
+            remote_speed_percent: l.config.remote_speed_percent,
+        },
+        policy: LayoutPolicy {
+            enabled: policy.enabled,
+            allow_inbound_control: policy.allow_inbound_control,
+            auto_link_paired_peers: policy.auto_link_paired_peers,
+        },
+    }
+}
+
+/// The settings resource: read-only view of general config and the
+/// auto-accept master toggle.
+pub fn settings(node: &Node) -> Settings {
+    let r = node.config_report();
+    let a = node.auto_accept_policy();
+    Settings {
+        general: SettingsGeneral {
+            name: r.name,
+            advertise: r.advertise,
+            reconnect: r.reconnect,
+            loopback_only: r.loopback_only,
+            overlay_enabled: r.overlay_enabled,
+        },
+        transfer: SettingsTransfer {
+            auto_accept: a.enabled,
+        },
     }
 }
 

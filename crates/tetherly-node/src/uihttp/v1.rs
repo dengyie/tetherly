@@ -65,6 +65,10 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/devices"
         | "/api/v1/pairing"
         | "/api/v1/input"
+        | "/api/v1/transfers"
+        | "/api/v1/inbox"
+        | "/api/v1/layout"
+        | "/api/v1/settings"
         | "/api/v1/diagnostics"
         | "/api/v1/diagnostics/logs" => Some(&["GET"]),
         "/api/v1/pairing/pin" => Some(&["GET", "DELETE"]),
@@ -146,6 +150,10 @@ pub(super) async fn route(
             Ok(no_content())
         }
         ("GET", "/api/v1/input") => Ok(json(200, &crate::apiv1::model::input(node).await)),
+        ("GET", "/api/v1/transfers") => Ok(json(200, &crate::apiv1::model::transfers(node))),
+        ("GET", "/api/v1/inbox") => Ok(json(200, &crate::apiv1::model::inbox(node))),
+        ("GET", "/api/v1/layout") => Ok(json(200, &crate::apiv1::model::layout(node))),
+        ("GET", "/api/v1/settings") => Ok(json(200, &crate::apiv1::model::settings(node))),
         ("POST", "/api/v1/input/release") => match node.input_stop_reported().await {
             Ok(_) => Ok(json(200, &crate::apiv1::model::input(node).await)),
             Err(e) => Err(core_error(e)),

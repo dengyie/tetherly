@@ -42,9 +42,9 @@ export type Snapshot = { system: System, devices: Array<Device>, pairing: Pairin
 
 export type Topic = "devices" | "pairing" | "input" | "system" | "layout" | "transfers" | "inbox" | "activity" | "clipboard" | "settings";
 
-export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "invalidated", topic: Topic, };
+export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "invalidated", topic: Topic, };
 
-export type EventEnvelope = { seq: number, } & ({ "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "invalidated", topic: Topic, });
+export type EventEnvelope = { seq: number, } & ({ "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "invalidated", topic: Topic, });
 
 export type DevicePatch = { alias?: string, tags?: Array<string>, };
 
@@ -71,4 +71,60 @@ export type LogTail = { lines: Array<string>, };
 export type LogLevel = { filter: string, baseline: string, revert_at_ms: number | null, };
 
 export type LogLevelRequest = { filter?: string, reset?: boolean, revert_after_secs?: number, };
+
+export type TransferDirection = "inbound" | "outbound";
+
+export type TransferPhase = "transferring" | "verifying" | "completed" | "failed";
+
+export type Transfer = { transfer_id: string, 
+/**
+ * Peer device id (contract device id string, not the raw pubkey id).
+ */
+peer: string, direction: TransferDirection, filename: string, total: number, transferred: number, speed_bps: number, phase: TransferPhase, error: string | null, started_ms: number, updated_ms: number, };
+
+export type Transfers = { active_count: number, terminal_count: number, transfers: Array<Transfer>, };
+
+export type InboxFile = { name: string, size: number, modified_at_secs: number, is_safe: boolean, };
+
+export type Inbox = { count: number, total_bytes: number, files: Array<InboxFile>, };
+
+export type LayoutEdge = { 
+/**
+ * Edge of the local display: `left | right | top | bottom`.
+ */
+edge: string, peer: string | null, };
+
+export type Layout = { display: DisplayRect, edges: Array<LayoutEdge>, config: CrossingConfig, policy: LayoutPolicy, };
+
+export type DisplayRect = { width: number, height: number, scale_factor: number, };
+
+export type CrossingConfig = { 
+/**
+ * Push resistance in px before the seat crosses.
+ */
+resistance_px: number, 
+/**
+ * Dwell time in ms at the edge before a slow push crosses.
+ */
+delay_ms: number, 
+/**
+ * Dead-zone size in px around corners where crossing is locked.
+ */
+corner_lock_size_px: number, 
+/**
+ * Whether the seat wraps from the last edge back to the first.
+ */
+wrap_around: boolean, redundancy_band_px: number, slow_dwell_ms: number, fast_push_delta_px: number, entry_return_grace_ms: number, remote_speed_percent: number, };
+
+export type LayoutPolicy = { enabled: boolean, allow_inbound_control: boolean, auto_link_paired_peers: boolean, };
+
+export type Settings = { general: SettingsGeneral, transfer: SettingsTransfer, };
+
+export type SettingsGeneral = { name: string, advertise: boolean, reconnect: boolean, loopback_only: boolean, overlay_enabled: boolean, };
+
+export type SettingsTransfer = { 
+/**
+ * Master toggle of the granular auto-accept policy.
+ */
+auto_accept: boolean, };
 

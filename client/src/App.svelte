@@ -6,12 +6,20 @@
   import { applyEvent as sysEvent, applySnapshot as sysSnapshot, initialSystem, type SystemState } from "./lib/stores/system";
   import { applyEvent as pairEvent, applySnapshot as pairSnapshot, initialPairing, type PairingState } from "./lib/stores/pairing";
   import { applyEvent as inputEvent, applySnapshot as inputSnapshot, initialInput, type InputState } from "./lib/stores/input";
+  import { applyEvent as transfersEvent, initialTransfers, type TransfersState } from "./lib/stores/transfers";
+  import { applyEvent as inboxEvent, initialInbox, type InboxState } from "./lib/stores/inbox";
+  import { applyEvent as layoutEvent, initialLayout, type LayoutState } from "./lib/stores/layout";
+  import { applyEvent as settingsEvent, initialSettings, type SettingsState } from "./lib/stores/settings";
   import type { Snapshot } from "./lib/api/gen/api";
   import { Api } from "./lib/api/client";
   import type { Transport } from "./lib/transport/transport";
   import Overview from "./routes/Overview.svelte";
   import Devices from "./routes/Devices.svelte";
   import Diagnostics from "./routes/Diagnostics.svelte";
+  import Transfers from "./routes/Transfers.svelte";
+  import Inbox from "./routes/Inbox.svelte";
+  import Layout from "./routes/Layout.svelte";
+  import Settings from "./routes/Settings.svelte";
 
   // Token arrives via the daemon URL fragment (#token=…); read and strip it
   // immediately so it never stays in the address bar or history.
@@ -29,8 +37,12 @@
   let system: SystemState = $state(initialSystem());
   let pairing: PairingState = $state(initialPairing());
   let input: InputState = $state(initialInput());
+  let transfers: TransfersState = $state(initialTransfers());
+  let inbox: InboxState = $state(initialInbox());
+  let layout: LayoutState = $state(initialLayout());
+  let settings: SettingsState = $state(initialSettings());
   let api = $state<Api | null>(null);
-  let page: "overview" | "devices" | "diagnostics" = $state("overview");
+  let page: "overview" | "devices" | "transfers" | "layout" | "diagnostics" = $state("overview");
 
   onMount(() => {
     setApiToken(readFragmentToken() ?? sessionStorage.getItem("tetherly_token"));
@@ -42,6 +54,10 @@
     let s = initialSystem();
     let p = initialPairing();
     let i = initialInput();
+    let tr = initialTransfers();
+    let ib = initialInbox();
+    let la = initialLayout();
+    let se = initialSettings();
     const unsubscribe = t.subscribe(
       null,
       (ev) => {
@@ -57,11 +73,19 @@
           s = sysEvent(s, ev);
           p = pairEvent(p, ev);
           i = inputEvent(i, ev);
+          tr = transfersEvent(tr, ev);
+          ib = inboxEvent(ib, ev);
+          la = layoutEvent(la, ev);
+          se = settingsEvent(se, ev);
         }
         devices = d;
         system = s;
         pairing = p;
         input = i;
+        transfers = tr;
+        inbox = ib;
+        layout = la;
+        settings = se;
       },
       (st) => linkState.set(st),
     );
@@ -84,6 +108,8 @@
   <nav>
     <button class:active={page === "overview"} onclick={() => (page = "overview")}>概览</button>
     <button class:active={page === "devices"} onclick={() => (page = "devices")}>设备</button>
+    <button class:active={page === "transfers"} onclick={() => (page = "transfers")}>传输</button>
+    <button class:active={page === "layout"} onclick={() => (page = "layout")}>布局</button>
     <button class:active={page === "diagnostics"} onclick={() => (page = "diagnostics")}>诊断</button>
   </nav>
   <main>
@@ -91,6 +117,10 @@
       <Overview {devices} {system} {input} {pairing} {api} />
     {:else if page === "devices" && api}
       <Devices list={[...devices.byId.values()]} {api} />
+    {:else if page === "transfers"}
+      <Transfers data={transfers.transfers} />
+    {:else if page === "layout"}
+      <Layout data={layout.layout} />
     {:else if page === "diagnostics" && api}
       <Diagnostics {api} />
     {/if}

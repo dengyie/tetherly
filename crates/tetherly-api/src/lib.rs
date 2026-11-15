@@ -290,7 +290,7 @@ impl Topic {
 /// One event on `/api/v1/events`. State-bearing events carry the resource's
 /// full current value (clients replace, never merge); `invalidated` asks the
 /// client to refetch a resource that has no pushed form yet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "type")]
 pub enum Event {
@@ -306,6 +306,14 @@ pub enum Event {
     InputChanged { input: Input },
     #[serde(rename = "system.changed")]
     SystemChanged { system: System },
+    #[serde(rename = "transfers.changed")]
+    TransfersChanged { transfers: Transfers },
+    #[serde(rename = "inbox.changed")]
+    InboxChanged { inbox: Inbox },
+    #[serde(rename = "layout.changed")]
+    LayoutChanged { layout: Layout },
+    #[serde(rename = "settings.changed")]
+    SettingsChanged { settings: Settings },
     #[serde(rename = "invalidated")]
     Invalidated { topic: Topic },
 }
@@ -320,6 +328,10 @@ impl Event {
             Event::PairingChanged { .. } => "pairing.changed",
             Event::InputChanged { .. } => "input.changed",
             Event::SystemChanged { .. } => "system.changed",
+            Event::TransfersChanged { .. } => "transfers.changed",
+            Event::InboxChanged { .. } => "inbox.changed",
+            Event::LayoutChanged { .. } => "layout.changed",
+            Event::SettingsChanged { .. } => "settings.changed",
             Event::Invalidated { .. } => "invalidated",
         }
     }
@@ -332,6 +344,10 @@ impl Event {
             Event::PairingChanged { .. } => Some(Topic::Pairing),
             Event::InputChanged { .. } => Some(Topic::Input),
             Event::SystemChanged { .. } => Some(Topic::System),
+            Event::TransfersChanged { .. } => Some(Topic::Transfers),
+            Event::InboxChanged { .. } => Some(Topic::Inbox),
+            Event::LayoutChanged { .. } => Some(Topic::Layout),
+            Event::SettingsChanged { .. } => Some(Topic::Settings),
             Event::Invalidated { topic } => Some(*topic),
         }
     }
@@ -340,7 +356,7 @@ impl Event {
 /// SSE `data:` payload: `{"seq":…,"type":…,…}`. `seq` is also the SSE `id:`
 /// and strictly increases within one daemon run; a run starts above any
 /// earlier run's range, so a stale `Last-Event-ID` resyncs via snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct EventEnvelope {
     #[cfg_attr(test, ts(type = "number"))]
@@ -454,6 +470,176 @@ pub struct LogLevelRequest {
     pub revert_after_secs: Option<u64>,
 }
 
+// ---- M2c: transfers / inbox / layout / settings ----
+
+/// Direction of one file transfer relative to this node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum TransferDirection {
+    Inbound,
+    Outbound,
+}
+
+/// Lifecycle phase of one file transfer (mirrors the daemon's report).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum TransferPhase {
+    Transferring,
+    Verifying,
+    Completed,
+    Failed,
+}
+
+/// One file transfer, active or terminal (§4.2 `GET /transfers`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Transfer {
+    pub transfer_id: String,
+    /// Peer device id (contract device id string, not the raw pubkey id).
+    pub peer: String,
+    pub direction: TransferDirection,
+    pub filename: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub transferred: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub speed_bps: u64,
+    pub phase: TransferPhase,
+    pub error: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub updated_ms: u64,
+}
+
+/// The transfers resource: counts plus the full list (active and terminal).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Transfers {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub active_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub terminal_count: u64,
+    pub transfers: Vec<Transfer>,
+}
+
+/// One file waiting in the incoming inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InboxFile {
+    pub name: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub modified_at_secs: u64,
+    pub is_safe: bool,
+}
+
+/// The inbox resource (§4.2 `GET /inbox`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Inbox {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_bytes: u64,
+    pub files: Vec<InboxFile>,
+}
+
+/// One edge of the local display and the peer that lives across it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LayoutEdge {
+    /// Edge of the local display: `left | right | top | bottom`.
+    pub edge: String,
+    pub peer: Option<String>,
+}
+
+/// The layout resource (§4.2 `GET /layout`): the local display rectangle,
+/// one entry per configured edge, and the crossing config knobs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Layout {
+    pub display: DisplayRect,
+    pub edges: Vec<LayoutEdge>,
+    pub config: CrossingConfig,
+    pub policy: LayoutPolicy,
+}
+
+/// Local display rectangle: virtual-desktop resolution and scale.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DisplayRect {
+    pub width: u32,
+    pub height: u32,
+    pub scale_factor: f32,
+}
+
+/// Crossing knobs for edge switching, straight from the daemon topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct CrossingConfig {
+    /// Push resistance in px before the seat crosses.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub resistance_px: u32,
+    /// Dwell time in ms at the edge before a slow push crosses.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delay_ms: u32,
+    /// Dead-zone size in px around corners where crossing is locked.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub corner_lock_size_px: u32,
+    /// Whether the seat wraps from the last edge back to the first.
+    pub wrap_around: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub redundancy_band_px: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub slow_dwell_ms: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fast_push_delta_px: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub entry_return_grace_ms: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub remote_speed_percent: u32,
+}
+
+/// Topology policy: who may attach and how links form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LayoutPolicy {
+    pub enabled: bool,
+    pub allow_inbound_control: bool,
+    pub auto_link_paired_peers: bool,
+}
+
+/// The settings resource (§4.2 `GET /settings`): grouped read-only view of
+/// the daemon config and policies. Writes land as `PATCH /settings` later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Settings {
+    pub general: SettingsGeneral,
+    pub transfer: SettingsTransfer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SettingsGeneral {
+    pub name: String,
+    pub advertise: bool,
+    pub reconnect: bool,
+    pub loopback_only: bool,
+    pub overlay_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SettingsTransfer {
+    /// Master toggle of the granular auto-accept policy.
+    pub auto_accept: bool,
+}
+
 #[cfg(test)]
 mod bindings {
     //! TypeScript drift check. Regenerate with
@@ -498,6 +684,20 @@ mod bindings {
             decl::<LogTail>(&cfg),
             decl::<LogLevel>(&cfg),
             decl::<LogLevelRequest>(&cfg),
+            decl::<TransferDirection>(&cfg),
+            decl::<TransferPhase>(&cfg),
+            decl::<Transfer>(&cfg),
+            decl::<Transfers>(&cfg),
+            decl::<InboxFile>(&cfg),
+            decl::<Inbox>(&cfg),
+            decl::<LayoutEdge>(&cfg),
+            decl::<Layout>(&cfg),
+            decl::<DisplayRect>(&cfg),
+            decl::<CrossingConfig>(&cfg),
+            decl::<LayoutPolicy>(&cfg),
+            decl::<Settings>(&cfg),
+            decl::<SettingsGeneral>(&cfg),
+            decl::<SettingsTransfer>(&cfg),
         ] {
             out.push_str(&d);
             out.push('\n');

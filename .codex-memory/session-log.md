@@ -1226,3 +1226,17 @@
 - CI 43725065383 / 43725860017 / 43726288460 / 43726693094 全绿。
 - 实测 invalidated 链路：config 写 → settings topic invalidated 帧到达 SSE 客户端（hub.project → coalescer → publish 验证通过）。
 - 契约现状：snapshot 仅 4 section；layout/transfers/inbox/activity/settings 只发 invalidated、无 GET 端点 —— 对应页面等 Rust 侧 M2c 扩展后接数据。
+
+## 2026-11-15 M2b 续 2：MockTransport 流程测试 + dashboard --next
+- f287a2d：MockTransport（脚本回放 + 请求应答器）；App 可注入 transport；4 条流程测试（14/14）。vitest 需 svelte plugin + resolve.conditions:["browser"] + globals:true（组件挂载 + testing-library 自动清理）。
+- 7d56b4e：apitoken::next_url + tetherly dashboard --next（fragment 契约同 dashboard_url；默认/tray 不动，M4 切换）。9 apitoken 测试 + clippy 双 target 绿。CLI 实测两 URL 输出正确。
+- 139e00d：§130 补记。生产 daemon /next/ 404 属预期（未发版），随下版部署生效。
+- 下一步：M2c v1 端点扩展（transfers/layout/settings GET，补四张页面）或直接排 M3 Tauri；等 CI。
+
+## 2026-11-16 M2c：v1 端点扩展（transfers/inbox/layout/settings 读链路）
+- 契约层：16 新类型 + 4 新事件（transfers.changed/inbox.changed/layout.changed/settings.changed），形状照真实数据源（inbound|outbound、transferring/verifying/completed/failed、DisplayRect+scale_factor、CrossingConfig 九字段）；Event/EventEnvelope 降 PartialEq（f32 失 Eq）。TS 绑定重生成（u64 计数补 ts(type="number") 避免 bigint）。
+- model.rs 四组装函数；hub resolve() 四主题发布全量状态（Activity/Clipboard 仍 invalidated）；v1.rs 四 GET 端点 + allowed() 表。
+- client：四个 reducer store + Transfers/Inbox/Layout/Settings 四页，App 导航加 传输/布局；sections.test.ts 16/16、svelte-check 0 错、dist 重建。
+- 测试契约修正：SSE replay 测试改期望 transfers.changed（新契约直证）；hub 新投影测试 state_topics_project_full_state_and_others_stay_invalidated。
+- 验证：fmt 绿、clippy 双 target 0 错、cargo test --workspace 全绿、vitest 16/16。§131 已记。
+- 留下轮：PATCH /settings、传输/inbox 动作端点、activity 页数据、Playwright e2e。

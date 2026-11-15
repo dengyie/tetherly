@@ -133,6 +133,94 @@ mod events {
                 "invalidated",
                 Some(Topic::Layout),
             ),
+            (
+                Event::TransfersChanged {
+                    transfers: Transfers {
+                        active_count: 1,
+                        terminal_count: 0,
+                        transfers: vec![Transfer {
+                            transfer_id: "t1".into(),
+                            peer: "p1".into(),
+                            direction: TransferDirection::Outbound,
+                            filename: "a.zip".into(),
+                            total: 10,
+                            transferred: 4,
+                            speed_bps: 2,
+                            phase: TransferPhase::Transferring,
+                            error: None,
+                            started_ms: 1,
+                            updated_ms: 2,
+                        }],
+                    },
+                },
+                "transfers.changed",
+                Some(Topic::Transfers),
+            ),
+            (
+                Event::InboxChanged {
+                    inbox: Inbox {
+                        count: 1,
+                        total_bytes: 3,
+                        files: vec![InboxFile {
+                            name: "b.txt".into(),
+                            size: 3,
+                            modified_at_secs: 5,
+                            is_safe: true,
+                        }],
+                    },
+                },
+                "inbox.changed",
+                Some(Topic::Inbox),
+            ),
+            (
+                Event::LayoutChanged {
+                    layout: Layout {
+                        display: DisplayRect {
+                            width: 1470,
+                            height: 956,
+                            scale_factor: 2.0,
+                        },
+                        edges: vec![LayoutEdge {
+                            edge: "right".into(),
+                            peer: Some("p1".into()),
+                        }],
+                        config: CrossingConfig {
+                            resistance_px: 15,
+                            delay_ms: 100,
+                            corner_lock_size_px: 8,
+                            wrap_around: false,
+                            redundancy_band_px: 30,
+                            slow_dwell_ms: 600,
+                            fast_push_delta_px: 12,
+                            entry_return_grace_ms: 600,
+                            remote_speed_percent: 100,
+                        },
+                        policy: LayoutPolicy {
+                            enabled: true,
+                            allow_inbound_control: true,
+                            auto_link_paired_peers: true,
+                        },
+                    },
+                },
+                "layout.changed",
+                Some(Topic::Layout),
+            ),
+            (
+                Event::SettingsChanged {
+                    settings: Settings {
+                        general: SettingsGeneral {
+                            name: "mac".into(),
+                            advertise: true,
+                            reconnect: true,
+                            loopback_only: false,
+                            overlay_enabled: true,
+                        },
+                        transfer: SettingsTransfer { auto_accept: false },
+                    },
+                },
+                "settings.changed",
+                Some(Topic::Settings),
+            ),
         ];
         for (ev, name, topic) in cases {
             assert_eq!(ev.name(), name);

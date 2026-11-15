@@ -1,82 +1,127 @@
 import { describe, expect, it } from "vitest";
-import type { Snapshot } from "../api/gen/api";
-import { applyEvent, applySnapshot, initialPairing } from "./pairing";
-import { applyEvent as evInput, applySnapshot as snapInput, initialInput } from "./input";
-import { applyEvent as evSystem, applySnapshot as snapSystem, initialSystem } from "./system";
+import { initialTransfers, applyEvent as evTransfers } from "./transfers";
+import { initialInbox, applyEvent as evInbox } from "./inbox";
+import { initialLayout, applyEvent as evLayout } from "./layout";
+import { initialSettings, applyEvent as evSettings } from "./settings";
+import type {
+  Inbox,
+  Layout,
+  Settings,
+  Transfers,
+} from "../api/gen/api";
 
-const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
-  system: {
-    device_id: "self",
-    name: "mac",
-    platform: "macos",
-    version: "0.2.58",
-    api: 1,
-    pid: 1,
-    uptime_secs: 1,
-    ports: { control: 45717, file: 45718, input: 45719, screen: 45720, ui: 45716 },
-    peers: { live: 0, trusted: 0 },
-    caps: [],
-    features: [],
-  },
-  devices: [],
-  pairing: { pin_active: false, pin_expires_in_secs: 0 },
-  input: { seat: "local", channel_open: false, peer: null },
+// These four sections have no snapshot form: the daemon pushes full state
+// only through their `*.changed` events (M2c contract).
+
+const transfers = (over: Partial<Transfers> = {}): Transfers => ({
+  active_count: 0,
+  terminal_count: 0,
+  transfers: [],
   ...over,
 });
 
-describe("system store", () => {
-  it("loads from the snapshot and replaces on system.changed", () => {
-    let s = initialSystem();
+const inbox = (over: Partial<Inbox> = {}): Inbox => ({
+  count: 0,
+  total_bytes: 0,
+  files: [],
+  ...over,
+});
+
+const layout = (over: Partial<Layout> = {}): Layout => ({
+  display: { width: 1470, height: 956, scale_factor: 2 },
+  edges: [{ edge: "right", peer: null }],
+  config: {
+    resistance_px: 15,
+    delay_ms: 100,
+    corner_lock_size_px: 8,
+    wrap_around: false,
+    redundancy_band_px: 30,
+    slow_dwell_ms: 600,
+    fast_push_delta_px: 12,
+    entry_return_grace_ms: 600,
+    remote_speed_percent: 100,
+  },
+  policy: { enabled: true, allow_inbound_control: true, auto_link_paired_peers: true },
+  ...over,
+});
+
+const settings = (over: Partial<Settings> = {}): Settings => ({
+  general: {
+    name: "mac",
+    advertise: true,
+    reconnect: true,
+    loopback_only: false,
+    overlay_enabled: true,
+  },
+  transfer: { auto_accept: false },
+  ...over,
+});
+
+describe("transfers store", () => {
+  it("replaces the section on transfers.changed", () => {
+    let s = initialTransfers();
     expect(s.loaded).toBe(false);
-    s = snapSystem(s, snapshot());
+    s = evTransfers(s, { id: 2, type: "transfers.changed", data: transfers({ active_count: 1 }) });
     expect(s.loaded).toBe(true);
-    expect(s.system?.name).toBe("mac");
-    s = evSystem(s, { id: 2, type: "system.changed", data: { ...s.system!, name: "renamed" } });
-    expect(s.system?.name).toBe("renamed");
+    expect(s.transfers?.active_count).toBe(1);
   });
 
   it("ignores unrelated events", () => {
-    const s = snapSystem(initialSystem(), snapshot());
-    expect(evSystem(s, { id: 3, type: "device.removed", data: { id: "x" } })).toBe(s);
+    const s = evTransfers(initialTransfers(), { id: 3, type: "transfers.changed", data: transfers() });
+    expect(evTransfers(s, { id: 4, type: "inbox.changed", data: inbox() })).toBe(s);
   });
 });
 
-describe("pairing store", () => {
-  it("loads from the snapshot and replaces on pairing.changed", () => {
-    let s = initialPairing();
-    s = applySnapshot(s, snapshot());
-    expect(s.pairing?.pin_active).toBe(false);
-    s = applyEvent(s, {
-      id: 4,
-      type: "pairing.changed",
-      data: { pin_active: true, pin_expires_in_secs: 120 },
-    });
-    expect(s.pairing?.pin_active).toBe(true);
-    expect(s.pairing?.pin_expires_in_secs).toBe(120);
+describe("inbox store", () => {
+  it("replaces the section on inbox.changed", () => {
+    let s = initialInbox();
+    s = evInbox(s, { id: 5, type: "inbox.changed", data: inbox({ count: 1 }) });
+    expect(s.loaded).toBe(true);
+    expect(s.inbox?.count).toBe(1);
   });
 
   it("ignores unrelated events", () => {
-    const s = applySnapshot(initialPairing(), snapshot());
-    expect(applyEvent(s, { id: 5, type: "input.changed", data: { seat: "x", channel_open: false, peer: null } })).toBe(s);
+    const s = evInbox(initialInbox(), { id: 6, type: "inbox.changed", data: inbox() });
+    expect(evInbox(s, { id: 7, type: "transfers.changed", data: transfers() })).toBe(s);
   });
 });
 
-describe("input store", () => {
-  it("loads from the snapshot and replaces on input.changed", () => {
-    let s = initialInput();
-    s = snapInput(s, snapshot());
-    expect(s.input?.seat).toBe("local");
-    s = evInput(s, {
-      id: 6,
-      type: "input.changed",
-      data: { seat: "peer", channel_open: true, peer: "dev-1" },
+describe("layout store", () => {
+  it("replaces the section on layout.changed", () => {
+    let s = initialLayout();
+    s = evLayout(s, { id: 8, type: "layout.changed", data: layout() });
+    expect(s.loaded).toBe(true);
+    expect(s.layout?.display.width).toBe(1470);
+    s = evLayout(s, {
+      id: 9,
+      type: "layout.changed",
+      data: layout({ display: { ...layout().display, width: 1920 } }),
     });
-    expect(s.input?.seat).toBe("peer");
-    expect(s.input?.peer).toBe("dev-1");
+    expect(s.layout?.display.width).toBe(1920);
   });
 
   it("ignores unrelated events", () => {
-    const s = snapInput(initialInput(), snapshot());
-    expect(evInput(s, { id: 7, type: "pairing.changed", data: { pin_active: false, pin_expires_in_secs: 0 } })).toBe(s);
+    const s = evLayout(initialLayout(), { id: 10, type: "layout.changed", data: layout() });
+    expect(evLayout(s, { id: 11, type: "settings.changed", data: settings() })).toBe(s);
+  });
+});
+
+describe("settings store", () => {
+  it("replaces the section on settings.changed", () => {
+    let s = initialSettings();
+    s = evSettings(s, { id: 12, type: "settings.changed", data: settings() });
+    expect(s.loaded).toBe(true);
+    expect(s.settings?.general.name).toBe("mac");
+    s = evSettings(s, {
+      id: 13,
+      type: "settings.changed",
+      data: settings({ general: { ...settings().general, name: "renamed" } }),
+    });
+    expect(s.settings?.general.name).toBe("renamed");
+  });
+
+  it("ignores unrelated events", () => {
+    const s = evSettings(initialSettings(), { id: 14, type: "settings.changed", data: settings() });
+    expect(evSettings(s, { id: 15, type: "layout.changed", data: layout() })).toBe(s);
   });
 });

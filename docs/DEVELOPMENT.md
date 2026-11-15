@@ -9167,3 +9167,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **契约现状与边界**：snapshot 仅 4 section（system/devices/pairing/input）；layout/transfers/inbox/activity/settings 六类内部事件经 `apiv1/project.rs` 投影为 `invalidated`（topic），v1 无对应 GET 端点——四张对应页面等 M2c 端点扩展后接数据，客户端 store 已按"未知事件忽略"容错。
 - **剩余 M2b 收尾**：Playwright + MockTransport 主流程、dashboard 链接切 `/next/`（M4 切换前）、四张占位页的数据接入。
 - **§130 续（2026-11-15 晚）**：`f287a2d` MockTransport + App transport 注入 + 4 条组件级流程测试（快照渲染真数据 / device.updated 离线摘除 / 断线-重连-恢复横幅 / 设备页"连接"动作发 POST；vitest 14/14，svelte plugin + browser resolve condition + globals 进 vitest.config）；`7d56b4e` `tetherly dashboard --next`（`apitoken::next_url`，与 dashboard_url 同 fragment 契约，默认 URL 不动，tray 待 M4）。生产 daemon 仍 v0.2.58（`/next/` 404 属预期），随下个版本部署生效。
+
+## 131. 控制客户端 M2c：v1 端点扩展——transfers / inbox / layout / settings 读链路（未发版，main 续）
+
+接 §130。M2c 目标：四个粗粒度 topic 从 `invalidated` 升级为带全量状态的 `*.changed` 事件，并补四个 v1 GET 端点，让 /next/ SPA 的传输、收件箱、布局、设置四张页面接上真数据。本轮策略：先读后写（PATCH/PUT 留下轮）。
+
+- **契约层（tetherly-api）**：新增 16 个契约类型（Transfer/Transfers、Inbox/InboxFile、Layout/LayoutEdge/DisplayRect/CrossingConfig/LayoutPolicy、Settings/SettingsGeneral/SettingsTransfer），形状 1:1 对齐 daemon 真实数据源而非另造词汇——方向枚举 `inbound|outbound`、相位 `transferring|verifying|completed|failed`（照 `runtime/files.rs` ActiveTransfer）；DisplayRect 带 `scale_factor`、CrossingConfig 九字段（resistance_px/delay_ms/corner_lock_size_px/wrap_around/redundancy_band_px/slow_dwell_ms/fast_push_delta_px/entry_return_grace_ms/remote_speed_percent，照 tetherly-core EdgeCrossingConfig）。新增 4 个 Event 变体：`transfers.changed`/`inbox.changed`/`layout.changed`/`settings.changed`，各映射对应 Topic；`Event`/`EventEnvelope` 因 f32 失 Eq 降为 PartialEq（无下游依赖 Eq）。契约测试补 4 个事件用例（name/topic/serde tag 三验），TS 绑定重生成（40 export types；u64 计数字段补 `ts(type="number")` 避免 bigint）。
+- **model 层（apiv1/model.rs）**：`transfers()` 照 `node.transfers_report()`、`inbox()` 照 `node.inbox_report(None,None)`、`layout()` 照 `topology_layout()+topology_policy()`（空邻居时补齐四边渲染占位）、`settings()` 照 `config_report()+auto_accept_policy().enabled`。纯映射，无 I/O。
+- **hub 投影升级（apiv1/hub.rs）**：`Key::Invalidate(topic)` 对四主题改为重读 node 发布全量状态事件；Activity/Clipboard 等无 pushed form 的主题保持 `invalidated`。新集成测试 `state_topics_project_full_state_and_others_stay_invalidated`：config 写 → `settings.changed`（含新名）、FileDone → `transfers.changed`、ClipboardCleared → 仍 `invalidated`（clipboard topic）。
+- **v1 端点（uihttp/v1.rs）**：`GET /api/v1/transfers|inbox|layout|settings` 四端点入 `allowed()` GET 表 + route 分发；v1 门面集成测试补四端点 200 断言 + POST /settings 405。
+- **client（Svelte 5）**：四个同型 reducer store（transfers/inbox/layout/settings，8 新测试，sections.test.ts 16/16）；新四页 Transfers（方向/进度/速率/相位）、Inbox（大小/时间/不安全名警示）、Layout（屏幕/四边邻居/跨屏参数）、Settings（只读常规组）；App 导航加 传输/布局，事件扇出加四 store。svelte-check 0 错、vitest 16/16、dist 重建。
+- **测试契约修正**：SSE 测试 `v1_events_snapshot_replay_and_filters` 从期望 `invalidated` 改为 `transfers.changed`（新契约的直证）。
+- **验证**：cargo fmt 绿；clippy `--all-targets -- -D warnings` 原生 + windows-gnu 双 target 0 错；`cargo test --workspace` 全绿（含 tetherly-api 12、node lib 338）；vitest 16/16。
+- **边界**：四端点仅 GET 读；设置写（PATCH /settings）、传输动作（cancel/clear）、inbox 动作（delete/clear/open）留下一轮；activity 页继续等端点。

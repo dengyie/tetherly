@@ -2419,6 +2419,29 @@ mod tests {
             "{body}"
         );
 
+        // M2c: transfers / inbox / layout / settings read endpoints.
+        let (code, body) = v1_call(port, "GET", "/api/v1/transfers", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let t: tetherly_api::Transfers = serde_json::from_value(body).unwrap();
+        assert_eq!(t.active_count, 0);
+        assert!(t.transfers.is_empty());
+        let (code, body) = v1_call(port, "GET", "/api/v1/inbox", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let i: tetherly_api::Inbox = serde_json::from_value(body).unwrap();
+        assert_eq!((i.count, i.total_bytes), (0, 0));
+        let (code, body) = v1_call(port, "GET", "/api/v1/layout", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let l: tetherly_api::Layout = serde_json::from_value(body).unwrap();
+        assert!(l.display.width > 0 && l.display.height > 0);
+        assert!(!l.edges.is_empty(), "all four edges render on a fresh node");
+        let (code, body) = v1_call(port, "GET", "/api/v1/settings", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let s: tetherly_api::Settings = serde_json::from_value(body).unwrap();
+        assert_eq!(s.general.name, node.name());
+        assert!(!s.general.name.is_empty());
+        let (code, _) = v1_call(port, "POST", "/api/v1/settings", &auth, "").await;
+        assert_eq!(code, 405);
+
         // Diagnostics: legacy hits are counted per caller; v1 calls are not.
         let _ = raw_request(port, "GET", "/api/health", Some("User-Agent: curl/8"), b"").await;
         let (code, body) = v1_call(port, "GET", "/api/v1/diagnostics", &auth, "").await;
@@ -2565,19 +2588,20 @@ mod tests {
         node.emit(crate::events::UiEvent::FileDone {
             transfer_id: "t1".into(),
         });
+        // M2c: transfers now carries full state instead of invalidated.
         let (id2, name, data) = a.next().await;
-        assert_eq!((id2, name.as_str()), (id1 + 1, "invalidated"));
-        assert_eq!(data["topic"], "transfers");
+        assert_eq!((id2, name.as_str()), (id1 + 1, "transfers.changed"));
+        assert!(data["transfers"]["active_count"].is_number());
 
         // The filtered stream never saw pairing.changed.
         let (fid, name, _) = filtered.next().await;
-        assert_eq!((fid, name.as_str()), (id2, "invalidated"));
+        assert_eq!((fid, name.as_str()), (id2, "transfers.changed"));
 
         // Resume: replay after id1, no snapshot.
         let resume = format!("Last-Event-ID: {id1}");
         let mut b = V1Sse::open(port, "/api/v1/events", &[&auth, &resume]).await;
         let (rid, name, _) = b.next().await;
-        assert_eq!((rid, name.as_str()), (id2, "invalidated"));
+        assert_eq!((rid, name.as_str()), (id2, "transfers.changed"));
 
         // A stale id (earlier daemon run) resyncs with a snapshot.
         let mut c = V1Sse::open(port, "/api/v1/events?last_event_id=5", &[&auth]).await;
