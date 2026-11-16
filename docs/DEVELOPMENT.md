@@ -9360,3 +9360,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **§124 家族补充观察（如实）**：门禁 5 跑中 run1 绿 1028、run2/run3 各 1 例 phase1 flake（`file_offer_lifecycle` 401 竞态：`spawn_ui` 的 `set_api_token` 进程级全局被并行测试的另一个 daemon 覆盖——机制根源在案，预存在）；run2/run3 与冒烟 daemon 并发抢 CPU 放大了竞态。清场后隔离复跑绿、**连续 ×2 全绿 1028**。`spawn_ui` 改 per-port-only 是后续小轮候选（动生产路径，需独立评审）。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1028 ×2 稳定（+3 契约 +2 CLI）；deny 四项 ok。
 - **M5 CLI 迁移战果**：五个读取命令全迁完；旧路由剩余调用方=旧控制台（`/legacy/`，随 M5 收敛删除）+ 24 个写型/专用命令模块（按 diagnostics 快照分批）。下一波候选：`config`（`/api/config` → GET/PATCH `/settings` 合成）、`dial`（暂无 v1 连接动作资源，需 `POST /devices/{id}/connect` 接线盘点）。
+
+## 146. M5：`spawn_ui` per-port-only（§124 根源清理）+ `tetherly config` 迁 `/settings` + dial 盘点定案（未发版，main 续）
+
+接 §145。三件：spawn_ui 全局 token 清理、config 迁 v1、dial 语义盘点。
+
+- **`spawn_ui` per-port-only（RED→GREEN，生产路径变更）**：旧实现同时 `set_port_api_token(bound)` + **`set_api_token(global)`**——后者是进程级静态，多 daemon 并存的测试进程里每次 spawn 覆盖全局（§124 401 竞态隐患；CLI 进程的全局则由 main.rs 从 env/文件设置，语义是"外部 daemon 的回退"，daemon 侧不该碰）。新不变量测试 `spawn_ui_keeps_the_loopback_global_untouched`（spawn 后断言全局仍 None + per-port 项可鉴权 /api/v1/health）——RED 真实抓到泄漏。tray 三处 `api_token()` 消费点（macOS `openDashboard:`、Windows `WM_LBUTTONUP/DBLCLK`、Windows `IDM_DASHBOARD`）改 `api_token_for(port)`（port 均在作用域：`self.ivars().ui_port` / `GLOBAL_UI_PORT`，生产中 = `cfg.ui_port` = bound 端口）。**如实**：§145 的 phase1 401 flake 机制未能第一性原理复现（per-port 表总在请求前正确写入），本改动是原则性卫生修复+可测不变量，非复现驱动；m3_9 竞态实证与本改动无路径交集（见下）。
+- **`tetherly config` 迁 v1（RED→GREEN）**：读 = `GET /system`（device_id/platform/ports）+ `GET /settings`（general 的 name/advertise/reconnect/loopback_only/overlay_enabled）合成旧 NodeConfigReport 形状；写 = `PATCH /settings`（SettingsPatch 的 name/advertise/reconnect 与旧 POST /api/config 字段一一对应，无契约缺口）。**输出裁剪（明示）**：旧报告的 Data Directory、Memory Clip、ANCS Service 三段无 v1 资源（data_dir 是环境细节、memory_* 是测试注入开关、ANCS 待独立资源），从打印与 `--json` 中移除。**坑**：`loopback_request` 的 token 是显式参数不走 per-port 表——首跑 401（真实 RED 补充），改传 `api_token_for(ui_port)`。
+- **dial 盘点定案（不迁移，入档）**：旧 `POST /api/dial` 核心语义是**首配对**（按 addr 拨号未信任设备 + 可选 PIN arming）；v1 `POST /devices/{id}/connect` 背后的 `connect_peer` 只服务已知设备（resolve_peer + blocked 检查 + already-live 短路），无 PIN 路径。§4.2 pairing 只有 accept/reject 响应侧——首配对拨号资源（如 `POST /pairing/dial`）是契约扩展项，dial 保持 legacy，等独立轮。
+- **测试**：lifecycle +1（spawn_ui 全局不变量）；bin +1（config 读写往返 + legacy_routes 断言 `/api/config`）。
+- **真 daemon 冒烟（:16463/:36721）**：config 读视图全段、`--advertise false` 写回生效（Updated 标头 + json `"advertise":false`）、`legacy_routes: []`。
+- **§124 家族进一步实证（如实）**：门禁 6 跑——run1 绿 1030；run2/run3 各 1 例 `m3_9_reverse_control_takeover`（phase3:730 seat 断言）**workspace 并行负载下连败**，但该测试零 spawn_ui/零 loopback（纯 `pair()` + `drive_input` 进程内 API），单独跑连绿，phase3 套件单独跑绿——负载型时序竞态，与本轮改动无因果。run5/run6 清场连绿 **1030 ×2**。
+- **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1030 ×2 稳定（+2）；deny 四项 ok。
+- **M5 CLI 迁移战果更新**：六个命令迁完（pin/health/peers/status/sys/config）；旧路由剩余=旧控制台+dial（首配对，等契约）+其余写型/专用模块（按 diagnostics 分批）。

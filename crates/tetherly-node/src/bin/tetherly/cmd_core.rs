@@ -943,6 +943,12 @@ pub(crate) async fn health(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly config` -- Config arm of the top-level dispatch.
+///
+/// §146: reads v1 `/system` + `/settings` and writes via `PATCH /settings`
+/// (the same fields the legacy `/api/config` carried: name/advertise/
+/// reconnect). The legacy report's environment-only rows — data directory,
+/// memory-clip/notifier test toggles, the ANCS section — have no v1
+/// resource and are dropped from the output.
 pub(crate) async fn config(
     name: Option<String>,
     advertise: Option<bool>,
@@ -951,52 +957,88 @@ pub(crate) async fn config(
     ui_port: u16,
 ) -> Result<()> {
     let has_updates = name.is_some() || advertise.is_some() || reconnect.is_some();
-    let (code, resp) = if has_updates {
+    if has_updates {
         let body = serde_json::json!({
             "name": name,
             "advertise": advertise,
             "reconnect": reconnect,
         });
         let bytes = serde_json::to_vec(&body)?;
-        tetherly_node::loopback_post(ui_port, "/api/config", &bytes)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                     start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?
-    } else {
-        tetherly_node::loopback_get(ui_port, "/api/config")
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                     start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?
-    };
-    if code != 200 {
-        anyhow::bail!(
-            "node config query/update failed (HTTP {code}): {}",
-            String::from_utf8_lossy(&resp)
-        );
+        let (code, resp) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/settings",
+            Some(&bytes),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+        if code != 200 {
+            anyhow::bail!(
+                "node config update failed (HTTP {code}): {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
     }
+    async fn v1_get(ui_port: u16, path: &str) -> Result<serde_json::Value> {
+        let (code, resp) = tetherly_node::loopback_get(ui_port, path)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+        if code != 200 {
+            anyhow::bail!(
+                "node config query failed (HTTP {code}): {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))
+    }
+    let system = v1_get(ui_port, "/api/v1/system").await?;
+    let settings = v1_get(ui_port, "/api/v1/settings").await?;
+    let general = settings["general"].clone();
+    let ports = system["ports"].clone();
+
+    let v = serde_json::json!({
+        "ok": true,
+        "device_id": system["device_id"],
+        "name": general["name"],
+        "platform": system["platform"],
+        "loopback_only": general["loopback_only"],
+        "advertise": general["advertise"],
+        "reconnect": general["reconnect"],
+        "overlay_enabled": general["overlay_enabled"],
+        "ports": ports,
+    });
     if json {
-        println!("{}", String::from_utf8_lossy(&resp));
+        println!("{v}");
     } else {
-        let rep: tetherly_node::NodeConfigReport = serde_json::from_slice(&resp)?;
+        let g = &general;
         if has_updates {
             println!("Tetherly Node Configuration (Updated):");
         } else {
             println!("Tetherly Node Configuration:");
         }
-        println!("  Device ID:        {}", rep.device_id);
-        println!("  Node Name:        {} ({})", rep.name, rep.platform);
-        println!("  Data Directory:   {}", rep.data_dir);
+        println!(
+            "  Device ID:        {}",
+            system["device_id"].as_str().unwrap_or("?")
+        );
+        println!(
+            "  Node Name:        {} ({})",
+            g["name"].as_str().unwrap_or("?"),
+            system["platform"].as_str().unwrap_or("?")
+        );
         println!(
             "  Loopback Only:    {}",
-            if rep.loopback_only {
+            if g["loopback_only"].as_bool().unwrap_or(false) {
                 "true (127.0.0.1 only)"
             } else {
                 "false (LAN + Loopback)"
@@ -1004,35 +1046,34 @@ pub(crate) async fn config(
         );
         println!(
             "  mDNS Advertise:   {}",
-            if rep.advertise { "enabled" } else { "disabled" }
-        );
-        println!(
-            "  Auto Reconnect:   {}",
-            if rep.reconnect { "enabled" } else { "disabled" }
-        );
-        println!("  Memory Clip:      {}", rep.memory_clip);
-        println!(
-            "  Overlay Sidecar:  {}",
-            if rep.overlay_enabled {
+            if g["advertise"].as_bool().unwrap_or(false) {
                 "enabled"
             } else {
                 "disabled"
             }
         );
         println!(
-            "  ANCS Service:     {}",
-            if rep.ancs_attached {
-                format!("attached ({})", rep.ancs_peripheral)
+            "  Auto Reconnect:   {}",
+            if g["reconnect"].as_bool().unwrap_or(false) {
+                "enabled"
             } else {
-                format!("detached ({})", rep.ancs_peripheral)
+                "disabled"
+            }
+        );
+        println!(
+            "  Overlay Sidecar:  {}",
+            if g["overlay_enabled"].as_bool().unwrap_or(false) {
+                "enabled"
+            } else {
+                "disabled"
             }
         );
         println!("  Bound Ports:");
-        println!("    Control (Mesh): {}", rep.control_port);
-        println!("    File Transfer:  {}", rep.file_port);
-        println!("    Input (Remote): {}", rep.input_port);
-        println!("    Screen (Video): {}", rep.screen_port);
-        println!("    UI (Loopback):  {}", rep.ui_port);
+        println!("    Control (Mesh): {}", ports["control"]);
+        println!("    File Transfer:  {}", ports["file"]);
+        println!("    Input (Remote): {}", ports["input"]);
+        println!("    Screen (Video): {}", ports["screen"]);
+        println!("    UI (Loopback):  {}", ports["ui"]);
     }
     Ok(())
 }
@@ -2415,6 +2456,76 @@ mod status_sys_v1_tests {
                 .unwrap_or_default()
                 .starts_with("/api/sys")),
             "sys command still hits legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+}
+
+#[cfg(test)]
+mod config_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-config-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §146: the CLI config view reads v1 system + settings and writes via
+    /// PATCH /settings, off the frozen legacy `/api/config` alias.
+    #[tokio::test]
+    async fn config_command_round_trips_v1_settings() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        // Read view.
+        config(None, None, None, false, port).await.unwrap();
+        config(None, None, None, true, port).await.unwrap();
+        // Write path: rename via PATCH /settings.
+        config(Some("renamed".into()), None, None, false, port)
+            .await
+            .unwrap();
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/config")),
+            "config command still hits legacy routes: {hits:?}"
         );
 
         tetherly_node::set_port_api_token(port, None);

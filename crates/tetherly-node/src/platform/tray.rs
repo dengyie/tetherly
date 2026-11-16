@@ -229,10 +229,12 @@ mod macos_tray {
             fn open_dashboard(&self, _sender: &NSMenuItem) {
                 let port = self.ivars().ui_port;
                 // M4: prefer the Tauri client (deep link), fall back to the
-                // browser console when no client is installed.
+                // browser console when no client is installed. §146: the
+                // token lives in the per-port entry spawn_ui minted, not the
+                // process global (the CLI's foreign-daemon fallback).
                 crate::apitoken::open_client_or_dashboard(
                     port,
-                    tetherly_loopback::api_token().as_deref(),
+                    tetherly_loopback::api_token_for(port).as_deref(),
                 );
             }
 
@@ -511,10 +513,12 @@ mod windows_tray {
                 if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
                     // ADR-139 M4: left click (and double click) prefer the
                     // Tauri client (deep link), falling back to the browser
-                    // console; the tray popover is retired.
+                    // console; the tray popover is retired. §146: per-port
+                    // token entry, not the process global.
+                    let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
                     crate::apitoken::open_client_or_dashboard(
-                        GLOBAL_UI_PORT.load(Ordering::Relaxed),
-                        tetherly_loopback::api_token().as_deref(),
+                        port,
+                        tetherly_loopback::api_token_for(port).as_deref(),
                     );
                 } else if event == WM_RBUTTONUP {
                     let mut pt = POINT { x: 0, y: 0 };
@@ -543,9 +547,10 @@ mod windows_tray {
             WM_COMMAND => {
                 let id = wparam & 0xFFFF;
                 if id == IDM_DASHBOARD {
+                    let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
                     crate::apitoken::open_client_or_dashboard(
-                        GLOBAL_UI_PORT.load(Ordering::Relaxed),
-                        tetherly_loopback::api_token().as_deref(),
+                        port,
+                        tetherly_loopback::api_token_for(port).as_deref(),
                     );
                 } else if id == IDM_EXIT {
                     std::process::exit(0);

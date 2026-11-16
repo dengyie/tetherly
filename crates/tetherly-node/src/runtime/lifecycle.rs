@@ -725,11 +725,13 @@ impl Node {
             crate::uihttp::bind_and_spawn_with_token(self.clone_handle(), self.shared.cfg.ui_port)
                 .await?;
         self.shared.bound_ui.store(bound, Ordering::SeqCst);
-        // In-process loopback clients (tray drag/drop, popover, dashboard
-        // launcher) authenticate with the token this listener just minted.
+        // §146: in-process loopback clients (tray drag/drop, dashboard
+        // launcher) authenticate with the per-port entry minted here. The
+        // process global stays untouched — it is the CLI's fallback for
+        // foreign daemons, and every spawn overwriting it raced concurrent
+        // callers (§124 401 flakes).
         let token = token.map(|t| t.to_string());
-        tetherly_loopback::set_port_api_token(bound, token.clone());
-        tetherly_loopback::set_api_token(token);
+        tetherly_loopback::set_port_api_token(bound, token);
         Ok(bound)
     }
 
@@ -2519,5 +2521,52 @@ mod tests {
         assert!(unrelated.exists());
         assert!(recent_backup.exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod spawn_ui_token_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> Node {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-spawnui-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Node::start(crate::NodeConfig {
+            data_dir: dir,
+            loopback_only: true,
+            ui_port: 0,
+            ..crate::NodeConfig::default()
+        })
+        .unwrap()
+    }
+
+    /// §146: spawn_ui wires the minted token per-port only. The process
+    /// global is the CLI's fallback for foreign daemons; when several
+    /// daemons share a test process, each spawn overwriting the global
+    /// races the per-port lookups of concurrent callers (§124 401 flakes).
+    #[tokio::test]
+    async fn spawn_ui_keeps_the_loopback_global_untouched() {
+        tetherly_loopback::set_api_token(None);
+        let node = temp_node("no-global");
+        let port = node.spawn_ui().await.unwrap();
+        assert_eq!(
+            tetherly_loopback::api_token(),
+            None,
+            "spawn_ui leaked the minted token into the process global"
+        );
+        // The per-port entry still authenticates in-process clients.
+        let (code, _) = tetherly_loopback::loopback_get(port, "/api/v1/health")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        tetherly_loopback::set_port_api_token(port, None);
+        tetherly_loopback::set_api_token(None);
     }
 }

@@ -1353,3 +1353,10 @@
 - RED 双确认（/api/state、/api/sys 命中）；冒烟 :16462 全过 + legacy_routes []。
 - §124 补充：spawn_ui 的 set_api_token 全局覆盖是 401 竞态根源；run2/run3 与冒烟 daemon 抢 CPU 放大，清场后 ×2 稳定 1028。spawn_ui per-port-only 改造列为候选小轮。
 - 五个读取命令（pin/health/peers/status/sys）全迁 v1；旧路由剩旧控制台+24 个写型模块分批。
+
+## 2026-11-17 §146 spawn_ui per-port-only + config 迁 v1 + dial 定案
+- spawn_ui 移除 set_api_token 全局调用（不变量测试 RED 抓泄漏）+ tray 三点换 api_token_for(port)。诚实记录：401 机制未复现，属原则性修复。
+- config 读 = system+settings 合成旧形状；写 = PATCH /settings（SettingsPatch 字段一一对应）。坑：loopback_request token 显式参数不走 per-port 表。输出裁剪 data_dir/memory_clip/ancs（无 v1 资源，明示）。
+- dial 不迁移：connect_peer 只服务已知设备，首配对拨号（addr+PIN）无 v1 资源，等 POST /pairing/dial 契约扩展。
+- m3_9 workspace 并行负载下连败两次但单独跑绿（零 spawn_ui/loopback 路径）——负载型竞态实证，非本轮因果。清场后 1030 ×2 稳定。
+- 六命令迁完（pin/health/peers/status/sys/config）。
