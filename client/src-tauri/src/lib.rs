@@ -10,8 +10,17 @@
 pub mod events;
 pub mod proxy;
 pub mod token;
+pub mod tray;
+pub mod trayui;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Listener, Manager, State};
+
+use crate::trayui::TrayUi;
+
+/// The embedded tray glyph ([`tray::GLYPH`]); the runtime tints it per state.
+pub fn tray_icon_rgba() -> &'static [u8] {
+    &tray::GLYPH
+}
 
 /// State handed to the `api` command: daemon port + token, read once at
 /// startup. The token lives here only; the WebView cannot read app state.
@@ -61,6 +70,7 @@ pub fn run() {
     tracing::info!(port = daemon.port, "shell starting against loopback daemon");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(daemon)
         .invoke_handler(tauri::generate_handler![api])
         .setup(|app| {
@@ -68,7 +78,82 @@ pub fn run() {
             let port = handle.state::<Daemon>().port;
             let token = handle.state::<Daemon>().token.clone();
             // The single SSE connection for every window (main + tray panel).
-            tauri::async_runtime::spawn(events::run(handle, port, token));
+            tauri::async_runtime::spawn(events::run(handle.clone(), port, token));
+
+            // Tray: real-state sync (§6.2). The SSE task forwards frames to
+            // the tray through app events; the tray answers menu actions the
+            // same way so no shared state crosses the runtime boundary.
+            let tray = TrayUi::build(&handle).map_err(|e| format!("tray init: {e}"))?;
+            handle.manage(tray);
+            let fwd = handle.clone();
+            handle.listen(events::EVENT_CHANNEL, move |ev| {
+                if let Ok(frame) = serde_json::from_str::<events::WireEvent>(ev.payload()) {
+                    // Desktop notifications (§6.2): seat takeover/return and
+                    // unread activity. `was_remote` is the fold state BEFORE
+                    // this frame so repeated remote frames stay silent.
+                    let was_remote = fwd
+                        .try_state::<TrayUi<tauri::Wry>>()
+                        .map(|ui| ui.on_event(true, &frame.ty, &frame.data))
+                        .unwrap_or(false);
+                    if let Some(notice) = tray::notice_for(was_remote, &frame.ty, &frame.data) {
+                        use tauri_plugin_notification::NotificationExt;
+                        let _ = fwd
+                            .notification()
+                            .builder()
+                            .title(notice.title)
+                            .body(notice.body)
+                            .show();
+                    }
+                }
+            });
+            let fwd = handle.clone();
+            handle.listen(events::LINK_CHANNEL, move |ev| {
+                let up = matches!(
+                    serde_json::from_str::<events::LinkState>(ev.payload()),
+                    Ok(events::LinkState::Live | events::LinkState::Resyncing)
+                );
+                if let Some(ui) = fwd.try_state::<TrayUi<tauri::Wry>>() {
+                    ui.on_link(up);
+                }
+            });
+            // Menu action: the share pause switch is settings.general.advertise
+            // (PATCH /api/v1/settings) — the same switch the SPA settings page
+            // exposes. Read-modify-write so the patch always sets a field.
+            let act = handle.clone();
+            handle.listen(trayui::TOGGLE_REQUEST, move |_| {
+                let app = act.clone();
+                tauri::async_runtime::spawn(async move {
+                    let d = app.state::<Daemon>();
+                    let current =
+                        match proxy::request(d.port, &d.token, "GET", "/api/v1/settings", None)
+                            .await
+                        {
+                            Ok(r) if r.status == 200 => r.body,
+                            Ok(r) => {
+                                tracing::warn!("tray toggle: settings read {} ", r.status);
+                                return;
+                            }
+                            Err(e) => {
+                                tracing::warn!("tray toggle failed: {e}");
+                                return;
+                            }
+                        };
+                    let on = current["general"]["advertise"].as_bool().unwrap_or(true);
+                    let patch = serde_json::json!({"general": {"advertise": !on}});
+                    match proxy::request(
+                        d.port,
+                        &d.token,
+                        "PATCH",
+                        "/api/v1/settings",
+                        Some(&patch),
+                    )
+                    .await
+                    {
+                        Ok(_) => tracing::info!("tray toggle: advertise -> {}", !on),
+                        Err(e) => tracing::warn!("tray toggle failed: {e}"),
+                    }
+                });
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

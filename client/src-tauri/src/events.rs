@@ -9,7 +9,7 @@
 //! re-snapshots. Frames arrive in the uniform envelope shape
 //! `{seq, type, data}` and are re-emitted verbatim as JSON.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -18,7 +18,7 @@ pub const EVENT_CHANNEL: &str = "tetherly://event";
 pub const LINK_CHANNEL: &str = "tetherly://link";
 
 /// What a window sees on `tetherly://link`.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkState {
     Connecting,
@@ -28,7 +28,7 @@ pub enum LinkState {
 }
 
 /// One forwarded frame: the envelope minus nothing — `{seq, type, data}`.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WireEvent {
     pub seq: u64,
     #[serde(rename = "type")]
@@ -113,13 +113,17 @@ enum StreamEnd {
 
 /// One connection attempt: stream frames until EOF. Returns Ok only when the
 /// shutdown signal fires (listening on the app handle is out of scope here —
-/// the process exits, killing this task).
-async fn connect(
-    app: &AppHandle,
+/// the process exits, killing this task). `frame_sink` receives each parsed
+/// frame — tests use it to observe reconnect behavior without an app handle.
+async fn connect_with<S>(
     port: u16,
     token: &str,
     last_seq: &mut Option<u64>,
-) -> Result<std::convert::Infallible, StreamEnd> {
+    mut frame_sink: S,
+) -> Result<std::convert::Infallible, StreamEnd>
+where
+    S: FnMut(WireEvent),
+{
     let url_path = match last_seq {
         None => "/api/v1/events".to_string(),
         Some(s) => format!("/api/v1/events?last_event_id={s}"),
@@ -155,7 +159,7 @@ async fn connect(
                     let refs: Vec<&str> = frame_lines.iter().map(String::as_str).collect();
                     if let Some(ev) = parse_frame(&refs) {
                         *last_seq = Some(ev.seq);
-                        let _ = app.emit(EVENT_CHANNEL, &ev);
+                        frame_sink(ev);
                     }
                     frame_lines.clear();
                 } else {
@@ -166,9 +170,22 @@ async fn connect(
     }
 }
 
+async fn connect(
+    app: &AppHandle,
+    port: u16,
+    token: &str,
+    last_seq: &mut Option<u64>,
+) -> Result<std::convert::Infallible, StreamEnd> {
+    connect_with(port, token, last_seq, |ev| {
+        let _ = app.emit(EVENT_CHANNEL, &ev);
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn parse_frame_reads_envelope_and_ignores_comments() {
@@ -217,5 +234,83 @@ mod tests {
         assert_eq!(v["type"], "activity.changed");
         assert_eq!(v["seq"], 1);
         assert_eq!(v["data"]["k"], 1);
+    }
+
+    /// SSE frame bytes as the daemon writes them (§4.3): id + event + data.
+    fn sse_frame(seq: u64, ty: &str, data: &serde_json::Value) -> String {
+        format!(
+            "id: {seq}\nevent: {ty}\ndata: {}\r\n\r\n",
+            serde_json::json!({"seq": seq, "type": ty, "data": data})
+        )
+    }
+
+    /// M3-r3 acceptance: kill the daemon, restart it on the same port, and
+    /// the shell reconnects — resuming with last_event_id and folding the
+    /// new snapshot. Drives [`connect_with`] directly over a real loopback
+    /// listener, no app handle needed.
+    #[tokio::test]
+    async fn reconnect_after_daemon_restart_resumes_with_last_event_id() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // "Daemon v1": one snapshot frame, then EOF (process killed).
+        let v1 = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _n = s.read(&mut buf).await.unwrap();
+            let body = sse_frame(7, "snapshot", &serde_json::json!({"gen": 1}));
+            let _ = s.write_all(body.as_bytes()).await;
+            // Drop = daemon dies mid-stream.
+        });
+        // "Daemon v2" binds the SAME port after a restart gap. Bind until it
+        // succeeds (v1's socket may linger briefly in TIME_WAIT).
+        let v2 = tokio::spawn(async move {
+            let listener = loop {
+                match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                    Ok(l) => break l,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                }
+            };
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let n = s.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            // The resume contract: the shell tells v2 where v1 left off.
+            assert!(
+                req.starts_with("GET /api/v1/events?last_event_id=7 HTTP/1.1\r\n"),
+                "v2 must receive the resume request, got: {req}"
+            );
+            assert!(req.contains("Accept: text/event-stream\r\n"), "{req}");
+            let body = sse_frame(8, "snapshot", &serde_json::json!({"gen": 2}));
+            let _ = s.write_all(body.as_bytes()).await;
+            // Hold v2's connection open until the test observed the frame.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        });
+
+        let mut last_seq: Option<u64> = None;
+        let mut frames: Vec<WireEvent> = Vec::new();
+        // Attempt loop mirrors `run`: backoff between StreamEnd::Refused.
+        for attempt in 0..10 {
+            match connect_with(port, "tok", &mut last_seq, |ev| frames.push(ev)).await {
+                Err(StreamEnd::Refused) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Ok(inf) => match inf {},
+            }
+            if frames.len() >= 2 {
+                break;
+            }
+            let _ = attempt;
+        }
+
+        assert_eq!(frames.len(), 2, "one frame per daemon generation");
+        assert_eq!(frames[0].seq, 7);
+        assert_eq!(frames[0].data["gen"], 1);
+        assert_eq!(frames[1].seq, 8);
+        assert_eq!(frames[1].data["gen"], 2);
+        v1.await.unwrap();
+        v2.await.unwrap();
     }
 }

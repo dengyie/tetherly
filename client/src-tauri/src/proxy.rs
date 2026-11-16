@@ -188,9 +188,29 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let n = s.read(&mut buf).await.unwrap();
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            // Read until the full request is here: head + body can arrive in
+            // separate TCP segments, so a single read is a race.
+            let mut raw: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = s.read(&mut buf).await.unwrap();
+                raw.extend_from_slice(&buf[..n]);
+                let Some(h) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let len = String::from_utf8_lossy(&raw[..h])
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if raw.len() >= h + 4 + len {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&raw).to_string();
             assert!(
                 req.starts_with("PATCH /api/v1/settings HTTP/1.1\r\n"),
                 "{req}"

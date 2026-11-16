@@ -9223,3 +9223,17 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **CI**：check job 三 OS 全 workspace 编译 shell，Linux 加 `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`（Windows/macOS 自带）。
 - **验证**：fmt 绿；`cargo clippy --workspace --all-targets -- -D warnings` 0 错；`cargo test --workspace` 40 段 ok（一次 phase1 两例 m3_* loopback 竞态 flake，§124/§129 同族，复跑全绿）；壳二进制对本机活 daemon（0.2.58）冒烟：读 token、建 SSE、开窗、4 秒无错误日志。
 - **边界（M3 后续轮）**：托盘图标/托盘面板、自启、系统通知、深链接、`.dmg`/`.msi` release 产物、daemon 重启自动恢复实测、内存 <120MB 实测；Windows 侧 SYSTEM daemon 需为用户签发 `client.token`（§4.4）未动；`Cargo.lock` 增 tauri 全家桶（预期内）。
+
+## 135. 控制客户端 M3-4/M3-5/M3-6：托盘真实状态同步 + 系统通知 + daemon 重启自动恢复（未发版，main 续）
+
+接 §134。M3 第二轮三件套一次交付：托盘图标/菜单/真实状态折叠、桌面系统通知、daemon 重启自动恢复（真实 TCP 集成测试证明）。另揪出并修正一个语义级误判（`channel_open` 不是暂停开关）。
+
+- **托盘状态折叠（tray.rs，纯函数 TDD）**：`TrayFold` 折叠 `snapshot` / `input.changed` / `settings.changed` 三类帧 → `TrayState` 四态：`local`（键鼠在本机）/ `remote`（被远端接管）/ `paused`（共享暂停）/ `offline`（SSE 断开，覆盖一切折叠值）。**语义修正（本轮最重要的发现）**：初版把 `input.channel_open == false` 当暂停——错。daemon 里 `channel_open` 是"输入控制通道是否附着"，空闲节点本来就是 false（Overview.svelte 也把 `!channel_open` 渲染为"本机"）；真正的共享开关是 `settings.general.advertise`（关掉即停 mdns 广播，对端无法再接管）。`remote` 优先于 `paused`（有人握着方向盘时显示接管）。测试含回归用例 `idle_channel_open_is_not_paused`。
+- **托盘图标（trayui.rs + tray.rs）**：32×32 RGBA 字形 `const fn build_glyph()` 编译期内嵌（无运行时资产加载；const 里不可用 `f32::sqrt`，改平方距离比较）；四态用不同 tint 色重着色条带像素（`tinted_icon` 纯函数，11+ 测试钉住字形尺寸/基色/tint 区分度）。`tauri` 依赖启用 `tray-icon` + `image-png` feature（此前 `features = []` 根本没有托盘能力——tauri-build 不会自动开）。API 事实核对：`Image::new_owned(Vec<u8>, w, h)` 是 const fn 直接返回值（非 Result）；`Error` 枚举无 `AssetNotEmbedded`。
+- **托盘菜单与桥接（trayui.rs + lib.rs）**：菜单四项——daemon 状态行（禁点，随折叠实时变文案）/ 暂停·恢复共享 / 打开主窗口 / 退出；左键单击托盘开主窗，右键出菜单。事件桥接全走 app event：SSE 任务 emit `tetherly://event|link` → 托盘监听折叠重渲染 → 菜单动作 emit `tetherly://toggle-share` → Rust 监听执行 **read-modify-write `PATCH /api/v1/settings {"general":{"advertise":!on}}`**（先 GET 再翻转，token 只在 Rust 侧）。注意 `on_event` 返回折叠**前**是否 remote——通知分类需要旧值，on_event 内部先 apply 的话接管通知会被吞。
+- **系统通知（tauri-plugin-notification 2.4）**：`notice_for(was_remote, ty, data)` 纯函数（5 测试）——seat 变 remote（键鼠已被远端接管）/ 变回 local（键鼠已回到本机）/ `activity.changed` 有未读消息·待打开接续时各发一条；连续 remote 帧、全已读、无关 topic 均静默。桌面 API 是 `.notification().builder().title().body().show()`（`Notification` 本体没有 builder 方法，文档示例里的 `app.notification().builder()` 才是真路径）。
+- **daemon 重启自动恢复（events.rs 集成测试，M3 验收项）**：`connect_with` 抽出 `frame_sink` 参数使重连循环可在无 AppHandle 下驱动。`reconnect_after_daemon_restart_resumes_with_last_event_id`：真实 loopback listener 演两代 daemon——v1 发 snapshot(seq=7) 后断流（进程死），v2 同端口重绑，**断言 v2 收到的请求行是 `GET /api/v1/events?last_event_id=7 HTTP/1.1`**，随后壳折叠 v2 的 snapshot(seq=8)。退避重连 1s→2s→5s→10s 已在 §134 落地，本轮补上端到端证明。
+- **cargo deny 事实澄清**：CI 用 `cargo deny check ...`（无 `--workspace`），只查 cwd（仓库根 = daemon 图）；本地若加 `--workspace` 会把 shell 的 Linux GTK/Tauri 传递依赖拉进来（cssparser/selectors 的 MPL-2.0、glib 链的 proc-macro-error unmaintained 等 7 crate 被拒）——HEAD lockfile 同样如此，非本轮引入。维持与 CI 一致的不带 `--workspace` 口径。
+- **proxy.rs 测试加固**：mock daemon 的请求读取从单次 read 改为按 `\r\n\r\n` + Content-Length 循环读满（head+body 分段到达时单次 read 是竞态）。
+- **验证**：fmt 绿；host clippy + windows-gnu 交叉 clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` **1006 用例全绿**（含壳 26：折叠 8、通知 5、字形 3、重连 1）；`cargo deny check` 四项 ok（与 CI 口径一致）。门必须串行执行——并行 cargo 互相抢 target 锁会出假失败（§134 已记，本轮再次验证）。
+- **边界（M3 后续轮）**：托盘面板（popover 360×480）、自启、深链接、`.dmg`/`.msi` 打包产物、内存 <120MB 实测、Windows `client.token` 签发、通知点击聚焦主窗。

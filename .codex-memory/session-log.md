@@ -1272,3 +1272,14 @@
 - generate_context! 需 frontendDist 存在——client/dist 本就进 git（daemon include_str! 先例），无 CI 顺序问题。图标：Node zlib 手写 RGBA PNG + sips + 自拼 ICO/ICNS（tauri-build 强制 RGBA）。
 - 验证：fmt/clippy workspace 0 错、40 段 ok（phase1 两例 m3_* flake 复跑绿，§124 同族）；壳对活 daemon 冒烟 4 秒干净。§134 已记。CI 盯守中。
 - 留下轮：托盘/托盘面板、自启、通知、深链接、.dmg/.msi、daemon 重启恢复与 <120MB 实测、Windows client.token 签发。
+
+## 2026-11-16 M3 二轮：托盘 + 通知 + daemon 重启恢复
+- **语义修正（最重要）**：`channel_open==false` 不是暂停——它是空闲态（无控制通道附着）；真共享开关是 `settings.general.advertise`（停 mdns 广播）。托盘 paused 折叠改吃 settings.changed。remote > paused 优先级。
+- 托盘：TrayFold 纯折叠（snapshot/input.changed/settings.changed）→ local/remote/paused/offline 四态；32×32 RGBA 字形 const fn 内嵌（const 里没有 sqrt，用平方距离）；tint 重着色条带。**tauri 依赖必须显式 features = ["tray-icon","image-png"]**（空 features 没有托盘能力，tauri-build 不自动开）；`Image::new_owned` 是 const fn 返回值非 Result；Error 无 AssetNotEmbedded。
+- 菜单桥接全走 app event（SSE→tetherly://event→托盘折叠；菜单→tetherly://toggle-share→Rust PATCH settings）。on_event 返回折叠前 was_remote——先 apply 再取旧值会吞接管通知。
+- 通知：notice_for 纯函数（接管/回还/未读活动），plugin 2.4 桌面 API 是 `.notification().builder().title().body().show()`。
+- daemon 重启恢复：connect_with(frame_sink) 抽出 AppHandle 依赖；集成测试两代 daemon 同端口，断言 v2 收到 `GET /api/v1/events?last_event_id=7`、壳折叠 v2 snapshot。
+- cargo deny：CI 口径是不带 --workspace（只查 daemon 图）；带 --workspace 会拉进 shell 的 GTK 链（cssparser MPL-2.0、proc-macro-error unmaintained）7 crate 拒——HEAD 同样，非本轮引入。
+- proxy mock daemon 测试改循环读满（\r\n\r\n + Content-Length），单次 read 在 head+body 分段时是竞态。
+- 验证：fmt / host+gnu clippy 0 错 / workspace **1006** 全绿 / deny ok（CI 口径）。并行 cargo 抢 target 锁假失败再次复现——门必须串行。
+- 留下轮：托盘面板 popover、自启、深链接、.dmg/.msi、<120MB 实测、通知点击聚焦、Windows client.token。
