@@ -1375,3 +1375,9 @@
 - 发版：tag 314f996 → release 43923712802 七 job 绿、11 资产；deploy 双端绿（mac pid 21775 / win 20976，保护进程 3/3，SYSTEM）。
 - 生产壳接管复验通过：claim 即时 + t+40s 存活 + 壳重启再 claim t+28s 存活；daemon 日志 tray reclaim 部署前 11 次 → 部署后 0 次（决定性证据）。
 - 教训：①macOS 26 移除了 NSStatusItem 的 AXAlphaValue，像素/AX 探针失效，reclaim 日志计数是接管状态权威证据；②open 已运行实例不换进程，claim 是 per-process once，复验前先 kill 旧壳；③截图取证在时钟秒数刷新区永远有抖动，别在菜单栏右侧做像素 diff。
+
+## §150 (2026-11-17) — tags 迁 v1 读改写
+- GET devices（id/alias/name 匹配）→ 本地集合运算（幂等/case-blind）→ PATCH 全量 tags；校验两端一致。旧路由 RED 归零；冒烟 :16470 干净。
+- 发现：legacy add 对合法未知 id 静默建档（意外行为），收敛为显式 404；seed_trusted_peer 是 cfg(test) 库内后门，bin 测试走 trusted.json 种子。
+- 坑：target/debug/tetherly 可能是旧二进制（clippy 不产 bin）——冒烟前必 cargo build -p tetherly-node --bin tetherly。
+- 1036×2 稳定；门禁全绿。peers 写域剩 blocked/disconnect/link·heartbeat（均待契约）。

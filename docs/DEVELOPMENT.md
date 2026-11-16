@@ -9407,3 +9407,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **生产部署 v0.2.60 双端**：mac 重打包+重启（pid 21775，健康门禁过，accessibility hooks active）；windows NTFS 热重启（old_pid 4308 → new_pid 20976，版本门禁 0.2.60 ✓，保护进程 3/3 完好，SYSTEM 权限 ✓）。
 - **生产壳接管端到端复验（§147 三修复首次上线，通过）**：v0.2.60 dmg 装 `/Applications/Tetherly Client.app`（ditto + 去 quarantine），壳启动即 claim `tray_owner=client` 且 **t+40s 存活**（旧版必在 10s 被回收）；**决定性证据**：daemon 日志 `tray reclaim` 计数——部署前（v0.2.59）11 次（16:38–17:06 六十分钟十次，§147 取证时 5 次的延续），部署后（v0.2.60，含手动 claim/release 往返、壳进程重启再 claim、t+28s 复测）**0 次**。取证坑：macOS 26 已从 NSStatusItem 移除 `AXAlphaValue` 属性（AX 枚举只有 role/title/frame），§147 的像素级探针失效——日志 reclaim 计数成为接管状态的权威证据源；另 `open` 已运行实例不换进程，claim 是 per-process once 门闩，复验重启需先 kill 旧壳。
 - **M5 迁移战果**：读取 6 + 写 4+5 = 15 命令迁完；旧路由真实调用点只剩旧控制台 + tags/blocked/disconnect/dial（均有明确 disposition）。
+
+## 150. M5：tags add/remove 迁 v1 读改写（§9-2 第三批）
+
+接 §149。profile 域标签命令是"下一波就绪表"里唯一的读改写项。
+
+- **读改写迁移（RED→GREEN）**：旧 `/api/peers/tags/{add,remove}` 把集合运算折在 daemon 侧（`add_peer_tag`/`remove_peer_tag` 原子读改写）；v1 只有全量替换 `PATCH /devices/{id} {tags}`（DevicePatch.tags），语义不同 → CLI 侧读改写：`GET /api/v1/devices` 按 id/alias/name 匹配（与 `resolve_peer` 规则一致）拿 device_id + 当前 tags → 本地集合运算（增删幂等、case-blind，同 add_peer_tag）→ PATCH 全量列表，Device 回读。校验规则（1-32 字符 [a-zA-Z0-9_-]）两端一致——客户端先拒，daemon 兜底。
+- **RED 关键发现（语义边界如实入档）**：legacy `add_peer_tag` 对**格式合法但未知**的 device id 会静默自动创建 profile（测试首跑"add 成功"暴露）；v1 读改写在 GET devices 匹配不到时 404。两者对畸形 id 都 404。差异是 legacy 的隐式建档本就是意外行为（resolve_peer 第一步 DeviceId::parse 直通），收敛为显式 404 是改善而非回归。
+- **测试 ×2**：错误路径（畸形 id 404 语义保持 + 旧路由 diagnostics 归零）；happy path（trusted peer 经 `trusted.json` 种子——`seed_trusted_peer` 是 `cfg(test)` 库内后门，bin 测试够不着，改走标准持久化文件路径；add 幂等 re-add、case-blind remove、remove-absent 静默成功、alias 与 id 双向解析）。
+- **门禁**：fmt 绿；host + windows-gnu clippy `-- -D warnings` 双 0 错；workspace **1036 ×2 稳定**（+2）；deny 四项 ok。
+- **真 daemon 冒烟（:16470）**：正向四连（plain 幂等 / JSON / case-blind remove）+ 错误双路径（unknown 404 / 非法 tag 客户端拒）+ 重启后 `legacy_routes: []` 干净。**坑（如实）**：首轮冒烟全 404——`target/debug/tetherly` 是 01:32 的旧二进制（clippy 不产 bin、workspace test 用的独立 test harness），`cargo build -p tetherly-node --bin tetherly` 重编后全对；diagnostics 里的旧路由命中恰是旧二进制留下的 5 次调用，重启清零后确认。
+- **读改写窗口（附录留档）**：无 If-Match/ETag，并发标签改动最后一写覆盖——单用户 CLI 场景可接受。
+- **M5 战果更新**：16 命令迁完；peers 写域剩 blocked（契约缺 reason）、disconnect（无 v1 动作）、link/heartbeat（diagnostics 域）。

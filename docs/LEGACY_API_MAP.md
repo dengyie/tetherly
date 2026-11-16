@@ -73,11 +73,19 @@
 | `POST /api/peers/alias` | `PATCH /devices/{id}` `{alias}` | Device 回读 alias |
 | `POST /api/peers/unpair` | `DELETE /devices/{id}` | 204 忘记 / 404 未配对（语义 1:1） |
 
+## 已迁移第三批（§150，v1 读改写）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `POST /api/peers/tags/add` | `GET /devices` + `PATCH /devices/{id}` `{tags}` | 全量替换 → CLI 读改写；增删幂等/case-blind 同 `add_peer_tag`；1-32 字符校验客群两端一致 |
+| `POST /api/peers/tags/remove` | 同上 | 同上；已不在列表的 tag 静默成功（与 legacy 一致） |
+
+注：读改写窗口内外并发改动标签集会被最后一写覆盖（无 If-Match/ETag）——单用户 CLI 场景可接受，附录留档。
+
 ## 剩余待迁（peers 写域）
 
 | 旧路由 | v1 状态 |
 |---|---|
-| `POST /api/peers/tags/*` | `PATCH /devices/{id}` `{tags}` 全量替换——CLI 语义是加/删单条，需读改写，§150 |
 | `GET /api/peers/blocked` | Device DTO 无 block reason 字段——待契约扩展 |
 | `POST /api/peers/disconnect` | v1 无断开动作——待契约扩展 |
 | `GET /api/peers/ping`、`/heartbeat`、`/link`、`/link/probe` | 链路质量域 → diagnostics，待契约扩展 |
