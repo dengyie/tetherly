@@ -99,6 +99,7 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/pairing/pin" => Some(&["GET", "DELETE"]),
         "/api/v1/pairing/pin/rotate" | "/api/v1/input/release" => Some(&["POST"]),
         "/api/v1/diagnostics/log-level" => Some(&["PATCH"]),
+        "/api/v1/diagnostics/metrics" => Some(&["GET", "PATCH"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
         p => match device_action(p) {
             Some((_, "connect"))
@@ -241,6 +242,13 @@ pub(super) async fn route(
         },
         ("GET", "/api/v1/diagnostics/logs") => log_tail(query).await,
         ("PATCH", "/api/v1/diagnostics/log-level") => log_level(body),
+        ("GET", "/api/v1/diagnostics/metrics") => {
+            Ok(json(200, &crate::apiv1::model::traffic(node)))
+        }
+        ("PATCH", "/api/v1/diagnostics/metrics") => {
+            node.reset_traffic_metrics();
+            Ok(json(200, &crate::apiv1::model::traffic(node)))
+        }
         ("PATCH", "/api/v1/settings") => patch_settings(node, body),
         ("DELETE", "/api/v1/transfers") => {
             node.clear_terminal_transfers();

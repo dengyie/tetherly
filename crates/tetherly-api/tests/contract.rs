@@ -582,4 +582,60 @@ mod commands {
         assert_eq!(r.name, "a.txt");
         assert!(serde_json::from_value::<InboxOpenRequest>(json!({"id": 1})).is_err());
     }
+
+    #[test]
+    fn traffic_telemetry_round_trip_and_reset_semantics() {
+        // §153: traffic/protocol telemetry mirrors the legacy /api/metrics
+        // report field-for-field; a PATCH reset folds into the same GET
+        // readback (all-zero snapshot, same shape).
+        let rep = TrafficTelemetry {
+            uptime_secs: 60,
+            total_tx_bytes: 1024,
+            total_rx_bytes: 2048,
+            total_tx_frames: 10,
+            total_rx_frames: 20,
+            control: ChannelTraffic {
+                tx_bytes: 512,
+                rx_bytes: 1024,
+                tx_frames: 5,
+                rx_frames: 10,
+            },
+            file: ChannelTraffic::default(),
+            input: ChannelTraffic::default(),
+            screen: ChannelTraffic::default(),
+            messages: ProtocolMessages {
+                pings_sent: 4,
+                pongs_recv: 4,
+                ..ProtocolMessages::default()
+            },
+            sessions_established: 1,
+            sessions_closed: 0,
+            handshakes_failed: 0,
+        };
+        let v = serde_json::to_value(&rep).unwrap();
+        assert_eq!(v["control"]["tx_bytes"], 512);
+        assert_eq!(v["messages"]["pings_sent"], 4);
+        let back: TrafficTelemetry = serde_json::from_value(v).unwrap();
+        assert_eq!(back, rep);
+        // Reset readback: same shape, zeroed counters.
+        let reset = serde_json::from_value::<TrafficTelemetry>(json!({
+            "uptime_secs": 0,
+            "total_tx_bytes": 0,
+            "total_rx_bytes": 0,
+            "total_tx_frames": 0,
+            "total_rx_frames": 0,
+            "control": {"tx_bytes": 0, "rx_bytes": 0, "tx_frames": 0, "rx_frames": 0},
+            "file": {"tx_bytes": 0, "rx_bytes": 0, "tx_frames": 0, "rx_frames": 0},
+            "input": {"tx_bytes": 0, "rx_bytes": 0, "tx_frames": 0, "rx_frames": 0},
+            "screen": {"tx_bytes": 0, "rx_bytes": 0, "tx_frames": 0, "rx_frames": 0},
+            "messages": {"pings_sent": 0, "pings_recv": 0, "pongs_sent": 0, "pongs_recv": 0,
+                "notifies_sent": 0, "notifies_recv": 0, "clips_sent": 0, "clips_recv": 0,
+                "file_offers_sent": 0, "file_offers_recv": 0},
+            "sessions_established": 0,
+            "sessions_closed": 0,
+            "handshakes_failed": 0,
+        }))
+        .unwrap();
+        assert_eq!(reset, TrafficTelemetry::default());
+    }
 }

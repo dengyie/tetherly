@@ -966,6 +966,78 @@ pub struct DevicePingReport {
     pub addr: String,
 }
 
+/// §153: per-channel traffic counters — mirrored from the runtime
+/// `ChannelTrafficDto` (telemetry.rs) field-for-field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ChannelTraffic {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tx_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rx_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tx_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rx_frames: u64,
+}
+
+/// §153: protocol message counters — mirrored from the runtime
+/// `ProtocolMessagesDto` field-for-field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProtocolMessages {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pings_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pings_recv: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pongs_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pongs_recv: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub notifies_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub notifies_recv: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub clips_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub clips_recv: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub file_offers_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub file_offers_recv: u64,
+}
+
+/// §153: `GET /diagnostics/metrics` — unified traffic + protocol telemetry.
+/// Field names mirror the legacy `/api/metrics` `TrafficReport` so the CLI
+/// printer needs no reshaping; a `PATCH` reset folds into the same GET
+/// readback (reset counters all zero, §151 fold pattern).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TrafficTelemetry {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub uptime_secs: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_tx_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_rx_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_tx_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_rx_frames: u64,
+    pub control: ChannelTraffic,
+    pub file: ChannelTraffic,
+    pub input: ChannelTraffic,
+    pub screen: ChannelTraffic,
+    pub messages: ProtocolMessages,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sessions_established: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sessions_closed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub handshakes_failed: u64,
+}
+
 /// `POST /inbox/open`: reveal one inbox file with the OS opener.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -1108,6 +1180,9 @@ mod bindings {
             decl::<LogTail>(&cfg),
             decl::<LogLevel>(&cfg),
             decl::<LogLevelRequest>(&cfg),
+            decl::<ChannelTraffic>(&cfg),
+            decl::<ProtocolMessages>(&cfg),
+            decl::<TrafficTelemetry>(&cfg),
             decl::<TransferDirection>(&cfg),
             decl::<TransferPhase>(&cfg),
             decl::<Transfer>(&cfg),

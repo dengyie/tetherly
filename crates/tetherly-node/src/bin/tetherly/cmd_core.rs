@@ -1256,35 +1256,44 @@ pub(crate) async fn handle_traffic_cmd(
     json: bool,
     ui_port: u16,
 ) -> anyhow::Result<()> {
+    // §153: speaks v1 — GET /api/v1/diagnostics/metrics for the report,
+    // PATCH (idempotent reset) for `--reset`; both fold into the same
+    // readback, so the reset arm just prints the zeroed report.
     if reset {
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/metrics/reset", b"{}")
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                     start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        let payload = serde_json::json!({ "reset": true });
+        let bytes = serde_json::to_vec(&payload)?;
+        let (code, resp) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/diagnostics/metrics",
+            Some(&bytes),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
         if code != 200 {
             anyhow::bail!(
                 "traffic telemetry reset failed (HTTP {code}): {}",
                 String::from_utf8_lossy(&resp)
             );
         }
-        if json {
-            println!("{}", String::from_utf8_lossy(&resp));
-        } else {
+        if !json {
             println!("Traffic and protocol telemetry counters successfully reset to zero.");
         }
-        return Ok(());
+        // fall through to the shared readback printer below.
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/metrics")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/diagnostics/metrics")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
                 "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
+                     start one with `tetherly --data-dir <dir> run` first"
             )
         })?;
     if code != 200 {
@@ -2665,6 +2674,115 @@ mod peers_write_v1_tests {
                 .starts_with("/api/peers")),
             "peers write commands still hit legacy routes: {hits:?}"
         );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+}
+
+#[cfg(test)]
+mod metrics_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-metrics-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §153: `tetherly metrics` (+ `traffic` alias, `--reset`) reads and
+    /// resets via v1 `/diagnostics/metrics`, off the frozen legacy
+    /// `/api/metrics` aliases.
+    #[tokio::test]
+    async fn metrics_command_round_trips_v1() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        metrics(false, false, port).await.unwrap();
+        metrics(false, true, port).await.unwrap();
+        metrics(true, false, port).await.unwrap();
+        metrics(true, true, port).await.unwrap();
+
+        // v1 shape: the report mirrors the legacy fields the printer reads.
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics/metrics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert!(v["total_tx_bytes"].is_u64());
+        assert!(v["control"]["tx_bytes"].is_u64());
+        assert!(v["messages"]["pings_sent"].is_u64());
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/metrics")),
+            "metrics command still hits legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+
+    /// §153: method allowlist — POST /diagnostics/metrics is 405 (reset is a
+    /// PATCH), and the GET answers without the reset flag.
+    #[tokio::test]
+    async fn metrics_v1_method_matrix() {
+        let (node, dir) = temp_node("matrix");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        let (code, resp) = tetherly_node::loopback_post(port, "/api/v1/diagnostics/metrics", b"{}")
+            .await
+            .unwrap();
+        assert_eq!(code, 405, "POST must be 405: {resp:?}");
+
+        let (code, _) = tetherly_node::loopback_get(port, "/api/v1/diagnostics/metrics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
 
         tetherly_node::set_port_api_token(port, None);
     }

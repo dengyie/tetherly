@@ -102,6 +102,7 @@
 ## 已定案的特殊项
 
 - `POST /api/dial`：首配对拨号（addr+PIN），v1 无对应资源——等 `POST /pairing/dial` 契约扩展（§146 定案）。
-- `/api/log/*`、`/api/metrics`：v1 已有 `GET /diagnostics/logs`、`PATCH /diagnostics/log-level`，CLI `tetherly logs/metrics` 迁移候选。
+- `/api/log/*`：v1 已有 `GET /diagnostics/logs`、`PATCH /diagnostics/log-level`（§145 建成）；CLI 无 `logs` 子命令、面板/UX 层消费——旧路由删除候选，等消费面核查。
+- `/api/metrics`（+`/api/traffic` 别名、`/reset`）：§153 迁 v1——`GET /api/v1/diagnostics/metrics`（TrafficTelemetry 逐字段镜像）+ `PATCH /diagnostics/metrics`（reset 折入同一 GET 回读）；CLI `metrics`/`traffic` 已迁（第五批延伸）。
 - `tray.rs` 内的 `tray_keepalive`/SSE 使用 v1，不在下线范围。
 - 判定来源：调用方 UA 分类（cli/curl/browser/android），删除每组别名前先查 diagnostics 快照确认零命中。

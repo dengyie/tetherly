@@ -1395,3 +1395,10 @@
 - 冒烟 :36732（LAN :46732 避让生产 :45717，生产未动）：heartbeat 15→30→15、405/400/404 矩阵、legacy_routes 0。
 - workspace 第 2 遍 phase1 1 失败（§124 flake 家族，隔离重跑 2 遍全绿）；门禁全绿；bindings 无漂移（link DTO 不在快照面）。
 - 22 命令迁完，peers 写域清零。剩余：dial 契约扩展、logs/metrics CLI 迁移。
+
+## §153 (2026-11-17) — 流量遥测契约扩展 + metrics/traffic 迁 v1
+- 契约：ChannelTraffic/ProtocolMessages/TrafficTelemetry 逐字段镜像 telemetry.rs；ok:true 折掉；契约 22。
+- v1：GET + PATCH /diagnostics/metrics（reset=幂等 PATCH 折入 GET 回读）；CLI handle_traffic_cmd 两旧调用迁 v1，打印机零改动。
+- logs 判定更新：v1 端点 §145 已有，CLI 无 logs 子命令——旧 /api/log/* 改判"删除候选，等消费面核查"。
+- 坑（复现确认）：--all-targets clippy 已固化默认；phase1 套件模式偶发超时 ×2（enterprise_file_limits/action_predefined），隔离重跑全绿。
+- 冒烟 :36733：reset PATCH 回读、405 矩阵、legacy_routes 0。23 命令迁完。剩余：dial 契约扩展、logs 消费面核查。

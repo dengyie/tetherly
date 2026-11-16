@@ -9443,3 +9443,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **门禁**：fmt 绿（cmd_peers 一处缩进漂移修正）；双 clippy 0 错；workspace 全量 ×2——**第 2 遍 `phase1` 1 失败（§124 flake 家族，隔离重跑 2 遍全绿）**；deny 四项 ok；bindings 无漂移（link DTO 仅 v1 处理器面，快照面未变，api.ts 无 diff）。
 - **隔离冒烟（:36732，LAN :46732 避让生产 :45717；生产进程未动）**：link status 表格+JSON、heartbeat 读/写/回读（15→30→15）、ping 无 peer 走 daemon 自检、probe 无 peer "no connected peer"、未知 peer 404、方法矩阵（PATCH {} 400 / POST /api/v1/link 405）、`legacy_routes` 总命中 **0**。
 - **M5 战果更新**：22 命令迁完。peers 写域清零；剩余：dial（POST /pairing/dial 契约扩展）、logs/metrics CLI 迁移（diagnostics 端点已存在）。
+
+## 153. M5：流量遥测契约扩展 ×3 + GET/PATCH /diagnostics/metrics + CLI metrics/traffic 迁 v1
+
+接 §152。M5 剩余两项里的 metrics：先扩契约再迁 CLI；logs（v1 端点 §145 已建成）核实无 CLI 消费者，附录改判"旧路由删除候选"。
+
+- **契约扩展 ×3**（tetherly-api）：`ChannelTraffic`（tx/rx bytes/frames）、`ProtocolMessages`（10 计数器）、`TrafficTelemetry`（uptime+总吞吐+四通道+messages+会话生命周期）——全部逐字段镜像 telemetry.rs 的 `ChannelTrafficDto`/`ProtocolMessagesDto`/`TrafficReport`；legacy 的 `ok: true` 折掉（200 body 即 ok）。`Default` 派生支撑 reset 零值往返断言。契约测试 +1（22）。
+- **v1 端点**：`GET /api/v1/diagnostics/metrics`（Read）+ `PATCH /api/v1/diagnostics/metrics`（Write=reset：语义上幂等修改而非 POST 动作，reset 折入同一 GET 回读——§151 折入模式）。allowed() 补 `Some(&["GET","PATCH"])`；model.rs 新 `traffic()` mapper（闭包复用四通道映射）。
+- **CLI 迁移**（cmd_core.rs `handle_traffic_cmd`）：`POST /api/metrics/reset` → `PATCH /api/v1/diagnostics/metrics`（loopback_request + api_token_for），reset 后落入共享回读打印机（旧行为 reset --json 打 reset 报告、非 reset 打确认行——新版统一确认行+报告，--json 打报告）；`GET /api/metrics` → `GET /api/v1/diagnostics/metrics`，表格打印机零改动（字段名逐字段镜像的收益）。`metrics`/`traffic` 别名同函数。
+- **测试**：bin +2（`metrics_v1_tests`：四命令组合全走 + v1 形状断言 + legacy_routes /api/metrics 归零；方法矩阵 POST→405）；契约 22；lib 352；bin 14。
+- **门禁**：fmt 绿；**--all-targets clippy 0 错**（§152 教训已固化为默认参数）；windows-gnu clippy 0 错；deny 四项 ok；workspace 最终 40/40 全绿——**如实**：中途两次 phase1 套件模式单测超时（`enterprise_file_limits` / `action_predefined`，§124 负载竞争家族），按隔离协议重跑：单测 ×2 绿、套件整跑绿、最终全量零失败。
+- **隔离冒烟（:36733，LAN :46733）**：metrics 表格+JSON 形状、traffic 别名、--reset 确认行+报告、POST 405、PATCH {"reset":true} 直连回读、`legacy_routes` 总命中 **0**。
+- **M5 战果更新**：23 命令迁完（metrics+traffic 别名）。剩余：dial（`POST /pairing/dial` 契约扩展）、logs 消费面核查（无 CLI 命令，等删除窗口）。

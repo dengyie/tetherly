@@ -7,11 +7,12 @@ use crate::store::BlockedPeer;
 use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
-    Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, Device,
-    HandoffStatus, HeartbeatConfig, Inbox, InboxFile, Input, Layout, LayoutEdge, LayoutPolicy,
-    LinkPath, LinkQuality, LinkQualityPeer, MessageDirection, Pairing, PeerCounts, Ports, Settings,
-    SettingsGeneral, SettingsTransfer, Snapshot, System, Transfer, TransferDirection,
-    TransferPhase, TransferStats, Transfers, API_VERSION,
+    Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, ChannelTraffic,
+    Device, HandoffStatus, HeartbeatConfig, Inbox, InboxFile, Input, Layout, LayoutEdge,
+    LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, MessageDirection, Pairing, PeerCounts,
+    Ports, ProtocolMessages, Settings, SettingsGeneral, SettingsTransfer, Snapshot, System,
+    TrafficTelemetry, Transfer, TransferDirection, TransferPhase, TransferStats, Transfers,
+    API_VERSION,
 };
 use tetherly_core::{DisplayEdge, PathKind, TrustedPeer};
 
@@ -345,6 +346,44 @@ pub fn heartbeat(node: &Node) -> HeartbeatConfig {
     HeartbeatConfig {
         interval_secs: c.interval_secs,
         deadline_secs: c.deadline_secs,
+    }
+}
+
+/// §153: the traffic/protocol telemetry resource view — legacy `/api/metrics`
+/// field-for-field (the legacy `ok: true` flag folds away; a 200 body IS ok).
+pub fn traffic(node: &Node) -> TrafficTelemetry {
+    let r = node.traffic_report();
+    let ch = |c: &crate::telemetry::ChannelTrafficDto| ChannelTraffic {
+        tx_bytes: c.tx_bytes,
+        rx_bytes: c.rx_bytes,
+        tx_frames: c.tx_frames,
+        rx_frames: c.rx_frames,
+    };
+    TrafficTelemetry {
+        uptime_secs: r.uptime_secs,
+        total_tx_bytes: r.total_tx_bytes,
+        total_rx_bytes: r.total_rx_bytes,
+        total_tx_frames: r.total_tx_frames,
+        total_rx_frames: r.total_rx_frames,
+        control: ch(&r.control),
+        file: ch(&r.file),
+        input: ch(&r.input),
+        screen: ch(&r.screen),
+        messages: ProtocolMessages {
+            pings_sent: r.messages.pings_sent,
+            pings_recv: r.messages.pings_recv,
+            pongs_sent: r.messages.pongs_sent,
+            pongs_recv: r.messages.pongs_recv,
+            notifies_sent: r.messages.notifies_sent,
+            notifies_recv: r.messages.notifies_recv,
+            clips_sent: r.messages.clips_sent,
+            clips_recv: r.messages.clips_recv,
+            file_offers_sent: r.messages.file_offers_sent,
+            file_offers_recv: r.messages.file_offers_recv,
+        },
+        sessions_established: r.sessions_established,
+        sessions_closed: r.sessions_closed,
+        handshakes_failed: r.handshakes_failed,
     }
 }
 

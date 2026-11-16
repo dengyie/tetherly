@@ -88,6 +88,12 @@ export type LogLevel = { filter: string, baseline: string, revert_at_ms: number 
 
 export type LogLevelRequest = { filter?: string, reset?: boolean, revert_after_secs?: number, };
 
+export type ChannelTraffic = { tx_bytes: number, rx_bytes: number, tx_frames: number, rx_frames: number, };
+
+export type ProtocolMessages = { pings_sent: number, pings_recv: number, pongs_sent: number, pongs_recv: number, notifies_sent: number, notifies_recv: number, clips_sent: number, clips_recv: number, file_offers_sent: number, file_offers_recv: number, };
+
+export type TrafficTelemetry = { uptime_secs: number, total_tx_bytes: number, total_rx_bytes: number, total_tx_frames: number, total_rx_frames: number, control: ChannelTraffic, file: ChannelTraffic, input: ChannelTraffic, screen: ChannelTraffic, messages: ProtocolMessages, sessions_established: number, sessions_closed: number, handshakes_failed: number, };
+
 export type TransferDirection = "inbound" | "outbound";
 
 export type TransferPhase = "transferring" | "verifying" | "completed" | "failed";
