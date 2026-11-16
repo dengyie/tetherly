@@ -403,7 +403,9 @@ pub(crate) async fn ping(peer: Option<String>, count: u32, json: bool, ui_port: 
     let mut last_rep = None;
     for i in 1..=count {
         let t0 = std::time::Instant::now();
-        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/health")
+        // §148: v1 /system carries version+pid+uptime — everything the pong
+        // line needs; the latency anchor is the request itself.
+        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/system")
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -418,14 +420,13 @@ pub(crate) async fn ping(peer: Option<String>, count: u32, json: bool, ui_port: 
                 String::from_utf8_lossy(&resp)
             );
         }
-        let rep: tetherly_node::HealthReport = serde_json::from_slice(&resp)?;
+        let rep: tetherly_api::System = serde_json::from_slice(&resp)?;
         let rtt_ms = rtt.as_secs_f64() * 1000.0;
         rtts.push(rtt_ms);
         last_rep = Some(rep.clone());
         if !json {
             println!(
-                "[{i}/{count}] pong: node {}, rtt: {rtt_ms:.2}ms, uptime: {} (pid: {}, v{})",
-                rep.status,
+                "[{i}/{count}] pong: rtt: {rtt_ms:.2}ms, uptime: {} (pid: {}, v{})",
                 format_uptime(rep.uptime_secs),
                 rep.pid,
                 rep.version

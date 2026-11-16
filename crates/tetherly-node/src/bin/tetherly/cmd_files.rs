@@ -166,8 +166,10 @@ pub(crate) async fn send(
             println!("watching transfer progress for [{transfer_id}]...");
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                // §148: v1 transfers resource — same `transfers` array and
+                // field names the watch loop reads.
                 let (status_code, state_resp) =
-                    tetherly_node::loopback_get(ui_port, "/api/state").await?;
+                    tetherly_node::loopback_get(ui_port, "/api/v1/transfers").await?;
                 if status_code != 200 {
                     continue;
                 }

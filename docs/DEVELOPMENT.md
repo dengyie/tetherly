@@ -9386,3 +9386,13 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **bug 3（daemon 回收窗口与 ping 自相矛盾，确定性）**：`TRAY_TAKEOVER_RECLAIM_MS=10s` 但 SSE `PING=15s` 且 **ping 臂不喂 keepalive**（§6.3 注释"per frame + ping"与实现不符）——静默链路零喂食，**任何 claim 必在 10 秒被回收**（生产日志 5 次 "tray reclaim" 实证）。修复：PING 5s（<10s 窗口）+ ping 臂补 `tray_keepalive()`。测试 `v1_claimed_tray_survives_idle_sse_pings`（真时钟 + watchdog 轮询复刻 + 静默 12s 断言）——RED 首跑曾假绿（watchdog 在 bin 不在 Node），补轮询复刻后真 RED。
 - **验证**：端到端（本地 debug daemon + 修复壳）tray_owner 在 t+5s/17s/32s 三测全 client（跨三个回收窗口）；门禁：fmt、host + windows-gnu clippy `-D warnings` 双 0 错、workspace **1032 ×2** 稳定（+2）、壳 28 测试全绿、deny 四项 ok。
 - **待发版**：壳+daemon 的三个修复进 v0.2.60；v0.2.59 生产上壳 claim 后仍会被 10 秒回收（bug 3 未进发布版），壳的实际视觉接管等 v0.2.60 部署。
+
+## 148. v0.2.60 发版准备 + §9-2 别名映射表附录 + 迁移命令漏网调用点清零（未发版，main 续）
+
+接 §147。发版轮：版本 bump、映射表附录、以及盘点发现的已迁路由漏网调用点补迁。
+
+- **版本 bump（`59df2c0`）**：三处版本位 0.2.59→0.2.60（workspace Cargo.toml / tauri.conf.json / package.json，Cargo.lock 随动）+ docs 基线块更新（M4 已上线生产、M5 进行中摘要）。tag 待 main CI 全绿后打。
+- **§9-2 别名映射表附录（`docs/LEGACY_API_MAP.md`，M5 收敛输入）**：静态盘点 239 路由 / ~355 调用点，按前缀分组（screen 94 / file 21 / peers 18 / topology 7 / input 7 …）；已迁 6 路由对照表；**下一波就绪表**（connect/block/unblock/alias/tags/unpair→ v1 设备动作端点已在位；blocked→devices 过滤；link/heartbeat/ping→待 diagnostics 域扩展）；特殊项定案（dial 等契约、log/metrics→diagnostics/logs 已备）。Android 无 HTTP 层不受约束；旧控制台随 M5 收敛整体删除。
+- **漏网调用点清零（RED→GREEN）**：盘点发现已迁路由仍有 2 处真实调用——`tetherly ping`（cmd_peers）RTT 锚定 `GET /api/health` → 改 `GET /api/v1/system`（version/pid/uptime 全备，pong 行去 legacy `status` 常量字段）；cmd_files send-watch 轮询 `GET /api/state` → `GET /api/v1/transfers`（同字段名零改动）。`ping_command_round_trips_v1_system`（真 daemon + legacy_routes 断言）RED 抓到后归零。
+- **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1033 全绿（+1）；deny 四项 ok。已迁路由真实调用点归零（`/api/peers` 剩 23 处全是写操作，属下一波）。
+- **发版检查单**：release workflow `--ci` flag 在位（§140）；tag 指向含本节的最新 commit；release 后 deploy v0.2.60 并复验生产壳接管（§147 三修复首次上线）。
