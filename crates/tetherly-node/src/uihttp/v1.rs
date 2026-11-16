@@ -13,7 +13,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use tetherly_api::{
     BlockRequest, ConnectRequest, DevicePatch, Diagnostics, ErrorBody, ErrorCode, Event, Health,
-    LogLevel, LogLevelRequest, LogTail, PinGrant, SettingsPatch, Topic, API_VERSION,
+    LogLevel, LogLevelRequest, LogTail, PinGrant, SettingsPatch, SysHost, SysProcess, SysTelemetry,
+    Topic, API_VERSION,
 };
 use tetherly_core::CoreError;
 use tokio::io::AsyncWriteExt;
@@ -88,6 +89,7 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/layout"
         | "/api/v1/activity"
         | "/api/v1/diagnostics"
+        | "/api/v1/diagnostics/sys"
         | "/api/v1/diagnostics/logs" => Some(&["GET"]),
         "/api/v1/transfers" => Some(&["GET", "DELETE"]),
         "/api/v1/inbox" => Some(&["GET", "DELETE"]),
@@ -199,6 +201,36 @@ pub(super) async fn route(
                 legacy_routes: hub.legacy.snapshot(),
             },
         )),
+        ("GET", "/api/v1/diagnostics/sys") => match node.system_report() {
+            Ok(rep) => Ok(json(
+                200,
+                &SysTelemetry {
+                    ok: rep.ok,
+                    node_name: rep.node_name,
+                    device_id: rep.device_id,
+                    process: SysProcess {
+                        pid: rep.process.pid,
+                        uptime_secs: rep.process.uptime_secs,
+                        rss_bytes: rep.process.rss_bytes,
+                        virt_bytes: rep.process.virt_bytes,
+                        thread_count: rep.process.thread_count,
+                        open_fds: rep.process.open_fds,
+                        cpu_time_ms: rep.process.cpu_time_ms,
+                        memory_rss_formatted: rep.process.memory_rss_formatted,
+                        memory_virt_formatted: rep.process.memory_virt_formatted,
+                    },
+                    host: SysHost {
+                        os: rep.host.os,
+                        arch: rep.host.arch,
+                        num_cpus: rep.host.num_cpus,
+                        total_memory_bytes: rep.host.total_memory_bytes,
+                        total_memory_formatted: rep.host.total_memory_formatted,
+                    },
+                    timestamp_ms: rep.timestamp_ms,
+                },
+            )),
+            Err(e) => Err(core_error(e)),
+        },
         ("GET", "/api/v1/diagnostics/logs") => log_tail(query).await,
         ("PATCH", "/api/v1/diagnostics/log-level") => log_level(body),
         ("PATCH", "/api/v1/settings") => patch_settings(node, body),

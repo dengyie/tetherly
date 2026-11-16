@@ -736,9 +736,16 @@ pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<(
 }
 
 /// `tetherly status` -- Status arm of the top-level dispatch.
+///
+/// §146: composes the legacy one-shot state view from four v1 resources —
+/// `/system` (identity + `lan_only`), `/pairing` (PIN), `/devices` (live
+/// peers), `/transfers` (list + §145 session stats). The composed JSON keeps
+/// the legacy field names so both the human printer and `--json` consumers
+/// are unchanged.
 pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16) -> Result<()> {
-    loop {
-        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/state")
+    /// One GET with the standard reachability error text.
+    async fn v1_get(ui_port: u16, path: &str) -> Result<serde_json::Value> {
+        let (code, resp) = tetherly_node::loopback_get(ui_port, path)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -748,15 +755,57 @@ pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16)
             })?;
         if code != 200 {
             anyhow::bail!(
-                "node refused status query (HTTP {code}): {}",
+                "node refused {path} (HTTP {code}): {}",
                 String::from_utf8_lossy(&resp)
             );
         }
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))
+    }
+
+    loop {
+        let system = v1_get(ui_port, "/api/v1/system").await?;
+        let pairing = v1_get(ui_port, "/api/v1/pairing").await?;
+        let devices = v1_get(ui_port, "/api/v1/devices").await?;
+        let transfers = v1_get(ui_port, "/api/v1/transfers").await?;
+
+        let peers: Vec<serde_json::Value> = devices
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter(|d| d["online"].as_bool() == Some(true))
+                    .map(|d| {
+                        serde_json::json!({
+                            "device_id": d["id"],
+                            "name": d["name"],
+                            "alias": d["alias"],
+                            "platform": d["platform"],
+                            "device_type": d["device_type"],
+                            "tags": d["tags"],
+                            "group": d["group"],
+                            "path": d["path"],
+                            "addr": d["addr"],
+                            "rtt_ms": d["rtt_ms"],
+                            "features": d["features"],
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let v = serde_json::json!({
+            "device_id": system["device_id"],
+            "name": system["name"],
+            "platform": system["platform"],
+            "pin_active": pairing["pin_active"],
+            "lan_only": system["lan_only"],
+            "peers": peers,
+            "transfers": transfers["transfers"],
+            "transfer_stats": transfers["stats"],
+        });
+
         if json {
-            println!("{}", String::from_utf8_lossy(&resp));
+            println!("{v}");
         } else {
-            let v: serde_json::Value = serde_json::from_slice(&resp)
-                .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
             if watch {
                 print!("\x1b[2J\x1b[H");
             }
@@ -773,7 +822,10 @@ pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16)
 /// `tetherly sys` -- Sys arm of the top-level dispatch.
 pub(crate) async fn sys(watch: bool, interval: u64, json: bool, ui_port: u16) -> Result<()> {
     loop {
-        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/sys")
+        // §146: v1 diagnostics/sys keeps the legacy field names (`node_name`,
+        // `device_id`, `process`, `host`, `timestamp_ms`) so both the human
+        // printer and `--json` consumers are unchanged.
+        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/diagnostics/sys")
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -2260,6 +2312,109 @@ mod peers_list_v1_tests {
                 .unwrap_or_default()
                 .starts_with("/api/peers")),
             "peers command still hits legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+}
+
+#[cfg(test)]
+mod status_sys_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-status-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §146: the CLI status view composes four v1 resources, off the frozen
+    /// legacy `/api/state` alias.
+    #[tokio::test]
+    async fn status_command_round_trips_v1() {
+        let (node, dir) = temp_node("status");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        status(false, 1, false, port).await.unwrap();
+        status(false, 1, true, port).await.unwrap();
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/state")),
+            "status command still hits legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+
+    /// §146: the CLI sys view reads v1 diagnostics/sys, off the frozen
+    /// legacy `/api/sys` alias.
+    #[tokio::test]
+    async fn sys_command_round_trips_v1() {
+        let (node, dir) = temp_node("sys");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        sys(false, 1, false, port).await.unwrap();
+        sys(false, 1, true, port).await.unwrap();
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/sys")),
+            "sys command still hits legacy routes: {hits:?}"
         );
 
         tetherly_node::set_port_api_token(port, None);

@@ -162,6 +162,9 @@ pub struct System {
     pub caps: Vec<String>,
     /// Locally enabled feature flags.
     pub features: Vec<String>,
+    /// §145: no overlay sidecar is up — LAN-only operation. Drives the CLI
+    /// status line and the SPA badge.
+    pub lan_only: bool,
 }
 
 /// How a live device is reached.
@@ -587,6 +590,74 @@ pub struct Transfers {
     #[cfg_attr(test, ts(type = "number"))]
     pub terminal_count: u64,
     pub transfers: Vec<Transfer>,
+    /// §145: session aggregate that rode on the legacy /api/state — moved
+    /// onto the transfers resource it belongs to.
+    pub stats: TransferStats,
+}
+
+/// §145: session aggregate transfer metrics across inbound and outbound
+/// files (legacy `/api/state` `transfer_stats` shape, field-for-field).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TransferStats {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub completed_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub failed_count: u64,
+}
+
+/// §145: `GET /diagnostics/sys` — process and host telemetry (§4.2 puts
+/// 内存/流量 under diagnostics). Field names mirror the legacy `/api/sys`
+/// report so the CLI's human printer needs no reshaping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SysTelemetry {
+    pub ok: bool,
+    pub node_name: String,
+    pub device_id: String,
+    pub process: SysProcess,
+    pub host: SysHost,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// §145: one process sample (legacy `/api/sys` `process` object).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SysProcess {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pid: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub uptime_secs: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rss_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub virt_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub thread_count: u32,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub open_fds: Option<u32>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cpu_time_ms: u64,
+    pub memory_rss_formatted: String,
+    pub memory_virt_formatted: String,
+}
+
+/// §145: host hardware/OS profile (legacy `/api/sys` `host` object).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SysHost {
+    pub os: String,
+    pub arch: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub num_cpus: usize,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub total_memory_bytes: Option<u64>,
+    pub total_memory_formatted: Option<String>,
 }
 
 /// One file waiting in the incoming inbox.

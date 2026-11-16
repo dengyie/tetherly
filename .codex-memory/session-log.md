@@ -1346,3 +1346,10 @@
 - tetherly peers 迁 GET /api/v1/devices：扁平列表按 online/trusted 重建两段视图；--json 直接透传 v1 形状；self_id 头去掉。
 - 门禁 1023×2 稳定（首跑 m3_9 §124 flake）+ deny ok + 真 daemon :16461 冒烟（发现设备含 group:null）。
 - status/sys 还缺 v1 资源（lan_only/transfer_stats/系统遥测），等契约扩展轮。
+
+## 2026-11-16 §145 契约扩展 + status/sys 迁 v1 —— CLI 读取命令全迁完
+- 契约：System.lan_only、Transfers.stats（新 TransferStats DTO）、GET /diagnostics/sys（SysTelemetry 字段名逐字镜像旧 /api/sys，打印器零改动）。contract +3，TS bless 重生成。
+- status：四 v1 资源组合（system+pairing+devices+transfers）合成旧形状，--json/print 零改动；sys：单行替换到 v1。
+- RED 双确认（/api/state、/api/sys 命中）；冒烟 :16462 全过 + legacy_routes []。
+- §124 补充：spawn_ui 的 set_api_token 全局覆盖是 401 竞态根源；run2/run3 与冒烟 daemon 抢 CPU 放大，清场后 ×2 稳定 1028。spawn_ui per-port-only 改造列为候选小轮。
+- 五个读取命令（pin/health/peers/status/sys）全迁 v1；旧路由剩旧控制台+24 个写型模块分批。

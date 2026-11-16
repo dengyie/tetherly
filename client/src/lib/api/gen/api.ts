@@ -24,7 +24,12 @@ caps: Array<string>,
 /**
  * Locally enabled feature flags.
  */
-features: Array<string>, };
+features: Array<string>, 
+/**
+ * §145: no overlay sidecar is up — LAN-only operation. Drives the CLI
+ * status line and the SPA badge.
+ */
+lan_only: boolean, };
 
 export type LinkPath = "lan" | "overlay";
 
@@ -87,7 +92,12 @@ export type Transfer = { transfer_id: string,
  */
 peer: string, direction: TransferDirection, filename: string, total: number, transferred: number, speed_bps: number, phase: TransferPhase, error: string | null, started_ms: number, updated_ms: number, };
 
-export type Transfers = { active_count: number, terminal_count: number, transfers: Array<Transfer>, };
+export type Transfers = { active_count: number, terminal_count: number, transfers: Array<Transfer>, 
+/**
+ * §145: session aggregate that rode on the legacy /api/state — moved
+ * onto the transfers resource it belongs to.
+ */
+stats: TransferStats, };
 
 export type InboxFile = { name: string, size: number, modified_at_secs: number, is_safe: boolean, };
 

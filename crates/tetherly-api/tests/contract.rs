@@ -91,6 +91,102 @@ mod events {
         assert_eq!(back, d);
     }
 
+    fn system() -> System {
+        System {
+            device_id: "tdev_a".into(),
+            name: "mac".into(),
+            platform: "macos".into(),
+            version: "0.2.59".into(),
+            api: API_VERSION,
+            pid: 7,
+            uptime_secs: 60,
+            ports: Ports {
+                control: 45717,
+                file: 45718,
+                input: 45719,
+                screen: 45720,
+                ui: 45716,
+            },
+            peers: PeerCounts {
+                live: 1,
+                trusted: 1,
+            },
+            caps: vec![],
+            features: vec![],
+            lan_only: false,
+        }
+    }
+
+    #[test]
+    fn system_carries_lan_only() {
+        // §145: the CLI status view and the SPA badge need the overlay
+        // absence flag; it must survive a serialize round trip.
+        let mut s = system();
+        s.lan_only = true;
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["lan_only"], true);
+        let back: System = serde_json::from_value(v).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn transfers_carries_session_stats() {
+        // §145: the CLI status view needs the session aggregate (bytes in
+        // and out, completed/failed) that rode on the legacy /api/state.
+        let t = Transfers {
+            active_count: 1,
+            terminal_count: 2,
+            transfers: vec![],
+            stats: TransferStats {
+                bytes_sent: 10,
+                bytes_received: 20,
+                completed_count: 1,
+                failed_count: 1,
+            },
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["stats"]["bytes_sent"], 10);
+        assert_eq!(v["stats"]["failed_count"], 1);
+        let back: Transfers = serde_json::from_value(v).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn sys_telemetry_mirrors_the_legacy_report() {
+        // §145: `GET /diagnostics/sys` keeps the legacy field names so the
+        // CLI's human printer needs no reshaping.
+        let s = SysTelemetry {
+            ok: true,
+            node_name: "mac".into(),
+            device_id: "tdev_a".into(),
+            process: SysProcess {
+                pid: 7,
+                uptime_secs: 60,
+                rss_bytes: 1024,
+                virt_bytes: 2048,
+                thread_count: 4,
+                open_fds: Some(9),
+                cpu_time_ms: 500,
+                memory_rss_formatted: "1 KB".into(),
+                memory_virt_formatted: "2 KB".into(),
+            },
+            host: SysHost {
+                os: "macos".into(),
+                arch: "arm64".into(),
+                num_cpus: 8,
+                total_memory_bytes: Some(4096),
+                total_memory_formatted: Some("4 KB".into()),
+            },
+            timestamp_ms: 1234,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["process"]["rss_bytes"], 1024);
+        assert_eq!(v["host"]["num_cpus"], 8);
+        assert_eq!(v["node_name"], "mac");
+        let back: SysTelemetry = serde_json::from_value(v).unwrap();
+        assert_eq!(back, s);
+    }
+
     #[test]
     fn envelope_carries_type_tag_and_uniform_data() {
         // Wire shape: `{"seq":…,"type":"…","data":<bare payload>}`. A uniform
@@ -155,6 +251,7 @@ mod events {
                     transfers: Transfers {
                         active_count: 1,
                         terminal_count: 0,
+                        stats: TransferStats::default(),
                         transfers: vec![Transfer {
                             transfer_id: "t1".into(),
                             peer: "p1".into(),

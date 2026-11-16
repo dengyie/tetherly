@@ -10,7 +10,8 @@ use tetherly_api::{
     Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, Device,
     HandoffStatus, Inbox, InboxFile, Input, Layout, LayoutEdge, LayoutPolicy, LinkPath,
     MessageDirection, Pairing, PeerCounts, Ports, Settings, SettingsGeneral, SettingsTransfer,
-    Snapshot, System, Transfer, TransferDirection, TransferPhase, Transfers, API_VERSION,
+    Snapshot, System, Transfer, TransferDirection, TransferPhase, TransferStats, Transfers,
+    API_VERSION,
 };
 use tetherly_core::{DisplayEdge, PathKind, TrustedPeer};
 
@@ -174,6 +175,7 @@ pub fn system(node: &Node) -> System {
         },
         caps: caps.caps,
         features: caps.features,
+        lan_only: !node.overlay_status().present,
     }
 }
 
@@ -189,9 +191,16 @@ pub async fn snapshot(node: &Node) -> Snapshot {
 /// The transfers resource: daemon report mapped 1:1 onto the contract.
 pub fn transfers(node: &Node) -> Transfers {
     let r = node.transfers_report();
+    let s = r.stats;
     Transfers {
         active_count: r.active_count as u64,
         terminal_count: r.terminal_count as u64,
+        stats: TransferStats {
+            bytes_sent: s.bytes_sent,
+            bytes_received: s.bytes_received,
+            completed_count: s.completed_count,
+            failed_count: s.failed_count,
+        },
         transfers: r
             .transfers
             .iter()

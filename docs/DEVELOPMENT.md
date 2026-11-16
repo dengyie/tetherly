@@ -9347,3 +9347,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **真 daemon 冒烟（:16461/:36719）**：空 roster 三形态（plain/trusted/json——json 里两条 mDNS 发现设备含 `group:null`）、`legacy_routes: []`。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1023 全绿 ×2 稳定（首跑 `m3_9_reverse_control_takeover` 一例 §124 竞态 flake：`seat` 断言 None≠Some(Bottom)，单跑+复跑即绿，符合 §124 家族特征）；deny 四项 ok。
 - **第二波遗留（待契约扩展）**：`status`（`lan_only`+`transfer_stats`）、`sys`（系统遥测资源）——`peers` 后第三波完成；下一波候选是 `config`/`dial` 等单路由命令或直接进入 `/api/*` 别名下线盘点。
+
+## 145. M5 CLI 迁移收尾波：v1 契约扩展（`lan_only`/`transfer_stats`/`diagnostics/sys`）+ `tetherly status`/`sys` 迁 v1（未发版，main 续）
+
+接 §144。status/sys 的迁移缺口（§143/§144 记录在案）本轮一次补齐——先扩契约再迁 CLI，四个读取型命令（pin/health/peers/status/sys）全部脱离旧 `/api/*`。
+
+- **契约扩展（§4.2 诊断域规划落地）**：①`System` + `lan_only: bool`（SPA 徽章 + CLI status 行；model 侧 `!node.overlay_status().present`）；②`Transfers` + `stats: TransferStats`（新 DTO 四字段聚合，从 legacy `/api/state` 的 `transfer_stats` 迁到它归属的 transfers 资源，`Copy`+`Default`）；③新端点 `GET /api/v1/diagnostics/sys` → `SysTelemetry{ok, node_name, device_id, process: SysProcess, host: SysHost, timestamp_ms}`——**字段名逐字镜像旧 `/api/sys` 报告**，CLI 人类打印器与 `--json` 消费方零改动（§4.2 把"内存/流量"归诊断域）。tier：GET 通用规则自动 Read，无表变更；`allowed()` 补 404/405 区分。contract.rs +3 测试（lan_only 往返、stats 往返、SysTelemetry 往返）；TS 绑定 bless 重生成。
+- **`tetherly status` 迁 v1（RED→GREEN）**：旧 `GET /api/state` one-shot → **四个 v1 资源组合**（`/system` + `/pairing` + `/devices` + `/transfers`），`json!` 合成旧字段名（device_id/name/platform/pin_active/lan_only/peers/transfers/transfer_stats），`print_status_summary` 与 `--json` 消费方零改动。peers 取 `online==true` 子集映射回旧 PeerView 字段（`id`→`device_id`，LinkPath 序列化值 "lan"/"overlay" 与旧一致）；transfers 直接透传 v1 数组（direction/phase 枚举 snake_case 与 runtime 一致）。watch 模式、interval 逻辑不动。
+- **`tetherly sys` 迁 v1（RED→GREEN）**：`GET /api/sys` → `GET /api/v1/diagnostics/sys`，单行替换——DTO 字段名镜像使 `print_system_report` 原样工作。
+- **测试**：bin +2 模块（`status_command_round_trips_v1` 四资源组合 + legacy_routes 断言；`sys_command_round_trips_v1` + 断言，RED 均真实抓到 `/api/state`、`/api/sys` 命中）。
+- **真 daemon 冒烟（:16462/:36720）**：status plain 全段（LAN Only: true / Transfer Metrics 行）+ `--json` 关键字段形状完整；sys plain 遥测全字段（RSS 71.56 MiB / 10 cores / 22 threads）+ `--json` 旧形状；`legacy_routes: []`。
+- **§124 家族补充观察（如实）**：门禁 5 跑中 run1 绿 1028、run2/run3 各 1 例 phase1 flake（`file_offer_lifecycle` 401 竞态：`spawn_ui` 的 `set_api_token` 进程级全局被并行测试的另一个 daemon 覆盖——机制根源在案，预存在）；run2/run3 与冒烟 daemon 并发抢 CPU 放大了竞态。清场后隔离复跑绿、**连续 ×2 全绿 1028**。`spawn_ui` 改 per-port-only 是后续小轮候选（动生产路径，需独立评审）。
+- **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1028 ×2 稳定（+3 契约 +2 CLI）；deny 四项 ok。
+- **M5 CLI 迁移战果**：五个读取命令全迁完；旧路由剩余调用方=旧控制台（`/legacy/`，随 M5 收敛删除）+ 24 个写型/专用命令模块（按 diagnostics 快照分批）。下一波候选：`config`（`/api/config` → GET/PATCH `/settings` 合成）、`dial`（暂无 v1 连接动作资源，需 `POST /devices/{id}/connect` 接线盘点）。
