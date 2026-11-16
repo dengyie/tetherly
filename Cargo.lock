@@ -5173,6 +5173,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1360,3 +1360,11 @@
 - dial 不迁移：connect_peer 只服务已知设备，首配对拨号（addr+PIN）无 v1 资源，等 POST /pairing/dial 契约扩展。
 - m3_9 workspace 并行负载下连败两次但单独跑绿（零 spawn_ui/loopback 路径）——负载型竞态实证，非本轮因果。清场后 1030 ×2 稳定。
 - 六命令迁完（pin/health/peers/status/sys/config）。
+
+## 2026-11-17 v0.2.59 生产部署 + alphaValue 冒烟 + 壳接管链三 bug 修复
+- 用户委托执行 deploy.sh：双端 0.2.59 上线（mac 67992 / win 4308），保护进程完好，M4 验收窗口起算。
+- 客户端 .dmg 与 daemon bundle 同名不同 id——ditto 装 /Applications/Tetherly Client.app 规避覆盖。
+- alphaValue 三连拍像素级确认：claim 后 2s 图标消失，13s watchdog 回收后恢复。AX 定位 item（"⇄ Tetherly" 随菜单栏漂移）。
+- 三 bug：①events.rs 成功路径从不 emit Live（SinkEvent 枚举修复）②setup 先 spawn 后注册监听器（首个 Live 落空，顺序倒转）③PING 15s 不喂 keepalive 且 > 10s 回收窗口（5s + ping 臂补喂）。③在生产日志 5 次 reclaim 实证，确定性 bug。
+- 端到端 t+5/17/32s 三测全 client。门禁 1032×2 + 壳 28 + 双 clippy + deny。三修复待发 v0.2.60。
+- 教训：托盘冒烟要先清场（本地 e2e daemon 的托盘与生产托盘同貌，位置漂移干扰判定）；watchdog 在 bin 不在 Node，测试需轮询复刻才不假绿。

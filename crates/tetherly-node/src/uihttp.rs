@@ -7898,4 +7898,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir_host);
         let _ = std::fs::remove_dir_all(&dir_recv);
     }
+
+    mod tray_keepalive_tests {
+        use super::*;
+
+        /// §147: a claimed tray must survive an idle-but-connected shell. The
+        /// SSE ping is the only feed on a silent link, so the ping interval
+        /// must be shorter than TRAY_TAKEOVER_RECLAIM_MS — production saw every
+        /// claim reclaimed after ~10s because the 15s ping could never feed a
+        /// 10s window.
+        #[tokio::test]
+        async fn v1_claimed_tray_survives_idle_sse_pings() {
+            // Real clock: the watchdog compares wall-clock timestamps.
+            let dir = std::env::temp_dir().join(format!(
+                "tetherly-tray-ping-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let node = Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap();
+            let (port, _token) = bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+            let auth = format!(
+                "Authorization: Bearer {}",
+                crate::apitoken::read(&dir).expect("api.token minted")
+            );
+
+            let (code, _) = raw_request(
+                port,
+                "PATCH",
+                "/api/v1/settings",
+                Some(&auth),
+                br#"{"tray_owner":"client"}"#,
+            )
+            .await;
+            assert_eq!(code, 200);
+
+            // The reclaim watchdog lives in the daemon binary's run arm; the
+            // test replicates its 1s poll over the same public API so the
+            // keepalive window is actually enforced here.
+            let watchdog = node.clone_handle();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if watchdog.tray_keepalive_expired()
+                        && matches!(
+                            watchdog.set_tray_owner(tetherly_api::TrayOwner::Daemon),
+                            Ok((_, true))
+                        )
+                    {
+                        break;
+                    }
+                }
+            });
+
+            // Open the shell's SSE connection and hold it open, idle.
+            use tokio::io::AsyncWriteExt;
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let head = format!(
+                "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}\r\nAccept: text/event-stream\r\n\r\n"
+            );
+            s.write_all(head.as_bytes()).await.unwrap();
+
+            // One reclaim window plus margin — with the old 15s ping this
+            // expires at ~10s; with the fixed 5s ping three pings feed it.
+            tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+            assert_eq!(
+                node.tray_owner(),
+                tetherly_api::TrayOwner::Client,
+                "watchdog reclaimed a claimed tray despite a live SSE subscriber"
+            );
+        }
+    }
 }

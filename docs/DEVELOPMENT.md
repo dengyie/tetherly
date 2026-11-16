@@ -9373,3 +9373,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **§124 家族进一步实证（如实）**：门禁 6 跑——run1 绿 1030；run2/run3 各 1 例 `m3_9_reverse_control_takeover`（phase3:730 seat 断言）**workspace 并行负载下连败**，但该测试零 spawn_ui/零 loopback（纯 `pair()` + `drive_input` 进程内 API），单独跑连绿，phase3 套件单独跑绿——负载型时序竞态，与本轮改动无因果。run5/run6 清场连绿 **1030 ×2**。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1030 ×2 稳定（+2）；deny 四项 ok。
 - **M5 CLI 迁移战果更新**：六个命令迁完（pin/health/peers/status/sys/config）；旧路由剩余=旧控制台+dial（首配对，等契约）+其余写型/专用模块（按 diagnostics 分批）。
+
+## 147. v0.2.59 生产部署完成 + alphaValue 托盘隐藏冒烟 + 壳接管链三个 bug 修复（未发版，main 续）
+
+接 §146。用户委托执行生产部署与托盘冒烟；冒烟暴露壳→daemon 接管链上的三个真实 bug，本轮全修。
+
+- **生产部署 v0.2.59 双端完成（用户委托，deploy.sh 全自动管道）**：mac 重打包+重启（pid 67992，健康门禁过）；windows NTFS 热重启（old_pid 21572 → new_pid 4308，版本门禁 0.2.59 ✓，保护进程 SRBMiner/verge-mihomo/komari-agent 3/3 完好，SYSTEM 权限 ✓）。双端 live_peers 1。**M4 验收窗口自 2026-11-17 起算**。
+- **客户端安装（bundle 冲突规避）**：release .dmg（ad-hoc linker 签名，bundle id `app.tetherly.shell`）与 daemon `/Applications/Tetherly.app`（`dev.tetherly.tetherly`）**同名不同 id**——直接装会覆盖 daemon bundle，改 `ditto` 装 `/Applications/Tetherly Client.app` + 去 quarantine。壳 stderr 日志补 `tracing_subscriber`（env-filter，默认关）。
+- **alphaValue 托盘隐藏冒烟（三连拍，像素级确认）**：AX 定位 daemon 托盘 item（"⇄ Tetherly"，随菜单栏漂移，最终 x=901pt）；PATCH claim → **2 秒内图标从菜单栏完全消失**（alphaValue=0，menu/dropzone 保持活性）→ 13 秒 watchdog 回收后**图标恢复**。拍照存 `/tmp/t0-daemon.png`、`/tmp/t1-hidden.png`、`/tmp/t2-restored.png`。冒烟中发现的坑：e2e 本地 daemon 与生产 daemon 各有托盘（item 位置漂移干扰判定）——隔离判定必须先清场。
+- **bug 1（壳永不 emit Live）**：`events.rs` 的 `connect_with` 是 Infallible（连上即挂 read），`run()` 只在 Refused 分支 emit Offline——**成功路径无 Live 事件**，§6.3 claim 监听器永远等不到。修复：`SinkEvent{Established, Frame}` 枚举，首个响应字节到达时发 Established → run() 转 emit Live。测试 `established_is_announced_before_the_first_frame`。
+- **bug 2（setup 注册竞态）**：lib.rs `setup` 先 spawn SSE 任务后注册 LINK_CHANNEL 监听器——loopback 握手毫秒级完成，首个 Live 落在监听器注册前；健康连接永不重连 → Live 永不再发。修复：两个 channel 监听器先注册、SSE 任务最后 spawn。
+- **bug 3（daemon 回收窗口与 ping 自相矛盾，确定性）**：`TRAY_TAKEOVER_RECLAIM_MS=10s` 但 SSE `PING=15s` 且 **ping 臂不喂 keepalive**（§6.3 注释"per frame + ping"与实现不符）——静默链路零喂食，**任何 claim 必在 10 秒被回收**（生产日志 5 次 "tray reclaim" 实证）。修复：PING 5s（<10s 窗口）+ ping 臂补 `tray_keepalive()`。测试 `v1_claimed_tray_survives_idle_sse_pings`（真时钟 + watchdog 轮询复刻 + 静默 12s 断言）——RED 首跑曾假绿（watchdog 在 bin 不在 Node），补轮询复刻后真 RED。
+- **验证**：端到端（本地 debug daemon + 修复壳）tray_owner 在 t+5s/17s/32s 三测全 client（跨三个回收窗口）；门禁：fmt、host + windows-gnu clippy `-D warnings` 双 0 错、workspace **1032 ×2** 稳定（+2）、壳 28 测试全绿、deny 四项 ok。
+- **待发版**：壳+daemon 的三个修复进 v0.2.60；v0.2.59 生产上壳 claim 后仍会被 10 秒回收（bug 3 未进发布版），壳的实际视觉接管等 v0.2.60 部署。

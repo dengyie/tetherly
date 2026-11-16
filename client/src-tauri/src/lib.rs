@@ -90,13 +90,12 @@ pub fn run() {
             let port = handle.state::<Daemon>().port;
             let token = handle.state::<Daemon>().token.clone();
             // The single SSE connection for every window (main + tray panel).
-            tauri::async_runtime::spawn(events::run(handle.clone(), port, token));
-
-            // Tray: real-state sync (§6.2). The SSE task forwards frames to
-            // the tray through app events; the tray answers menu actions the
-            // same way so no shared state crosses the runtime boundary.
-            let tray = TrayUi::build(&handle).map_err(|e| format!("tray init: {e}"))?;
-            handle.manage(tray);
+            // §147: BOTH channel listeners register BEFORE the SSE task
+            // spawns. The loopback handshake completes in milliseconds —
+            // with listeners registered after the spawn, the first
+            // `Live`/snapshot lands in the void and (because a healthy
+            // connection never reconnects) the shell would never claim the
+            // tray (production 2026-11-17).
             let fwd = handle.clone();
             handle.listen(events::EVENT_CHANNEL, move |ev| {
                 if let Ok(frame) = serde_json::from_str::<events::WireEvent>(ev.payload()) {
@@ -140,6 +139,13 @@ pub fn run() {
                     }
                 }
             });
+            tauri::async_runtime::spawn(events::run(handle.clone(), port, token));
+
+            // Tray: real-state sync (§6.2). The SSE task forwards frames to
+            // the tray through app events; the tray answers menu actions the
+            // same way so no shared state crosses the runtime boundary.
+            let tray = TrayUi::build(&handle).map_err(|e| format!("tray init: {e}"))?;
+            handle.manage(tray);
             // Menu action: the share pause switch is settings.general.advertise
             // (PATCH /api/v1/settings) — the same switch the SPA settings page
             // exposes. Read-modify-write so the patch always sets a field.

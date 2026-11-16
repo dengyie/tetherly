@@ -115,6 +115,14 @@ enum StreamEnd {
 /// shutdown signal fires (listening on the app handle is out of scope here —
 /// the process exits, killing this task). `frame_sink` receives each parsed
 /// frame — tests use it to observe reconnect behavior without an app handle.
+/// What the connection loop hands its consumer: the moment the daemon
+/// accepted the SSE request (§6.3 tray claim waits for this), or a frame.
+#[derive(Debug, PartialEq)]
+enum SinkEvent {
+    Established,
+    Frame(WireEvent),
+}
+
 async fn connect_with<S>(
     port: u16,
     token: &str,
@@ -122,7 +130,7 @@ async fn connect_with<S>(
     mut frame_sink: S,
 ) -> Result<std::convert::Infallible, StreamEnd>
 where
-    S: FnMut(WireEvent),
+    S: FnMut(SinkEvent),
 {
     let url_path = match last_seq {
         None => "/api/v1/events".to_string(),
@@ -146,11 +154,18 @@ where
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let mut frame_lines: Vec<String> = Vec::new();
+    let mut established = false;
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) | Err(_) => return Err(StreamEnd::Refused),
             Ok(_) => {
+                if !established {
+                    // First response bytes = the daemon accepted the SSE
+                    // request. Announce once, before any frame.
+                    established = true;
+                    frame_sink(SinkEvent::Established);
+                }
                 let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
                 if trimmed.is_empty() {
                     if frame_lines.is_empty() {
@@ -159,7 +174,7 @@ where
                     let refs: Vec<&str> = frame_lines.iter().map(String::as_str).collect();
                     if let Some(ev) = parse_frame(&refs) {
                         *last_seq = Some(ev.seq);
-                        frame_sink(ev);
+                        frame_sink(SinkEvent::Frame(ev));
                     }
                     frame_lines.clear();
                 } else {
@@ -176,8 +191,13 @@ async fn connect(
     token: &str,
     last_seq: &mut Option<u64>,
 ) -> Result<std::convert::Infallible, StreamEnd> {
-    connect_with(port, token, last_seq, |ev| {
-        let _ = app.emit(EVENT_CHANNEL, &ev);
+    connect_with(port, token, last_seq, |ev| match ev {
+        SinkEvent::Established => {
+            let _ = app.emit(LINK_CHANNEL, LinkState::Live);
+        }
+        SinkEvent::Frame(ev) => {
+            let _ = app.emit(EVENT_CHANNEL, &ev);
+        }
     })
     .await
 }
@@ -291,9 +311,15 @@ mod tests {
 
         let mut last_seq: Option<u64> = None;
         let mut frames: Vec<WireEvent> = Vec::new();
+        let mut established = 0usize;
         // Attempt loop mirrors `run`: backoff between StreamEnd::Refused.
         for attempt in 0..10 {
-            match connect_with(port, "tok", &mut last_seq, |ev| frames.push(ev)).await {
+            match connect_with(port, "tok", &mut last_seq, |ev| match ev {
+                SinkEvent::Established => established += 1,
+                SinkEvent::Frame(f) => frames.push(f),
+            })
+            .await
+            {
                 Err(StreamEnd::Refused) => {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
@@ -305,6 +331,7 @@ mod tests {
             let _ = attempt;
         }
 
+        assert_eq!(established, 2, "each daemon generation announces once");
         assert_eq!(frames.len(), 2, "one frame per daemon generation");
         assert_eq!(frames[0].seq, 7);
         assert_eq!(frames[0].data["gen"], 1);
@@ -312,5 +339,48 @@ mod tests {
         assert_eq!(frames[1].data["gen"], 2);
         v1.await.unwrap();
         v2.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod established_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// §147: the connection loop must report `Established` — once, before
+    /// any frame — when the daemon accepts the SSE request. The §6.3 tray
+    /// claim waits for exactly this transition; without it the shell never
+    /// claims the tray surface (production 2026-11-17: tray_owner stayed
+    /// `daemon` while the shell's SSE sat connected).
+    #[tokio::test]
+    async fn established_is_announced_before_the_first_frame() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _n = s.read(&mut buf).await.unwrap();
+            let body = format!(
+                "id: 1\nevent: snapshot\ndata: {}\r\n\r\n",
+                serde_json::json!({"seq": 1, "type": "snapshot", "data": {"gen": 1}})
+            );
+            let _ = s.write_all(body.as_bytes()).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+
+        let mut last_seq: Option<u64> = None;
+        let mut events: Vec<SinkEvent> = Vec::new();
+        let _ = connect_with(port, "tok", &mut last_seq, |ev| events.push(ev)).await;
+        server.await.unwrap();
+
+        assert!(
+            matches!(events.first(), Some(SinkEvent::Established)),
+            "first sink event must be Established, got {:?}",
+            events.first()
+        );
+        assert_eq!(events.len(), 2, "Established + one frame");
+        assert!(matches!(events[1], SinkEvent::Frame(_)));
     }
 }

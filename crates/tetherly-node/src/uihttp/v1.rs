@@ -490,7 +490,11 @@ fn log_level(body: &[u8]) -> Handled {
 }
 
 /// Keep-alive comment interval; also how fast a dead client is noticed.
-const PING: std::time::Duration = std::time::Duration::from_secs(15);
+/// §147: must stay well under `TRAY_TAKEOVER_RECLAIM_MS` (10s) — on a
+/// silent link the ping is the only feed of the §6.3 reclaim window, and
+/// the old 15s value could never feed a 10s window (every claim was
+/// reclaimed out from under a live shell).
+const PING: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `GET /api/v1/events`: snapshot (or `Last-Event-ID` replay), then live
 /// frames. `?topics=a,b` filters; snapshots always pass. A subscriber that
@@ -584,6 +588,10 @@ pub(super) async fn events(
             _ = ping.tick() => {
                 stream.write_all(b": ping\n\n").await?;
                 stream.flush().await?;
+                // §147: the ping IS the silent link's keepalive feed — the
+                // §6.3 contract says "per frame + ping", but this arm never
+                // fed the window, so every claim died at the 10s mark.
+                node.tray_keepalive();
             }
         }
     }
