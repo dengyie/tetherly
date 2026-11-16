@@ -2494,6 +2494,32 @@ mod tests {
         assert_eq!(body["blocked"], false);
         assert_eq!(body["block_reason"], serde_json::Value::Null);
 
+        // §152: heartbeat patch/read round trip; strict body.
+        let (code, body) = v1_call(
+            port,
+            "PATCH",
+            "/api/v1/link/heartbeat",
+            &auth,
+            r#"{"interval_secs":30}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["interval_secs"], 30);
+        assert_eq!(body["deadline_secs"], 45);
+        let (code, body) = v1_call(port, "GET", "/api/v1/link/heartbeat", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["interval_secs"], 30);
+        let (code, _) = v1_call(port, "PATCH", "/api/v1/link/heartbeat", &auth, "{}").await;
+        assert_eq!(code, 400);
+        let (code, _) = v1_call(port, "POST", "/api/v1/link", &auth, "").await;
+        assert_eq!(code, 405);
+
+        // §152: ping/probe actions on an unknown device are 404s, not hangs.
+        let (code, _) = v1_call(port, "POST", "/api/v1/devices/tdev_nope/ping", &auth, "").await;
+        assert_eq!(code, 404);
+        let (code, _) = v1_call(port, "POST", "/api/v1/devices/tdev_nope/probe", &auth, "").await;
+        assert_eq!(code, 404);
+
         // §151: disconnect action — Device row back; the seeded peer has no
         // live session so online stays false (the already_disconnected
         // distinction folds into the row, documented in the map appendix).

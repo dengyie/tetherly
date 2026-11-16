@@ -25,7 +25,7 @@
 |---|---|---|---|---|
 | `api/screen/*` | 94 | ~165 | cmd_screen*（10 模块） | 待契约扩展 / 分批迁移 |
 | `api/file/*` | 21 | ~26 | cmd_files | 待契约扩展 / 分批迁移 |
-| `api/peers/*` | 18 | ~24 | cmd_peers（写操作） | 待契约扩展 / 分批迁移 |
+| `api/peers/*` | 18 | ~20 | cmd_peers（写操作） | 待契约扩展 / 分批迁移（§149-§152 已迁 8 条） |
 | `api/topology/*` | 7 | ~8 | cmd_topology | 待契约扩展 / 分批迁移 |
 | `api/input/*` | 7 | ~8 | cmd_input | 待契约扩展 / 分批迁移 |
 | `api/clip/*` | 7 | ~10 | cmd_clip | 待契约扩展 / 分批迁移 |
@@ -89,11 +89,15 @@
 | `POST /api/peers/disconnect` | `POST /devices/{id}/disconnect` | PeerDisconnectReport→Device；already_disconnected 折入 online（动作后回读 online=false 即已断） |
 | `GET /api/peers/blocked` | `GET /devices` 过滤 `blocked==true` | BlockedPeersReport→行内过滤；block_reason 新契约字段（§151）；排序从插入序变 id 序 |
 
-## 剩余待迁（peers 写域）
+## 已迁移第五批（§152，链路质量域契约扩展）
 
-| 旧路由 | v1 状态 |
-|---|---|
-| `GET /api/peers/ping`、`/heartbeat`、`/link`、`/link/probe` | 链路质量域 → diagnostics，待契约扩展 |
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `GET /api/peers/link` | `GET /link` | PeerLinkQualityDto 列表→LinkQuality（heartbeat+计数+links）；grade 由 enum 变字符串；samples_count 显式 u64 字段 |
+| `GET /api/peers/heartbeat` | `GET /link/heartbeat` | 同值；§152 新 HeartbeatConfig 契约 |
+| `POST /api/peers/heartbeat` | `PATCH /link/heartbeat` | GET 动词语义修正为 PATCH；空 patch 400 "patch sets no field" |
+| `POST /api/peers/ping` | `POST /devices/{id}/ping` | DevicePingReport 契约（device_id/rtt_ms/path/addr）；auto-target（单在线 peer 自动选）移到 CLI 侧 |
+| `POST /api/peers/link/probe` | `POST /devices/{id}/probe` | LinkProbeReport 契约；grade 字符串化；count/interval_ms 可选参数同语义 |
 
 ## 已定案的特殊项
 

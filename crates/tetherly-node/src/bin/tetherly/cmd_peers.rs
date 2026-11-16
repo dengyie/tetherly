@@ -659,7 +659,8 @@ pub(crate) async fn handle_link_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(default_ui_port, "/api/peers/link")
+            // §152: v1 link snapshot — same field names.
+            let (code, resp) = tetherly_node::loopback_get(default_ui_port, "/api/v1/link")
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -693,7 +694,7 @@ pub(crate) async fn handle_link_cmd(
             } else {
                 default_ui_port
             };
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/peers/link")
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/link")
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -728,7 +729,7 @@ pub(crate) async fn handle_link_cmd(
                 default_ui_port
             };
             loop {
-                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/peers/link")
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/link")
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -766,21 +767,27 @@ pub(crate) async fn handle_link_cmd(
             } else {
                 default_ui_port
             };
+            let target = match peer {
+                Some(p) => p,
+                None => auto_target_peer(ui_port).await?,
+            };
             let body = serde_json::json!({
-                "peer": peer,
                 "count": count,
                 "interval_ms": interval_ms,
             });
             let payload = serde_json::to_vec(&body)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/peers/link/probe", &payload)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_post(
+                ui_port,
+                &format!("/api/v1/devices/{target}/probe"),
+                &payload,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "node refused link probe (HTTP {code}): {}",
@@ -813,15 +820,20 @@ pub(crate) async fn handle_link_cmd(
                     "deadline_secs": deadline,
                 });
                 let payload = serde_json::to_vec(&body)?;
-                let (code, resp) =
-                    tetherly_node::loopback_post(ui_port, "/api/peers/heartbeat", &payload)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) = tetherly_node::loopback_request(
+                    ui_port,
+                    "PATCH",
+                    "/api/v1/link/heartbeat",
+                    Some(&payload),
+                    tetherly_node::api_token_for(ui_port).as_deref(),
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                              start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                    )
+                })?;
                 if code != 200 {
                     anyhow::bail!(
                         "node refused heartbeat config update (HTTP {code}): {}",
@@ -840,7 +852,7 @@ pub(crate) async fn handle_link_cmd(
                     );
                 }
             } else {
-                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/peers/heartbeat")
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/link/heartbeat")
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -962,26 +974,66 @@ pub(crate) fn print_link_probe_report(v: &serde_json::Value) {
     println!("  Samples (ms): [{}]", samples_str.join(", "));
 }
 
+/// §152: the legacy ping/probe "no target given" behavior — with exactly
+/// one online peer, target it; otherwise mirror the old guidance.
+async fn auto_target_peer(ui_port: u16) -> anyhow::Result<String> {
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/devices")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        anyhow::bail!(
+            "failed to list devices (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    let devices: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+    let online: Vec<&serde_json::Value> = devices
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|d| d["online"].as_bool() == Some(true))
+                .collect()
+        })
+        .unwrap_or_default();
+    match online.len() {
+        0 => anyhow::bail!("no connected peer"),
+        1 => Ok(online[0]["id"].as_str().unwrap_or_default().to_string()),
+        _ => anyhow::bail!("multiple peers connected; pass peer (tdev_…)"),
+    }
+}
+
 pub(crate) async fn do_peer_ping(
     ui_port: u16,
     peer: Option<String>,
     count: u32,
     json: bool,
 ) -> anyhow::Result<()> {
-    let body = serde_json::json!({ "peer": peer });
-    let body_bytes = serde_json::to_vec(&body)?;
+    // §152: v1 device action — the id must be explicit; the legacy
+    // "single connected peer" auto-target resolves client-side from the
+    // devices view (ambiguous → same guidance as the old endpoint).
+    let target = match peer {
+        Some(p) => p,
+        None => auto_target_peer(ui_port).await?,
+    };
     let count = count.max(1);
     let mut rtts: Vec<u64> = Vec::new();
     let mut last_rep: Option<serde_json::Value> = None;
     for i in 1..=count {
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/ping", &body_bytes)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                     start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        let (code, resp) =
+            tetherly_node::loopback_post(ui_port, &format!("/api/v1/devices/{target}/ping"), &[])
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
         if code != 200 {
             anyhow::bail!(
                 "peer ping failed (HTTP {code}): {}",
@@ -1136,6 +1188,116 @@ mod disconnect_blocked_v1_tests {
                 .starts_with("/api/peers")),
             "disconnect/blocked still hit legacy routes: {hits:?}"
         );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+}
+
+#[cfg(test)]
+mod link_domain_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-link-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §152: the link domain — snapshot, heartbeat read/write, probe, ping
+    /// — speaks v1 resources; the frozen `/api/peers/*` aliases must stay
+    /// untouched across every branch, including error paths.
+    #[tokio::test]
+    async fn link_domain_round_trips_v1() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        // Error paths first (empty room → auto-target bail; unknown peer
+        // → 404; probe/ping errors) — each leaves a legacy hit on the old
+        // implementation.
+        let err = do_peer_ping(port, None, 1, false).await.unwrap_err();
+        assert!(err.to_string().contains("no connected peer"), "{err}");
+        let _ = do_peer_ping(port, Some("tdev_nooooooooooooooo".into()), 1, false).await;
+        let _ = handle_link_cmd(None, false, port).await.unwrap();
+        let _ = handle_link_cmd(
+            Some(LinkCmd::Config {
+                interval: Some(30),
+                deadline: None,
+                json: true,
+                ui_port: port,
+            }),
+            false,
+            port,
+        )
+        .await
+        .unwrap();
+        let _ = handle_link_cmd(
+            Some(LinkCmd::Probe {
+                peer: Some("tdev_nooooooooooooooo".into()),
+                count: 1,
+                interval_ms: 10,
+                json: true,
+                ui_port: port,
+            }),
+            false,
+            port,
+        )
+        .await;
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/peers")),
+            "link domain still hits legacy routes: {hits:?}"
+        );
+
+        // Heartbeat write/read round trip through the v1 resource.
+        let (code, resp) = tetherly_node::loopback_request(
+            port,
+            "PATCH",
+            "/api/v1/link/heartbeat",
+            Some(br#"{"interval_secs":30}"#),
+            tetherly_node::api_token_for(port).as_deref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let cfg: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(cfg["interval_secs"], 30);
+        assert_eq!(cfg["deadline_secs"], 45);
 
         tetherly_node::set_port_api_token(port, None);
     }

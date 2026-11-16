@@ -1387,3 +1387,11 @@
 - CLI disconnect/blocked 迁 v1；blocked --json 合成 {ok,count,peers} 形状；排序插入序→id 序。
 - 冒烟发现：resolve_peer 名字匹配只扫 trust 表，discovered-only 名字 404、全 id 可用——非回归（legacy 同路径），名字解析覆盖 discovered 是候选小轮。
 - 1038×2；门禁全绿；bindings 再生。peers 写域只剩 link/heartbeat/ping（diagnostics 域）。
+
+## §152 (2026-11-17) — 链路质量域契约扩展 ×5 + link/ping/probe/heartbeat 迁 v1
+- 契约：HeartbeatConfig/HeartbeatPatch/LinkQuality/LinkQualityPeer/LinkProbeRequest/LinkProbeReport/DevicePingReport；grade enum→String；契约 21。
+- v1：GET /link、GET/PATCH /link/heartbeat（空 patch 400）、POST /devices/{id}/ping|probe；CLI 四命令迁 + auto_target_peer 移 CLI 侧（0/1/多 peer 语义保持）。
+- 坑：批量 python 替换 allowed() anchor 因 fmt 漂移静默未命中——m2a 405 断言 404；重读文件手动补行后绿。批量编辑后必须 grep 验证落盘。
+- 冒烟 :36732（LAN :46732 避让生产 :45717，生产未动）：heartbeat 15→30→15、405/400/404 矩阵、legacy_routes 0。
+- workspace 第 2 遍 phase1 1 失败（§124 flake 家族，隔离重跑 2 遍全绿）；门禁全绿；bindings 无漂移（link DTO 不在快照面）。
+- 22 命令迁完，peers 写域清零。剩余：dial 契约扩展、logs/metrics CLI 迁移。

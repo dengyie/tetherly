@@ -13,8 +13,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use tetherly_api::{
     BlockRequest, ConnectRequest, DevicePatch, Diagnostics, ErrorBody, ErrorCode, Event, Health,
-    LogLevel, LogLevelRequest, LogTail, PinGrant, SettingsPatch, SysHost, SysProcess, SysTelemetry,
-    Topic, API_VERSION,
+    HeartbeatPatch, LinkProbeRequest, LogLevel, LogLevelRequest, LogTail, PinGrant, SettingsPatch,
+    SysHost, SysProcess, SysTelemetry, Topic, API_VERSION,
 };
 use tetherly_core::CoreError;
 use tokio::io::AsyncWriteExt;
@@ -91,6 +91,8 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/diagnostics"
         | "/api/v1/diagnostics/sys"
         | "/api/v1/diagnostics/logs" => Some(&["GET"]),
+        "/api/v1/link" => Some(&["GET"]),
+        "/api/v1/link/heartbeat" => Some(&["GET", "PATCH"]),
         "/api/v1/transfers" => Some(&["GET", "DELETE"]),
         "/api/v1/inbox" => Some(&["GET", "DELETE"]),
         "/api/v1/settings" => Some(&["GET", "PATCH"]),
@@ -99,7 +101,10 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/diagnostics/log-level" => Some(&["PATCH"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
         p => match device_action(p) {
-            Some((_, "connect")) | Some((_, "disconnect")) => Some(&["POST"]),
+            Some((_, "connect"))
+            | Some((_, "disconnect"))
+            | Some((_, "probe"))
+            | Some((_, "ping")) => Some(&["POST"]),
             Some((_, "block")) => Some(&["POST", "DELETE"]),
             _ => match transfer_action(p) {
                 Some((_, "cancel")) => Some(&["POST"]),
@@ -189,6 +194,9 @@ pub(super) async fn route(
         ("GET", "/api/v1/inbox") => Ok(json(200, &crate::apiv1::model::inbox(node))),
         ("GET", "/api/v1/layout") => Ok(json(200, &crate::apiv1::model::layout(node))),
         ("GET", "/api/v1/settings") => Ok(json(200, &crate::apiv1::model::settings(node))),
+        ("GET", "/api/v1/link") => Ok(json(200, &crate::apiv1::model::link_quality(node))),
+        ("GET", "/api/v1/link/heartbeat") => Ok(json(200, &crate::apiv1::model::heartbeat(node))),
+        ("PATCH", "/api/v1/link/heartbeat") => patch_heartbeat(node, body),
         ("GET", "/api/v1/activity") => Ok(json(200, &crate::apiv1::model::activity(node))),
         ("POST", "/api/v1/input/release") => match node.input_stop_reported().await {
             Ok(_) => Ok(json(200, &crate::apiv1::model::input(node).await)),
@@ -253,6 +261,8 @@ pub(super) async fn route(
         }
         (m, p) => match (m, device_action(p)) {
             ("POST", Some((id, "connect"))) => connect_device(node, id, body).await,
+            ("POST", Some((id, "ping"))) => ping_device(node, id).await,
+            ("POST", Some((id, "probe"))) => probe_device(node, id, body).await,
             ("POST", Some((id, "disconnect"))) => disconnect_device(node, id).await,
             ("POST", Some((id, "block"))) => block_device(node, id, body).await,
             ("DELETE", Some((id, "block"))) => unblock_device(node, id).await,
@@ -349,6 +359,25 @@ async fn open_inbox_file(node: &Node, name: &str, body: &[u8]) -> Handled {
     Ok(no_content())
 }
 
+/// `PATCH /link/heartbeat`: dynamic keepalive interval/deadline (§152).
+/// Partial patch; omitted fields stay untouched.
+fn patch_heartbeat(node: &Node, body: &[u8]) -> Handled {
+    let patch: HeartbeatPatch = parse_body(body)?;
+    if patch.is_empty() {
+        return Err(error(ErrorCode::BadRequest, "patch sets no field"));
+    }
+    let cfg = node
+        .update_heartbeat_config(patch.interval_secs, patch.deadline_secs)
+        .map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::HeartbeatConfig {
+            interval_secs: cfg.interval_secs,
+            deadline_secs: cfg.deadline_secs,
+        },
+    ))
+}
+
 fn patch_device(node: &Node, id: &str, body: &[u8]) -> Handled {
     let patch: DevicePatch = parse_body(body)?;
     if patch.is_empty() {
@@ -391,6 +420,54 @@ async fn connect_device(node: &Node, id: &str, body: &[u8]) -> Handled {
 async fn disconnect_device(node: &Node, id: &str) -> Handled {
     node.disconnect_peer(id).await.map_err(core_error)?;
     Ok(device_json(node, id))
+}
+
+/// `POST /devices/{id}/ping`: one on-demand RTT probe over the Noise
+/// session (§152). The id must resolve; the "single connected peer"
+/// auto-target of the legacy endpoint is a CLI-side concern now.
+async fn ping_device(node: &Node, id: &str) -> Handled {
+    let device_id = node.resolve_peer(id).map_err(core_error)?;
+    let rep = node.ping_peer(&device_id).await.map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::DevicePingReport {
+            device_id: rep.device_id,
+            rtt_ms: rep.rtt_ms,
+            path: rep.path,
+            addr: rep.addr,
+        },
+    ))
+}
+
+/// `POST /devices/{id}/probe`: an on-demand multi-ping over the Noise
+/// session (§152). Defaults match the legacy endpoint (count 5, 100 ms).
+async fn probe_device(node: &Node, id: &str, body: &[u8]) -> Handled {
+    let req: LinkProbeRequest = parse_body(body)?;
+    node.resolve_peer(id).map_err(core_error)?;
+    let rep = node
+        .probe_peer_link(
+            id,
+            req.count.unwrap_or(5) as usize,
+            req.interval_ms.unwrap_or(100),
+        )
+        .await
+        .map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::LinkProbeReport {
+            device_id: rep.peer,
+            count: rep.count as u64,
+            sent_count: rep.sent as u64,
+            recv_count: rep.received as u64,
+            min_rtt_ms: rep.min_rtt_ms,
+            max_rtt_ms: rep.max_rtt_ms,
+            avg_rtt_ms: rep.avg_rtt_ms,
+            jitter_ms: rep.jitter_ms,
+            packet_loss_rate: rep.packet_loss_rate,
+            samples_ms: rep.samples,
+            grade: rep.grade.as_str().to_string(),
+        },
+    ))
 }
 
 async fn block_device(node: &Node, id: &str, body: &[u8]) -> Handled {

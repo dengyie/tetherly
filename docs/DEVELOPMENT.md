@@ -9431,3 +9431,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **门禁**：fmt 绿；双 clippy 0 错；workspace **1038 ×2 稳定**（+2）；deny 四项 ok；bindings 无漂移。
 - **真 daemon 冒烟（:16471）**：disconnect 正/误双路径（404 文案）、block 带 reason → blocked plain/JSON reason 回显 → unblock，`legacy_routes: []` 干净。**发现（如实）**：daemon 侧 `resolve_peer` 对 discovered-only peer 的**名字**解析失败（名字匹配只扫 trust 表）——CLI `disconnect --peer DESKTOP-VST7EIE` 404 而全 id `tdev_…` 成功；§149 connect/block 同一 resolve 路径同此行为，旧 `/api/peers/disconnect` 也一致（非回归），名字解析覆盖 discovered 名是后续小轮候选。
 - **M5 战果更新**：18 命令迁完。peers 写域只剩 link/heartbeat/ping（diagnostics 域，链路质量快照聚合，规模较大独立轮）。
+
+## 152. M5：链路质量域契约扩展 ×5 + link/ping/probe/heartbeat 迁 v1（§9-2 第五批）
+
+接 §151。peers 写域最后一组：链路质量快照聚合（snapshot+heartbeat+ping+probe），本轮一次扩完契约再迁 CLI 四命令。
+
+- **契约扩展 ×5**（tetherly-api）：`HeartbeatConfig{interval_secs,deadline_secs}`（Copy+Default）、`HeartbeatPatch`（deny_unknown_fields+is_empty()）、`LinkQualityPeer`（镜像运行时 PeerLinkQualityDto：rtt min/max/avg/jitter、pings_sent/pongs_recv、packet_loss_rate、`grade: String`（enum→字符串）、`samples_count: u64`、connected_uptime_secs）、`LinkQuality{heartbeat,total_peers,online_peers,links}`、`LinkProbeRequest{count,interval_ms}`（可选）、`LinkProbeReport`（samples_ms Vec+grade 字符串化）、`DevicePingReport{device_id,rtt_ms,path,addr}`。契约测试 +3（21）：snapshot 往返、heartbeat 往返、probe/ping 报告往返。
+- **v1 端点**：`GET /link`（快照聚合）、`GET/PATCH /link/heartbeat`（读改写，空 patch 400 "patch sets no field"）、`POST /devices/{id}/ping`、`POST /devices/{id}/probe`（count 默认 5、interval_ms 默认 100）。allowed() 补 link 两路径的 GET/PATCH 清单——**教训（如实）**：本轮批量 python 替换 allowed() 时 anchor 因 fmt 漂移静默未命中，m2a `POST /api/v1/link → 405` 断言一度 404；重读文件手动补两行后绿。批量编辑后必须 grep 验证落盘。
+- **CLI 四命令迁移**（cmd_peers.rs）：link status 三 GET 臂→`GET /api/v1/link`（grade 渲染/JSON 形状不变，心跳头数值同源）；`do_peer_ping`→`POST /devices/{id}/ping` + **auto-target 移到 CLI 侧**（`auto_target_peer`：`GET /devices` 过滤 online，0→bail "no connected peer"、1→自动选、多→要求显式 peer，保持旧单 peer UX）；probe→`POST /devices/{id}/probe`（body `{count,interval_ms}`）；heartbeat 读写→`GET/PATCH /api/v1/link/heartbeat`（loopback_request + api_token_for）。新增 `link_domain_v1_tests`（错误路径 ×5 + legacy_routes 归零 + heartbeat 往返 30/45）。
+- **测试**：契约 21；lib 352（m2a 追加 §152 断言：heartbeat PATCH 30/45 保持、GET 反映、空 patch 400、POST link 405、ping/probe 未知 peer 404）；bin 11。
+- **门禁**：fmt 绿（cmd_peers 一处缩进漂移修正）；双 clippy 0 错；workspace 全量 ×2——**第 2 遍 `phase1` 1 失败（§124 flake 家族，隔离重跑 2 遍全绿）**；deny 四项 ok；bindings 无漂移（link DTO 仅 v1 处理器面，快照面未变，api.ts 无 diff）。
+- **隔离冒烟（:36732，LAN :46732 避让生产 :45717；生产进程未动）**：link status 表格+JSON、heartbeat 读/写/回读（15→30→15）、ping 无 peer 走 daemon 自检、probe 无 peer "no connected peer"、未知 peer 404、方法矩阵（PATCH {} 400 / POST /api/v1/link 405）、`legacy_routes` 总命中 **0**。
+- **M5 战果更新**：22 命令迁完。peers 写域清零；剩余：dial（POST /pairing/dial 契约扩展）、logs/metrics CLI 迁移（diagnostics 端点已存在）。

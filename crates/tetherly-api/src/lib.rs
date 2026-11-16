@@ -838,6 +838,134 @@ impl SettingsPatch {
     }
 }
 
+/// §152: dynamic heartbeat keepalive configuration, mirrored from the
+/// runtime `HeartbeatConfig` (interval/deadline in seconds). Lives on
+/// `GET /link/heartbeat`; write via `HeartbeatPatch`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HeartbeatConfig {
+    pub interval_secs: u64,
+    pub deadline_secs: u64,
+}
+
+/// §152: `PATCH /link/heartbeat` — every field optional; omitted fields
+/// stay untouched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct HeartbeatPatch {
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_secs: Option<u64>,
+}
+
+impl HeartbeatPatch {
+    /// `true` when the patch sets no field.
+    pub fn is_empty(&self) -> bool {
+        self.interval_secs.is_none() && self.deadline_secs.is_none()
+    }
+}
+
+/// §152: sliding-window link quality profile for one peer connection,
+/// mirrored from the runtime `PeerLinkQualityDto` field names so the CLI
+/// table printer and JSON consumers stay byte-compatible.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LinkQualityPeer {
+    pub device_id: String,
+    pub name: String,
+    pub addr: String,
+    pub is_online: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_seen_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub min_rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub max_rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub avg_rtt_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub jitter_ms: Option<f64>,
+    pub pings_sent: u64,
+    pub pongs_recv: u64,
+    pub packet_loss_rate: f64,
+    pub grade: String,
+    pub samples_count: u64,
+    pub connected_uptime_secs: u64,
+}
+
+/// §152: the link resource — `GET /api/v1/link` snapshot with the
+/// heartbeat config and per-peer quality rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LinkQuality {
+    pub heartbeat: HeartbeatConfig,
+    pub total_peers: u64,
+    pub online_peers: u64,
+    pub links: Vec<LinkQualityPeer>,
+}
+
+/// §152: `POST /devices/{id}/probe` body — an on-demand multi-ping over
+/// the Noise session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct LinkProbeRequest {
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u64>,
+}
+
+/// §152: probe result — mirrored from the runtime `LinkProbeReport` field
+/// names (device_id alias for `peer`; samples inlined as `samples_ms`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LinkProbeReport {
+    pub device_id: String,
+    pub count: u64,
+    pub sent_count: u64,
+    pub recv_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub min_rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub max_rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub avg_rtt_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub jitter_ms: Option<f64>,
+    pub packet_loss_rate: f64,
+    pub samples_ms: Vec<u64>,
+    pub grade: String,
+}
+
+/// §152: single ping result — mirrored from the runtime `PeerPingReport`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DevicePingReport {
+    pub device_id: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rtt_ms: u64,
+    pub path: String,
+    pub addr: String,
+}
+
 /// `POST /inbox/open`: reveal one inbox file with the OS opener.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]

@@ -485,6 +485,98 @@ mod commands {
     }
 
     #[test]
+    fn heartbeat_config_and_patch_round_trip() {
+        // §152: the CLI link config view and its write path; patch is
+        // strict and partial.
+        let cfg = HeartbeatConfig {
+            interval_secs: 15,
+            deadline_secs: 45,
+        };
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(v["interval_secs"], 15);
+        let back: HeartbeatConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back, cfg);
+
+        let p: HeartbeatPatch = serde_json::from_value(json!({"interval_secs": 30})).unwrap();
+        assert_eq!(p.interval_secs, Some(30));
+        assert_eq!(p.deadline_secs, None);
+        assert!(serde_json::from_value::<HeartbeatPatch>(json!({}))
+            .unwrap()
+            .is_empty());
+        assert!(serde_json::from_value::<HeartbeatPatch>(json!({"nope": 1})).is_err());
+    }
+
+    #[test]
+    fn link_quality_snapshot_round_trip() {
+        // §152: GET /link snapshot — field names mirror the legacy report
+        // so the CLI table printer is unchanged.
+        let snap = LinkQuality {
+            heartbeat: HeartbeatConfig {
+                interval_secs: 10,
+                deadline_secs: 30,
+            },
+            total_peers: 1,
+            online_peers: 1,
+            links: vec![LinkQualityPeer {
+                device_id: "tdev_a".into(),
+                name: "mac".into(),
+                addr: "192.168.1.7:45717".into(),
+                is_online: true,
+                last_seen_ms: 5,
+                rtt_ms: Some(3),
+                min_rtt_ms: Some(2),
+                max_rtt_ms: Some(9),
+                avg_rtt_ms: Some(4.5),
+                jitter_ms: Some(0.4),
+                pings_sent: 100,
+                pongs_recv: 99,
+                packet_loss_rate: 0.01,
+                grade: "excellent".into(),
+                samples_count: 20,
+                connected_uptime_secs: 3600,
+            }],
+        };
+        let v = serde_json::to_value(&snap).unwrap();
+        assert_eq!(v["links"][0]["grade"], "excellent");
+        let back: LinkQuality = serde_json::from_value(v).unwrap();
+        assert_eq!(back, snap);
+    }
+
+    #[test]
+    fn link_probe_and_ping_reports_round_trip() {
+        // §152: device action reports (probe body optional fields strict).
+        let req: LinkProbeRequest = serde_json::from_value(json!({"count": 5})).unwrap();
+        assert_eq!(req.count, Some(5));
+        assert!(serde_json::from_value::<LinkProbeRequest>(json!({"peer": "x"})).is_err());
+        let rep = LinkProbeReport {
+            device_id: "tdev_a".into(),
+            count: 5,
+            sent_count: 5,
+            recv_count: 4,
+            min_rtt_ms: Some(2),
+            max_rtt_ms: Some(8),
+            avg_rtt_ms: Some(3.5),
+            jitter_ms: Some(0.2),
+            packet_loss_rate: 0.2,
+            samples_ms: vec![2, 3, 8, 2, 3],
+            grade: "good".into(),
+        };
+        let v = serde_json::to_value(&rep).unwrap();
+        assert_eq!(v["samples_ms"][2], 8);
+        let back: LinkProbeReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back, rep);
+        let ping = DevicePingReport {
+            device_id: "tdev_a".into(),
+            rtt_ms: 3,
+            path: "lan".into(),
+            addr: "192.168.1.7:45717".into(),
+        };
+        let v = serde_json::to_value(&ping).unwrap();
+        let back: DevicePingReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back, ping);
+    }
+
+    #[test]
     fn inbox_open_request_carries_the_name() {
         let r: InboxOpenRequest = serde_json::from_value(json!({"name": "a.txt"})).unwrap();
         assert_eq!(r.name, "a.txt");

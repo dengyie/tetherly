@@ -8,10 +8,10 @@ use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
     Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, Device,
-    HandoffStatus, Inbox, InboxFile, Input, Layout, LayoutEdge, LayoutPolicy, LinkPath,
-    MessageDirection, Pairing, PeerCounts, Ports, Settings, SettingsGeneral, SettingsTransfer,
-    Snapshot, System, Transfer, TransferDirection, TransferPhase, TransferStats, Transfers,
-    API_VERSION,
+    HandoffStatus, HeartbeatConfig, Inbox, InboxFile, Input, Layout, LayoutEdge, LayoutPolicy,
+    LinkPath, LinkQuality, LinkQualityPeer, MessageDirection, Pairing, PeerCounts, Ports, Settings,
+    SettingsGeneral, SettingsTransfer, Snapshot, System, Transfer, TransferDirection,
+    TransferPhase, TransferStats, Transfers, API_VERSION,
 };
 use tetherly_core::{DisplayEdge, PathKind, TrustedPeer};
 
@@ -300,6 +300,51 @@ pub fn layout(node: &Node) -> Layout {
             allow_inbound_control: policy.allow_inbound_control,
             auto_link_paired_peers: policy.auto_link_paired_peers,
         },
+    }
+}
+
+/// §152: the link resource — quality snapshot + heartbeat config, field
+/// names mirrored from the runtime report (CLI printers unchanged).
+pub fn link_quality(node: &Node) -> LinkQuality {
+    let r = node.link_quality_report();
+    LinkQuality {
+        heartbeat: HeartbeatConfig {
+            interval_secs: r.heartbeat.interval_secs,
+            deadline_secs: r.heartbeat.deadline_secs,
+        },
+        total_peers: r.total_peers as u64,
+        online_peers: r.online_peers as u64,
+        links: r
+            .links
+            .into_iter()
+            .map(|l| LinkQualityPeer {
+                device_id: l.device_id,
+                name: l.name,
+                addr: l.addr,
+                is_online: l.is_online,
+                last_seen_ms: l.last_seen_ms,
+                rtt_ms: l.rtt_ms,
+                min_rtt_ms: l.min_rtt_ms,
+                max_rtt_ms: l.max_rtt_ms,
+                avg_rtt_ms: l.avg_rtt_ms,
+                jitter_ms: l.jitter_ms,
+                pings_sent: l.pings_sent,
+                pongs_recv: l.pongs_recv,
+                packet_loss_rate: l.packet_loss_rate,
+                grade: l.grade.as_str().to_string(),
+                samples_count: l.samples_count as u64,
+                connected_uptime_secs: l.connected_uptime_secs,
+            })
+            .collect(),
+    }
+}
+
+/// §152: the heartbeat config resource view.
+pub fn heartbeat(node: &Node) -> HeartbeatConfig {
+    let c = node.heartbeat_config();
+    HeartbeatConfig {
+        interval_secs: c.interval_secs,
+        deadline_secs: c.deadline_secs,
     }
 }
 
