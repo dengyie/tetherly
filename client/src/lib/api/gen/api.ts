@@ -120,7 +120,12 @@ export type LayoutPolicy = { enabled: boolean, allow_inbound_control: boolean, a
 
 export type Settings = { general: SettingsGeneral, transfer: SettingsTransfer, };
 
-export type SettingsGeneral = { name: string, advertise: boolean, reconnect: boolean, loopback_only: boolean, overlay_enabled: boolean, };
+export type SettingsGeneral = { name: string, advertise: boolean, reconnect: boolean, loopback_only: boolean, overlay_enabled: boolean, 
+/**
+ * §6.3 tray takeover state; read-only on this resource (write via the
+ * `tray_owner` field of `SettingsPatch`).
+ */
+tray_owner: TrayOwner, };
 
 export type SettingsTransfer = { 
 /**
@@ -128,7 +133,13 @@ export type SettingsTransfer = {
  */
 auto_accept: boolean, };
 
-export type SettingsPatch = { name?: string, advertise?: boolean, reconnect?: boolean, auto_accept?: boolean, };
+export type SettingsPatch = { name?: string, advertise?: boolean, reconnect?: boolean, auto_accept?: boolean, 
+/**
+ * §6.3 tray takeover: `client` hides the built-in tray (the shell owns
+ * the tray surface and must keep SSE + keepalive alive); `daemon`
+ * restores it.
+ */
+tray_owner?: TrayOwner, };
 
 export type InboxOpenRequest = { name: string, };
 

@@ -11,6 +11,7 @@ pub mod events;
 pub mod proxy;
 pub mod token;
 pub mod tray;
+pub mod trayowner;
 pub mod trayui;
 
 use tauri::{AppHandle, Listener, Manager, State};
@@ -80,6 +81,9 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .manage(daemon)
+        .manage(trayowner::Claimed(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
         .invoke_handler(tauri::generate_handler![api])
         .setup(|app| {
             let handle: AppHandle = app.handle().clone();
@@ -123,6 +127,18 @@ pub fn run() {
                 if let Some(ui) = fwd.try_state::<TrayUi<tauri::Wry>>() {
                     ui.on_link(up);
                 }
+                // §6.3 tray takeover: first live link claims the surface
+                // (idempotent — only the transition fires the PATCH).
+                if up {
+                    let once = fwd.state::<trayowner::Claimed>();
+                    if !once.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let d = fwd.state::<Daemon>();
+                        let (port, token) = (d.port, d.token.clone());
+                        tauri::async_runtime::spawn(async move {
+                            trayowner::claim(port, &token).await;
+                        });
+                    }
+                }
             });
             // Menu action: the share pause switch is settings.general.advertise
             // (PATCH /api/v1/settings) — the same switch the SPA settings page
@@ -147,7 +163,9 @@ pub fn run() {
                             }
                         };
                     let on = current["general"]["advertise"].as_bool().unwrap_or(true);
-                    let patch = serde_json::json!({"general": {"advertise": !on}});
+                    // SettingsPatch is FLAT (deny_unknown_fields): the old
+                    // nested `{"general": {...}}` body parsed as a 400.
+                    let patch = serde_json::json!({"advertise": !on});
                     match proxy::request(
                         d.port,
                         &d.token,
@@ -192,8 +210,36 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tetherly shell");
+        .build(tauri::generate_context!())
+        .expect("error while building tetherly shell")
+        .run(|app, event| {
+            // §6.3 tray takeover: clean exit releases the claim so the
+            // built-in tray returns immediately, not after the daemon's
+            // 10s reclaim window. Best-effort: the watchdog covers crashes.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let d = app.state::<Daemon>();
+                let once = app.state::<trayowner::Claimed>();
+                if once.0.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Synchronous best-effort on a fresh runtime; the
+                    // process is exiting, so a short deadline is plenty.
+                    let port = d.port;
+                    let token = d.token.clone();
+                    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        let _ = rt.block_on(async move {
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                trayowner::release(port, &token),
+                            )
+                            .await
+                            .ok()
+                        });
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]

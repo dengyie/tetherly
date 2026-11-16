@@ -683,6 +683,23 @@ pub struct Settings {
     pub transfer: SettingsTransfer,
 }
 
+/// Who renders the desktop tray icon (§6.3 tray takeover). `daemon` is the
+/// built-in tray; `client` is the Tauri shell's tray. When `client` is set
+/// the daemon hides its built-in tray and reclaims it if the shell's SSE
+/// link stays silent for `TRAY_TAKEOVER_RECLAIM_MS`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum TrayOwner {
+    #[default]
+    Daemon,
+    Client,
+}
+
+/// How long a claimed (`tray_owner: client`) tray may go without a shell
+/// keepalive before the daemon restores the built-in tray (§6.3: 10 s).
+pub const TRAY_TAKEOVER_RECLAIM_MS: u64 = 10_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SettingsGeneral {
@@ -691,6 +708,10 @@ pub struct SettingsGeneral {
     pub reconnect: bool,
     pub loopback_only: bool,
     pub overlay_enabled: bool,
+    /// §6.3 tray takeover state; read-only on this resource (write via the
+    /// `tray_owner` field of `SettingsPatch`).
+    #[serde(default)]
+    pub tray_owner: TrayOwner,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -719,6 +740,12 @@ pub struct SettingsPatch {
     #[cfg_attr(test, ts(optional))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_accept: Option<bool>,
+    /// §6.3 tray takeover: `client` hides the built-in tray (the shell owns
+    /// the tray surface and must keep SSE + keepalive alive); `daemon`
+    /// restores it.
+    #[cfg_attr(test, ts(optional))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tray_owner: Option<TrayOwner>,
 }
 
 impl SettingsPatch {
@@ -728,6 +755,7 @@ impl SettingsPatch {
             && self.advertise.is_none()
             && self.reconnect.is_none()
             && self.auto_accept.is_none()
+            && self.tray_owner.is_none()
     }
 }
 

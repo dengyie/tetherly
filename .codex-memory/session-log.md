@@ -1292,3 +1292,12 @@
 - **内存实测（M3 验收收口）**：release 壳 + WebContent XPC 双进程 ps 采样：峰值 116MB、稳态 91-96MB < 120MB 达标（daemon 23MB 不计壳口径）。注意壳必须确认 SSE ESTABLISHED 再采样，刚起的瞬时样本连不上 daemon。
 - 验证：双 clippy 0 错 / workspace 1006 绿 / deny ok（瞬时 advisory 警告复跑绿）/ vitest 28 / svelte-check 0 / dist 入 git。
 - 留下轮：Windows client.token、通知点击聚焦、GPU/Networking XPC 全链口径、tray_owner（需 daemon SettingsPatch 先扩）、bundle job CI 首跑。
+
+## 2026-11-16 M3 四轮：tray_owner 托盘接管 + 10s 兜底回收
+- 契约：`TrayOwner` 枚举（daemon 默认/client）+ `TRAY_TAKEOVER_RECLAIM_MS=10_000`；SettingsGeneral/Patch 各加 tray_owner；TS 绑定 bless。
+- daemon：Shared 加 tray_owner/keepalive（存 Clock.unix_ms 而非 Instant——ManualClock 测试要推时钟）/sse_seen；set_tray_owner 幂等 + emit_config_changed 走既有 settings.changed 推送链。SSE events() 订阅即喂狗、每帧再喂（ping 15s < 窗口 10s，活连接永不过期）。watchdog 在 cmd_core run() 1s 轮询 expired → set_tray_owner(Daemon) + tray_set_visible(true)。
+- 内置托盘隐藏：模块级 VISIBLE AtomicBool，两平台各自 500ms 轮询（不跨线程 UI 调用）。macOS 复用 TetherlyTrayTarget 加 trayVisibilityTick: selector + NSRunLoop NSTimer（popover.rs 先例），alphaValue 0↔1（菜单/拖放区保留，恢复免重建）；Windows tray_wnd_proc WM_TIMER 分支 NIM_ADD/NIM_DELETE。
+- 壳：Claimed(AtomicBool) 一次性守卫，LINK 首次 Live PATCH {"tray_owner":"client"}（重连不重发）；ExitRequested 时 2s 超时同步 PATCH daemon 兜底。**修 bug**：壳暂停共享 PATCH 体是嵌套 {"general":{…}}，SettingsPatch 扁平 + deny_unknown_fields → 真机必 400（§135 埋雷），改扁平。
+- 集成验收（隔离端口真 daemon）：GET daemon→PATCH client→bogus 400→SSE 3s 喂狗→静默 12s→daemon 回收 + 日志确认。
+- 验证：fmt/双 clippy/workspace 40 段/deny 全绿；壳 27 测试。windows-gnu 下 use super::* 触发 unused imports（模块只依赖外部路径）——测试模块导入按需收窄。
+- 部署注意：线上 0.2.58 daemon 旧契约，PATCH tray_owner 会 400；随下次部署切换。留下轮：Windows client.token、通知点击聚焦、bundle job CI 首跑、alphaValue 隐藏的真机观感。

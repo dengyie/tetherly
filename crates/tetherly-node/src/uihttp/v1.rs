@@ -254,6 +254,13 @@ fn patch_settings(node: &Node, body: &[u8]) -> Handled {
     if patch.is_empty() {
         return Err(error(ErrorCode::BadRequest, "patch sets no field"));
     }
+    if let Some(owner) = patch.tray_owner {
+        let (owner, changed) = node.set_tray_owner(owner).map_err(core_error)?;
+        if changed {
+            // §6.3: fold the claim into the built-in tray's visibility.
+            crate::platform::tray::tray_set_visible(owner == tetherly_api::TrayOwner::Daemon);
+        }
+    }
     if patch.name.is_some() || patch.advertise.is_some() || patch.reconnect.is_some() {
         node.update_config(patch.name.as_deref(), patch.advertise, patch.reconnect)
             .map_err(core_error)?;
@@ -480,6 +487,12 @@ pub(super) async fn events(
         header_last_id.or_else(|| params.get("last_event_id").and_then(|v| v.parse().ok()));
     let mut sub = hub.subscribe(last_id);
 
+    // §6.3 tray takeover: an SSE subscriber IS shell activity. Mark it seen
+    // and feed the reclaim watchdog once per accepted connection; the frame
+    // and ping loops below keep feeding it while the stream lives.
+    node.tray_keepalive();
+    node.mark_tray_sse_seen();
+
     let head = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/event-stream; charset=utf-8\r\n\
@@ -531,6 +544,8 @@ pub(super) async fn events(
                         stream.write_all(f.sse().as_bytes()).await?;
                         stream.flush().await?;
                     }
+                    // Any forwarded frame proves the subscriber is alive.
+                    node.tray_keepalive();
                 }
                 Err(RecvError::Lagged(_)) | Err(RecvError::Closed) => break,
             },

@@ -1058,6 +1058,16 @@ struct Shared {
     /// completion hook can settle MOTW + reveal with the real source
     /// attribution. Populated when the first FileOffer of a drag arrives.
     pub(crate) transfer_drag_ids: Mutex<HashMap<String, (DeviceId, u64)>>,
+    /// §6.3 tray takeover: who owns the desktop tray surface. `client`
+    /// claims mean the built-in tray hides itself; the watchdog (spawned by
+    /// the daemon binary) reclaims via [`Node::tray_keepalive`] silence.
+    tray_owner: Mutex<tetherly_api::TrayOwner>,
+    /// Last shell keepalive instant (node `Clock` unix_ms) while
+    /// `tray_owner == Client`; the Clock seam keeps the reclaim testable.
+    tray_keepalive: Mutex<Option<u64>>,
+    /// Whether the SSE link had a shell subscriber since the last claim —
+    /// the watchdog's fallback signal when the shell never speaks keepalive.
+    pub(crate) tray_sse_seen: std::sync::atomic::AtomicBool,
 }
 
 /// Value of `Shared.pending_drag_drops`.
@@ -3586,6 +3596,66 @@ mod locator_policy_tests {
         assert_eq!(status.harq_recovered_frames, 0);
         assert_eq!(status.harq_retransmit_timeouts, 0);
         assert_eq!(status.harq_buffer_occupancy, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tray_owner_tests {
+    use crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock;
+    use tetherly_api::{TrayOwner, TRAY_TAKEOVER_RECLAIM_MS};
+
+    /// §6.3: a client claim starts the reclaim window; the watchdog only
+    /// reclaims after `TRAY_TAKEOVER_RECLAIM_MS` of keepalive silence.
+    #[test]
+    fn claim_starts_window_and_silence_expires_it() {
+        let (node, dir, clock) = temp_test_node_manual_clock("tray-claim", 100_000);
+        assert_eq!(node.tray_owner(), TrayOwner::Daemon);
+        assert!(
+            !node.tray_keepalive_expired(),
+            "unclaimed tray never expires"
+        );
+
+        let (owner, changed) = node.set_tray_owner(TrayOwner::Client).unwrap();
+        assert_eq!((owner, changed), (TrayOwner::Client, true));
+        // Idempotent claims are no-ops.
+        assert_eq!(node.set_tray_owner(TrayOwner::Client).unwrap().1, false);
+
+        // Just inside the window: not expired.
+        clock.set(100_000 + TRAY_TAKEOVER_RECLAIM_MS - 1);
+        assert!(!node.tray_keepalive_expired());
+
+        // The window elapses: the watchdog must reclaim.
+        clock.set(100_000 + TRAY_TAKEOVER_RECLAIM_MS);
+        assert!(node.tray_keepalive_expired());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §6.3: keepalive while the claim is live pushes the reclaim out; a
+    /// release (daemon) drops the window entirely.
+    #[test]
+    fn keepalive_defers_and_release_cancels() {
+        let (node, dir, clock) = temp_test_node_manual_clock("tray-keepalive", 200_000);
+        node.set_tray_owner(TrayOwner::Client).unwrap();
+
+        // Feed the dog right before the original deadline.
+        clock.set(200_000 + TRAY_TAKEOVER_RECLAIM_MS - 100);
+        node.tray_keepalive();
+        clock.set(200_000 + 2 * TRAY_TAKEOVER_RECLAIM_MS - 200);
+        assert!(!node.tray_keepalive_expired(), "keepalive deferred reclaim");
+        clock.set(200_000 + 2 * TRAY_TAKEOVER_RECLAIM_MS - 100);
+        assert!(
+            node.tray_keepalive_expired(),
+            "deferred window still closes"
+        );
+
+        // Keepalive while unclaimed is a harmless no-op.
+        node.set_tray_owner(TrayOwner::Daemon).unwrap();
+        node.tray_keepalive();
+        assert!(!node.tray_keepalive_expired());
+        assert_eq!(node.tray_owner(), TrayOwner::Daemon);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

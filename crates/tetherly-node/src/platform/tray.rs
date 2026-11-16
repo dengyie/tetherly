@@ -3,6 +3,26 @@
 //!
 //! macOS: NSStatusBar status item with menu and dashboard launcher.
 //! Windows: Shell_NotifyIconW notification area icon with popup menu and dashboard launcher.
+//!
+//! §6.3 tray takeover: the daemon's built-in tray hides itself while a
+//! Tauri shell claims `tray_owner=client` and reappears on release/reclaim.
+//! Both platform loops poll [`VISIBLE`] (the `tray_set_visible` write side)
+//! on a cheap timer — no cross-thread AppKit calls, no extra sync surface.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static VISIBLE: AtomicBool = AtomicBool::new(true);
+
+/// Show or hide the built-in tray icon (idempotent). Platform loops pick
+/// the change up within one poll tick.
+pub fn tray_set_visible(visible: bool) {
+    VISIBLE.store(visible, Ordering::Release);
+}
+
+/// Read-side used by the platform loops.
+fn tray_visible() -> bool {
+    VISIBLE.load(Ordering::Acquire)
+}
 
 pub struct TrayHandle {
     shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
@@ -35,6 +55,10 @@ mod macos_tray {
 
     pub(crate) struct TrayIvars {
         ui_port: u16,
+        /// Status-item button (for the visibility timer's alpha fold).
+        /// Only the tray target's ivars carry a value; the drop view keeps
+        /// `None`.
+        button: Option<objc2::rc::Retained<objc2_app_kit::NSStatusBarButton>>,
     }
 
     /// Extract local file paths from a dropping pasteboard.
@@ -145,7 +169,10 @@ mod macos_tray {
         impl TrayDropView {
             #[unsafe(method_id(initWithFrame:))]
             fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
-                let this = this.set_ivars(TrayIvars { ui_port: 0 });
+                let this = this.set_ivars(TrayIvars {
+                    ui_port: 0,
+                    button: None,
+                });
                 unsafe { msg_send![super(this), initWithFrame: frame] }
             }
         }
@@ -220,6 +247,25 @@ mod macos_tray {
             fn quit_tetherly(&self, _sender: &NSMenuItem) {
                 std::process::exit(0);
             }
+
+            /// §6.3 tray takeover: run-loop timer tick — fold the shared
+            /// visibility flag into the status item. alphaValue=0 keeps the
+            /// item, menu and dropzone alive while visually hidden; restore
+            /// is alpha back to 1, no NSStatusBar surgery.
+            #[unsafe(method(trayVisibilityTick:))]
+            fn tray_visibility_tick(&self, _timer: &objc2_foundation::NSTimer) {
+                static SHOWN: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(true);
+                let want = super::tray_visible();
+                if SHOWN.swap(want, std::sync::atomic::Ordering::SeqCst) != want {
+                    if let Some(button) = self.ivars().button.as_ref() {
+                        unsafe {
+                            let _: () = msg_send![button,
+                                setAlphaValue: if want { 1.0 } else { 0.0 }];
+                        }
+                    }
+                }
+            }
         }
 
         unsafe impl NSObjectProtocol for TetherlyTrayTarget {}
@@ -237,7 +283,10 @@ mod macos_tray {
         mtm: MainThreadMarker,
     ) {
         let frame = button.bounds();
-        let drop = TrayDropView::alloc(mtm).set_ivars(TrayIvars { ui_port });
+        let drop = TrayDropView::alloc(mtm).set_ivars(TrayIvars {
+            ui_port,
+            button: None,
+        });
         let drop: Retained<TrayDropView> = unsafe { msg_send![super(drop), initWithFrame: frame] };
         let file_type = unsafe { NSPasteboardTypeFileURL };
         drop.registerForDraggedTypes(&NSArray::from_slice(&[file_type]));
@@ -266,7 +315,11 @@ mod macos_tray {
 
         let bar = NSStatusBar::systemStatusBar();
         let item = bar.statusItemWithLength(-1.0);
-        let target = TetherlyTrayTarget::alloc().set_ivars(TrayIvars { ui_port });
+        let button_ref = item.button(mtm);
+        let target = TetherlyTrayTarget::alloc().set_ivars(TrayIvars {
+            ui_port,
+            button: button_ref.clone(),
+        });
         let target: Retained<TetherlyTrayTarget> = unsafe { msg_send![super(target), init] };
         let target_ref: &AnyObject = target.as_ref();
 
@@ -391,6 +444,22 @@ mod macos_tray {
 
         item.setMenu(Some(&menu));
 
+        // §6.3 tray takeover: run-loop timer polls the shared visibility
+        // flag on the main thread and folds it into the status item (see
+        // `trayVisibilityTick:`). Same pattern as the popover refresh timer.
+        unsafe {
+            let timer =
+                objc2_foundation::NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                    0.5,
+                    &target,
+                    sel!(trayVisibilityTick:),
+                    None,
+                    true,
+                );
+            objc2_foundation::NSRunLoop::currentRunLoop()
+                .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+        }
+
         std::thread::spawn(move || {
             let _ = rx.recv();
             std::process::exit(0);
@@ -412,7 +481,7 @@ pub fn spawn_tray(_ui_port: u16, _device_alias: String) -> Option<TrayHandle> {
 mod windows_tray {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows_sys::Win32::UI::Shell::{
         Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
@@ -420,9 +489,10 @@ mod windows_tray {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
         DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage, RegisterClassExW,
-        SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, HICON, HMENU, IDI_APPLICATION,
-        MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND,
-        WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSEXW,
+        SetForegroundWindow, SetTimer, TrackPopupMenuEx, TranslateMessage, HICON, HMENU,
+        IDI_APPLICATION, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, TPM_RIGHTBUTTON, WM_APP,
+        WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
+        WNDCLASSEXW,
     };
 
     const WM_TRAYICON: u32 = WM_APP + 42;
@@ -431,6 +501,11 @@ mod windows_tray {
     const IDM_DASHBOARD: usize = 1002;
     const IDM_ROAMING: usize = 1003;
     const IDM_EXIT: usize = 1004;
+    /// The notification-area icon's id (matches `nid.uID` below).
+    const TRAY_ICON_ID: u32 = 100;
+    /// Visibility-poll timer id (§6.3 tray takeover) and cadence.
+    const VIS_TIMER_ID: usize = 0xC0FF_EE02;
+    const VIS_POLL_MS: u32 = 500;
 
     fn to_wide(s: &str) -> Vec<u16> {
         OsStr::new(s).encode_wide().chain(Some(0)).collect()
@@ -506,6 +581,24 @@ mod windows_tray {
             }
             WM_CLOSE => {
                 DestroyWindow(hwnd);
+                0
+            }
+            // §6.3 tray takeover: poll the shared visibility flag and add /
+            // delete the notification-area icon accordingly.
+            WM_TIMER if wparam as u32 as usize == VIS_TIMER_ID => {
+                let want = super::tray_visible();
+                static SHOWN: AtomicBool = AtomicBool::new(true);
+                if SHOWN.swap(want, Ordering::SeqCst) != want {
+                    let mut nid = std::mem::zeroed::<NOTIFYICONDATAW>();
+                    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+                    nid.hWnd = hwnd;
+                    nid.uID = TRAY_ICON_ID;
+                    if want {
+                        Shell_NotifyIconW(NIM_ADD, &nid);
+                    } else {
+                        Shell_NotifyIconW(NIM_DELETE, &nid);
+                    }
+                }
                 0
             }
             WM_DESTROY => {
@@ -953,7 +1046,7 @@ mod windows_tray {
             let mut nid = std::mem::zeroed::<NOTIFYICONDATAW>();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
-            nid.uID = 100;
+            nid.uID = TRAY_ICON_ID;
             nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
             nid.uCallbackMessage = WM_TRAYICON;
             nid.hIcon = icon;
@@ -963,6 +1056,10 @@ mod windows_tray {
             nid.szTip[..len].copy_from_slice(&tip[..len]);
 
             Shell_NotifyIconW(NIM_ADD, &nid);
+
+            // §6.3 tray takeover: poll the shared visibility flag so a
+            // client claim / watchdog reclaim swaps the icon within ~0.5s.
+            SetTimer(hwnd, VIS_TIMER_ID, VIS_POLL_MS, None);
 
             let hwnd_send = hwnd as usize;
             std::thread::spawn(move || {

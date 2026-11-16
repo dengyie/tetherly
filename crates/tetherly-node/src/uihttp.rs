@@ -2473,6 +2473,46 @@ mod tests {
         let (code, _) = v1_call(port, "PATCH", "/api/v1/settings", &auth, r#"{"nama":"x"}"#).await;
         assert_eq!(code, 400);
 
+        // §6.3 tray takeover: fresh node reports the built-in owner; the
+        // shell claims `client`; unknown owners are rejected; the claim is
+        // released again with `daemon`.
+        let (code, body) = v1_call(port, "GET", "/api/v1/settings", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["general"]["tray_owner"], "daemon", "{body}");
+        let (code, body) = v1_call(
+            port,
+            "PATCH",
+            "/api/v1/settings",
+            &auth,
+            r#"{"tray_owner":"client"}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["general"]["tray_owner"], "client", "{body}");
+        assert_eq!(node.tray_owner(), tetherly_api::TrayOwner::Client);
+        // Unknown owner value fails strict parsing.
+        let (code, _) = v1_call(
+            port,
+            "PATCH",
+            "/api/v1/settings",
+            &auth,
+            r#"{"tray_owner":"bogus"}"#,
+        )
+        .await;
+        assert_eq!(code, 400);
+        // Release restores the built-in tray.
+        let (code, body) = v1_call(
+            port,
+            "PATCH",
+            "/api/v1/settings",
+            &auth,
+            r#"{"tray_owner":"daemon"}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["general"]["tray_owner"], "daemon", "{body}");
+        assert_eq!(node.tray_owner(), tetherly_api::TrayOwner::Daemon);
+
         // M2d: transfers clear (empty list is a no-op but answers 200).
         let (code, body) = v1_call(port, "DELETE", "/api/v1/transfers", &auth, "").await;
         assert_eq!(code, 200, "{body}");

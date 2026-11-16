@@ -665,6 +665,9 @@ impl Node {
             drag_target: Mutex::new(DragTarget::new()),
             pending_drag_drops: Mutex::new(HashMap::new()),
             transfer_drag_ids: Mutex::new(HashMap::new()),
+            tray_owner: Mutex::new(tetherly_api::TrayOwner::Daemon),
+            tray_keepalive: Mutex::new(None),
+            tray_sse_seen: std::sync::atomic::AtomicBool::new(false),
         });
         Ok(Self { shared })
     }

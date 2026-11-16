@@ -218,6 +218,7 @@ mod events {
                             reconnect: true,
                             loopback_only: false,
                             overlay_enabled: true,
+                            tray_owner: TrayOwner::Daemon,
                         },
                         transfer: SettingsTransfer { auto_accept: false },
                     },

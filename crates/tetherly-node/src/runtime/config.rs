@@ -190,6 +190,76 @@ impl Node {
         });
     }
 
+    /// Current tray owner (§6.3).
+    pub fn tray_owner(&self) -> tetherly_api::TrayOwner {
+        *self.shared.tray_owner.lock().expect("tray_owner")
+    }
+
+    /// Claim or release the tray surface (§6.3). A `client` claim hides the
+    /// built-in tray and starts the keepalive window; a `daemon` value
+    /// restores the built-in tray immediately. Returns the new owner and
+    /// whether the visible state actually changed (idempotent claims are a
+    /// no-op). `emit` mirrors `update_config`'s settings.changed push so
+    /// every subscriber sees the new `tray_owner`.
+    pub fn set_tray_owner(
+        &self,
+        owner: tetherly_api::TrayOwner,
+    ) -> Result<(tetherly_api::TrayOwner, bool), tetherly_core::CoreError> {
+        let mut slot = self.shared.tray_owner.lock().expect("tray_owner");
+        if *slot == owner {
+            return Ok((owner, false));
+        }
+        *slot = owner;
+        match owner {
+            // Fresh claim: the keepalive window starts now.
+            tetherly_api::TrayOwner::Client => {
+                *self.shared.tray_keepalive.lock().expect("tray_keepalive") =
+                    Some(self.shared.clock.unix_ms());
+            }
+            // Release or reclaim: forget any stale keepalive.
+            tetherly_api::TrayOwner::Daemon => {
+                *self.shared.tray_keepalive.lock().expect("tray_keepalive") = None;
+                self.shared.tray_sse_seen.store(false, Ordering::Release);
+            }
+        }
+        drop(slot);
+        self.emit_config_changed();
+        Ok((owner, true))
+    }
+
+    /// The shell (or the v1 SSE layer) feeds this while it holds the tray:
+    /// any activity restarts the reclaim window.
+    pub fn tray_keepalive(&self) {
+        if self.tray_owner() == tetherly_api::TrayOwner::Client {
+            *self.shared.tray_keepalive.lock().expect("tray_keepalive") =
+                Some(self.shared.clock.unix_ms());
+        }
+    }
+
+    /// Record that at least one v1 SSE subscriber connected. The daemon
+    /// binary's tray watchdog reads this to distinguish "shell never showed
+    /// up after claiming" from "shell went silent mid-run".
+    pub fn mark_tray_sse_seen(&self) {
+        self.shared.tray_sse_seen.store(true, Ordering::Release);
+    }
+
+    /// Whether the claimed tray's keepalive window has expired: the claim
+    /// (or last keepalive) is older than `TRAY_TAKEOVER_RECLAIM_MS` while
+    /// `tray_owner == client`. `false` while unclaimed.
+    pub fn tray_keepalive_expired(&self) -> bool {
+        if self.tray_owner() != tetherly_api::TrayOwner::Client {
+            return false;
+        }
+        let now = self.shared.clock.unix_ms();
+        self.shared
+            .tray_keepalive
+            .lock()
+            .expect("tray_keepalive")
+            .is_some_and(|last_ms| {
+                now.saturating_sub(last_ms) >= tetherly_api::TRAY_TAKEOVER_RECLAIM_MS
+            })
+    }
+
     pub fn lan_only(&self) -> bool {
         !self.overlay_status().present
     }

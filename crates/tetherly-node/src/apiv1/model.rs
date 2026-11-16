@@ -298,6 +298,7 @@ pub fn settings(node: &Node) -> Settings {
             reconnect: r.reconnect,
             loopback_only: r.loopback_only,
             overlay_enabled: r.overlay_enabled,
+            tray_owner: node.tray_owner(),
         },
         transfer: SettingsTransfer {
             auto_accept: a.enabled,

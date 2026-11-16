@@ -391,7 +391,9 @@ pub(crate) async fn run(
     );
     let node = Node::start(cfg)?;
     info!(device_id = %node.identity().device_id(), "run");
-    info!("ui http://127.0.0.1:45716");
+    // The REAL bound port (the old hardcode lied whenever --ui-port moved
+    // the listener; spawn_ui binds after `Node::start` resolves cfg).
+    info!(ui = node.ui_port(), "ui http://127.0.0.1");
     if let Some(inbound) = inbound {
         node.spawn_ancs_pump(inbound);
         info!(
@@ -599,6 +601,28 @@ pub(crate) async fn run(
     });
     // Spawn cross-platform desktop system tray presence (Mac status bar / Windows notification area)
     let _tray = tetherly_node::platform::tray::spawn_tray(ui_port, device_name);
+
+    // §6.3 tray takeover watchdog: while a shell claims `tray_owner=client`
+    // the built-in tray hides; if the shell goes silent past the reclaim
+    // window (keepalive fed by the SSE layer per frame + ping), the tray
+    // comes back automatically. Cheap 1s poll; state changes are rare.
+    {
+        let node = node.clone_handle();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if node.tray_keepalive_expired()
+                    && matches!(
+                        node.set_tray_owner(tetherly_api::TrayOwner::Daemon),
+                        Ok((_, true))
+                    )
+                {
+                    tracing::warn!("tray reclaim: shell keepalive expired; built-in tray restored");
+                    tetherly_node::platform::tray::tray_set_visible(true);
+                }
+            }
+        });
+    }
 
     node.run().await?;
     Ok(())
