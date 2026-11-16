@@ -1368,3 +1368,10 @@
 - 三 bug：①events.rs 成功路径从不 emit Live（SinkEvent 枚举修复）②setup 先 spawn 后注册监听器（首个 Live 落空，顺序倒转）③PING 15s 不喂 keepalive 且 > 10s 回收窗口（5s + ping 臂补喂）。③在生产日志 5 次 reclaim 实证，确定性 bug。
 - 端到端 t+5/17/32s 三测全 client。门禁 1032×2 + 壳 28 + 双 clippy + deny。三修复待发 v0.2.60。
 - 教训：托盘冒烟要先清场（本地 e2e daemon 的托盘与生产托盘同貌，位置漂移干扰判定）；watchdog 在 bin 不在 Node，测试需轮询复刻才不假绿。
+
+## §149 (2026-11-17) — peers 写命令迁 v1 + v0.2.60 发版/部署/生产复验
+- 五写命令（connect/block/unblock/alias/unpair）→ v1 设备动作；RED 断言五旧路由命中归零；冒烟 :16465 五错误路径 + legacy_routes: []。附录更新：剩余 tags（读改写 §150）/blocked（契约缺 reason）/disconnect（无 v1 动作）/link·heartbeat（diagnostics 域）。
+- 门禁：首跑 10 连败=冒烟 daemon 并发负载竞态（§124 家族），清场后 1034 ×2 稳定；CI 链 §147 复跑/bump/§148/§149（43921252135）全绿。
+- 发版：tag 314f996 → release 43923712802 七 job 绿、11 资产；deploy 双端绿（mac pid 21775 / win 20976，保护进程 3/3，SYSTEM）。
+- 生产壳接管复验通过：claim 即时 + t+40s 存活 + 壳重启再 claim t+28s 存活；daemon 日志 tray reclaim 部署前 11 次 → 部署后 0 次（决定性证据）。
+- 教训：①macOS 26 移除了 NSStatusItem 的 AXAlphaValue，像素/AX 探针失效，reclaim 日志计数是接管状态权威证据；②open 已运行实例不换进程，claim 是 per-process once，复验前先 kill 旧壳；③截图取证在时钟秒数刷新区永远有抖动，别在菜单栏右侧做像素 diff。

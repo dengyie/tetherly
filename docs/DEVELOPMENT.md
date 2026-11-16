@@ -9396,3 +9396,14 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **漏网调用点清零（RED→GREEN）**：盘点发现已迁路由仍有 2 处真实调用——`tetherly ping`（cmd_peers）RTT 锚定 `GET /api/health` → 改 `GET /api/v1/system`（version/pid/uptime 全备，pong 行去 legacy `status` 常量字段）；cmd_files send-watch 轮询 `GET /api/state` → `GET /api/v1/transfers`（同字段名零改动）。`ping_command_round_trips_v1_system`（真 daemon + legacy_routes 断言）RED 抓到后归零。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1033 全绿（+1）；deny 四项 ok。已迁路由真实调用点归零（`/api/peers` 剩 23 处全是写操作，属下一波）。
 - **发版检查单**：release workflow `--ci` flag 在位（§140）；tag 指向含本节的最新 commit；release 后 deploy v0.2.60 并复验生产壳接管（§147 三修复首次上线）。
+
+## 149. M5：peers 五写命令迁 v1 设备动作 + v0.2.60 发版/部署/生产壳接管复验（tag v0.2.60）
+
+接 §148。M5 第二批写命令迁移 + 发版闭环（§147 三修复首次上线生产）。
+
+- **peers 五写命令迁 v1（RED→GREEN，`314f996`）**：connect/unblock/alias/unpair/block 五命令从旧 `POST /api/peers/*` 换到 v1 设备动作——`POST /devices/{id}/connect`（already_connected 折入 online）、`POST /devices/{id}/block`（already_blocked/终止会话细节折入）、`DELETE /devices/{id}/block`（404→友好文案）、`PATCH /devices/{id} {"alias"}`（Device 回读）、`DELETE /devices/{id}`（**204/404 语义 1:1**：forgotten/not-paired）。daemon 侧统一 resolve（id/alias/前缀），CLI 零解析逻辑。RED 测试 `peers_write_commands_round_trip_v1_device_actions` 断言五条旧路由 diagnostics 命中后归零；真 daemon 冒烟（:16465）五条错误路径 + `legacy_routes: []`。附录同步：五命令入"已迁移第二批"；剩余待迁=tags（PATCH devices 是全量替换，CLI 是增删语义→读改写方案 §150）、blocked（Device 缺 reason 字段，契约缺口）、disconnect（无 v1 动作）、link/heartbeat（diagnostics 域待扩展）。
+- **门禁（如实）**：fmt 绿；双 clippy 0 错；workspace 首跑 10 连败（单套 55/10）——冒烟 daemon 未清场与测试并发抢 CPU 的负载竞态，清场后隔离复跑绿、**1034 ×2 稳定**（+1）；deny 四项 ok。CI 链：§147 复跑绿、bump 绿、§148 绿、§149（run 43921252135）全绿（ubuntu/macos/windows/android/deny）。
+- **v0.2.60 发版**：tag `314f996` → release workflow（run 43923712802）7 job 全绿（build-linux、build-desktop×2、bundle-desktop×2、build-android、publish），**11 资产齐**（对照 v0.2.59 基线：cli×4 + daemon×3 + so/apk + dmg + msi，版本号正确）。
+- **生产部署 v0.2.60 双端**：mac 重打包+重启（pid 21775，健康门禁过，accessibility hooks active）；windows NTFS 热重启（old_pid 4308 → new_pid 20976，版本门禁 0.2.60 ✓，保护进程 3/3 完好，SYSTEM 权限 ✓）。
+- **生产壳接管端到端复验（§147 三修复首次上线，通过）**：v0.2.60 dmg 装 `/Applications/Tetherly Client.app`（ditto + 去 quarantine），壳启动即 claim `tray_owner=client` 且 **t+40s 存活**（旧版必在 10s 被回收）；**决定性证据**：daemon 日志 `tray reclaim` 计数——部署前（v0.2.59）11 次（16:38–17:06 六十分钟十次，§147 取证时 5 次的延续），部署后（v0.2.60，含手动 claim/release 往返、壳进程重启再 claim、t+28s 复测）**0 次**。取证坑：macOS 26 已从 NSStatusItem 移除 `AXAlphaValue` 属性（AX 枚举只有 role/title/frame），§147 的像素级探针失效——日志 reclaim 计数成为接管状态的权威证据源；另 `open` 已运行实例不换进程，claim 是 per-process once 门闩，复验重启需先 kill 旧壳。
+- **M5 迁移战果**：读取 6 + 写 4+5 = 15 命令迁完；旧路由真实调用点只剩旧控制台 + tags/blocked/disconnect/dial（均有明确 disposition）。
