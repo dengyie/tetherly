@@ -1314,3 +1314,9 @@
 - 托盘：open_client_or_dashboard（deep link 优先、浏览器回退）接 macOS openDashboard + Windows 左键/双击/IDM_DASHBOARD；Windows start 对未注册 scheme 偏乐观记边界。
 - popover 全退役：platform/popover.rs（387 行）+ tray.rs Windows 子模块（385 行）+ IDM_PANEL + 菜单项/selector。
 - 门禁：fmt/双 target clippy 0 错；workspace 1019 全绿；deny ok。真 daemon 45826 实证全路由。
+
+## 2026-11-16 v0.2.59 发版 + bundle-desktop 首跑验证
+- bump 三处版本位 + docs 基线（3db858a），ci 绿后 tag 触发 release。
+- 首跑如实失败：--no-dev-server 是 tauri-cli v1 flag，v2 双平台秒死（43859667167）；fix → --ci（033d3b3），删 tag 重打重触发。
+- 第二次全绿（43862007888）：.dmg 12m58s + .msi 16m12s 首次产出，Release 12 产物齐，publish ✓。
+- 待办：deploy.sh --tag v0.2.59 生产切换（用户执行）；alphaValue 真机冒烟；M4 一周验收窗口自部署起算。

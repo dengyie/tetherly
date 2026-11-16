@@ -9292,3 +9292,14 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **集成验收（本机真 daemon，隔离端口 45826，TETHERLY_DATA_DIR=/tmp/tetherly-m4-test）**：`/` 出 SPA 入口（引 `/assets/app.js`）；`/assets/app.js` 200 text/javascript、`/assets/index.css` 200 text/css、`/assets/nope.js` 404；`/legacy/` 旧控制台、`/legacy/deep/link` 200；`/api/v1/health` 200 不受影响。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错（windows-gnu 报 `IDM_PANEL` dead_code 已删）；`cargo test --workspace --locked` 1019 全绿（+2）；`cargo deny check` 四项 ok。
 - **边界（M4 验收/余项）**：§8 验收是"生产两端连续使用一周没有回退"——随下次发版部署后观察；`/next/` 旧路径不再服务（未留重定向，书签自行迁移；`next_url` 已同指 `/` 无影响）；M5 才删 `ui/index.html` 与 `/legacy/`、下线旧 `/api/*` 别名。
+
+## 140. v0.2.59 发版：M2b/M3/M4 全量上线 + bundle-desktop job 首跑验证（一败一修）
+
+接 §139。v0.2.58 以来 26 个 commit 一次发版：M2b Web SPA、M3 桌面壳全量（托盘状态/通知/自启/深链接/tray_owner/client.token）、M4 路由切换 + popover 退役。
+
+- **发版流程**：三处版本位 bump（workspace Cargo.toml / tauri.conf.json / package.json → 0.2.59，Cargo.lock 随动）+ docs 基线块更新（`3db858a`）；main ci 43857721546 全绿后打 tag `v0.2.59` 触发 release。
+- **bundle-desktop 首跑如实失败（run 43859667167）**：`cargo tauri build --no-dev-server` 是 tauri-cli **v1** 的 flag，v2 clap 直接 `unexpected argument` 退出——macOS/Windows 两腿都在参数解析秒死，publish 被 needs 挡住无半成品 Release。正是首跑验证要抓的问题：本地从未实跑过这条 CI 命令。
+- **修复（`033d3b3`）**：`--no-dev-server` → `--ci`（v2 有效 flag；tauri.conf.json 无 devUrl 本就不启 dev server，`--ci` 额外跳过交互提示）。删旧 tag 重打指向修复 commit 重触发。
+- **第二次 release（run 43862007888）全绿**：build-linux 3m49s / build-desktop ×2 / **bundle-desktop macOS 12m58s（.dmg）+ Windows 16m12s（.msi）** / build-android / publish 11s。Release 12 产物齐全：daemon+CLI 三平台、macOS viewer、Android apk+so、**Tetherly_0.2.59_aarch64.dmg、Tetherly_0.2.59_x64_en-US.msi**。main ci（workflow fix）43861828320 亦绿。
+- **部署**：生产随 `scripts/deploy.sh --target all --tag v0.2.59` 切换；部署后线上 daemon 契约含 tray_owner/client.token（§137/§138 的 PATCH 不再 400），`/` 即新 SPA。M4 验收窗口（生产两端一周无回退）自部署日起算。
+- **边界**：alphaValue 托盘隐藏观感留真机冒烟（装 .dmg 后看菜单栏空位）；`/next/` 旧书签不再服务（next_url 已同指 `/`）；M5 收敛待 M4 验收通过后启动。
