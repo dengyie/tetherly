@@ -1301,3 +1301,10 @@
 - 集成验收（隔离端口真 daemon）：GET daemon→PATCH client→bogus 400→SSE 3s 喂狗→静默 12s→daemon 回收 + 日志确认。
 - 验证：fmt/双 clippy/workspace 40 段/deny 全绿；壳 27 测试。windows-gnu 下 use super::* 触发 unused imports（模块只依赖外部路径）——测试模块导入按需收窄。
 - 部署注意：线上 0.2.58 daemon 旧契约，PATCH tray_owner 会 400；随下次部署切换。留下轮：Windows client.token、通知点击聚焦、bundle job CI 首跑、alphaValue 隐藏的真机观感。
+
+## 2026-11-16 M3-r10：client.token 双 token 鉴权（§4.4）落地
+- daemon：granted_tier(daemon, client, presented) 双凭据；issue_client/read_client/client_token_path（CREATE_NEW 原子、Unix 0600、Windows 复用保护 DACL + --data-dir 指用户 LOCALAPPDATA）；bind_and_spawn_with_token 同时签发两枚，client 失败仅 WARN。
+- 壳：read_api_token 优先 client.token → api.token；通知点击定案不做（插件无点击回调，mobile-only on_action），记边界。
+- 测试：apitoken 16（+7）、uihttp 集成 v1_client_token（Write 过/Admin 403/伪造 401）、壳 token 优先级。
+- 门禁：fmt/clippy host+win-gnu 0 错；workspace 1017 全绿（首跑 phase1 §124 flake 复跑绿）；deny 四项 ok。
+- M3 余项：bundle-desktop CI 首跑、alphaValue 真机冒烟、通知点击（原生 delegate）、409 interactive（opener 降权已覆盖）。

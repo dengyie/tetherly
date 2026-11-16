@@ -28,25 +28,31 @@ pub fn daemon_data_dir() -> PathBuf {
     PathBuf::from(".tetherly")
 }
 
-/// Read the API token minted by the daemon: `<data_dir>/api.token`, 64 hex
-/// chars, mode 0600. `TETHERLY_API_TOKEN` overrides, matching the CLI.
+/// Read the API token minted by the daemon. `TETHERLY_API_TOKEN` overrides,
+/// matching the CLI. Otherwise prefer the §4.4 client token
+/// (`<data_dir>/client.token`, Write tier) the Windows SYSTEM daemon mints
+/// for the interactive user, falling back to the daemon token
+/// (`api.token`, Admin) that macOS user-session daemons rely on.
 pub fn read_api_token() -> std::io::Result<String> {
     if let Ok(t) = std::env::var("TETHERLY_API_TOKEN") {
         if !t.is_empty() {
             return Ok(t);
         }
     }
-    let path = daemon_data_dir().join("api.token");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| std::io::Error::other(format!("{}: {e}", path.display())))?;
-    let t = raw.trim().to_string();
-    if t.is_empty() {
-        return Err(std::io::Error::other(format!(
-            "{}: empty token",
-            path.display()
-        )));
+    let dir = daemon_data_dir();
+    for name in ["client.token", "api.token"] {
+        let path = dir.join(name);
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            let t = raw.trim().to_string();
+            if !t.is_empty() {
+                return Ok(t);
+            }
+        }
     }
-    Ok(t)
+    Err(std::io::Error::other(format!(
+        "{}: no client.token or api.token",
+        dir.display()
+    )))
 }
 
 /// The loopback UI port: `TETHERLY_UI_PORT` overrides, else the default.
@@ -87,12 +93,21 @@ pub(super) mod tests {
         std::fs::write(dir.join("api.token"), "abc123\n").unwrap();
         unsafe { std::env::set_var("TETHERLY_DATA_DIR", &dir) };
         assert_eq!(read_api_token().unwrap(), "abc123");
+
+        // §4.4: the client token wins when both exist (Windows SYSTEM
+        // daemon mints it into the user profile), and a client.token alone
+        // is enough.
+        std::fs::write(dir.join("client.token"), "clitok").unwrap();
+        assert_eq!(read_api_token().unwrap(), "clitok");
+        std::fs::remove_file(dir.join("api.token")).unwrap();
+        assert_eq!(read_api_token().unwrap(), "clitok");
+        std::fs::remove_file(dir.join("client.token")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
-        // Missing file: an error carrying the path, never a panic.
+        // Missing file: an error carrying the data dir, never a panic.
         unsafe { std::env::set_var("TETHERLY_DATA_DIR", "/nonexistent-tetherly-shell-test") };
         let err = read_api_token().unwrap_err().to_string();
-        assert!(err.contains("api.token"), "{err}");
+        assert!(err.contains("client.token"), "{err}");
         unsafe { std::env::remove_var("TETHERLY_DATA_DIR") };
     }
 }

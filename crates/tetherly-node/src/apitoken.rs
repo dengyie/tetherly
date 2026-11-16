@@ -18,12 +18,22 @@ use std::path::{Path, PathBuf};
 
 /// File name of the token inside the data dir.
 pub const TOKEN_FILE: &str = "api.token";
+/// File name of the client token inside the data dir (§4.4).
+pub const CLIENT_TOKEN_FILE: &str = "client.token";
 /// Request header carrying the token.
 pub const TOKEN_HEADER: &str = "x-tetherly-token";
 
 /// Path of the token file for `data_dir`.
 pub fn token_path(data_dir: &Path) -> PathBuf {
     data_dir.join(TOKEN_FILE)
+}
+
+/// Path of the client token file for `data_dir` (§4.4). Same directory as
+/// [`token_path`]; on Windows the SYSTEM-launched daemon passes the console
+/// user's LOCALAPPDATA as `data_dir` (`--data-dir` from the launcher), so
+/// the file lands in the user's profile with a user-SID-only DACL.
+pub fn client_token_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(CLIENT_TOKEN_FILE)
 }
 
 /// True when `(method, path)` is a privileged route that needs the token.
@@ -95,10 +105,13 @@ pub fn v1_required_tier(method: &str, path: &str) -> Option<Tier> {
 }
 
 /// Tier a presented credential grants. The daemon-minted token grants
-/// [`Tier::Admin`]; anything else (including an unminted token) grants
-/// nothing.
-pub fn granted_tier(expected: &str, presented: &str) -> Option<Tier> {
-    token_matches(expected, presented).then_some(Tier::Admin)
+/// [`Tier::Admin`]; the §4.4 client token grants [`Tier::Write`] (read +
+/// write, never admin); anything else grants nothing.
+pub fn granted_tier(daemon: &str, client: Option<&str>, presented: &str) -> Option<Tier> {
+    if token_matches(daemon, presented) {
+        return Some(Tier::Admin);
+    }
+    token_matches(client.unwrap_or(""), presented).then_some(Tier::Write)
 }
 
 /// Constant-time comparison of a presented token with the expected one.
@@ -235,6 +248,76 @@ pub fn read(data_dir: &Path) -> Option<String> {
     is_token(s).then(|| s.to_string())
 }
 
+/// Mint the §4.4 client token (grants [`Tier::Write`]) and replace
+/// `<data_dir>/client.token` with it, same `CREATE_NEW` discipline as
+/// [`issue`]. Unix: 0600. Windows: protected DACL granting full control to
+/// the console user's SID and SYSTEM only — the caller passes the console
+/// user's LOCALAPPDATA as `data_dir`, so the file is readable by the shell
+/// running as that user and by the SYSTEM daemon, nobody else.
+pub fn issue_client(data_dir: &Path) -> std::io::Result<String> {
+    let mut raw = [0u8; 32];
+    getrandom::getrandom(&mut raw).map_err(std::io::Error::other)?;
+    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let path = client_token_path(data_dir);
+    let mut last_err = None;
+    for _ in 0..5 {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        match create_client_private(&path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(token.as_bytes())?;
+                f.sync_all()?;
+                return Ok(token);
+            }
+            // Someone re-created the file between remove and create: retry.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_err = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("client token create raced")))
+}
+
+/// Read the client token file for shell use. `None` when missing, unreadable
+/// or malformed — or (Unix) when the file's permissions are wider than
+/// owner-only, so a token a foreign principal could read is refused.
+pub fn read_client(data_dir: &Path) -> Option<String> {
+    let path = client_token_path(data_dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).ok()?.permissions().mode();
+        if mode & 0o077 != 0 {
+            return None;
+        }
+    }
+    let s = std::fs::read_to_string(path).ok()?;
+    let s = s.trim();
+    is_token(s).then(|| s.to_string())
+}
+
+#[cfg(unix)]
+fn create_client_private(path: &Path) -> std::io::Result<std::fs::File> {
+    create_private(path)
+}
+
+/// Windows client-token DACL: full control for SYSTEM, Administrators and
+/// the file owner (the console user, because the daemon writes into *their*
+/// LOCALAPPDATA with `--data-dir`); no inherited ACEs. The generic
+/// `api.token` DACL already is exactly that, so it is reused.
+#[cfg(windows)]
+fn create_client_private(path: &Path) -> std::io::Result<std::fs::File> {
+    create_private(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_client_private(path: &Path) -> std::io::Result<std::fs::File> {
+    create_private(path)
+}
+
 /// Dashboard URL that hands the token to the page via the URL fragment
 /// (fragments never reach the server or its logs).
 pub fn dashboard_url(ui_port: u16, token: Option<&str>) -> String {
@@ -277,10 +360,125 @@ mod tests {
     fn granted_tier_is_admin_for_the_daemon_token_and_none_otherwise() {
         use super::{granted_tier, Tier};
         let tok = "a".repeat(64);
-        assert_eq!(granted_tier(&tok, &tok), Some(Tier::Admin));
-        assert_eq!(granted_tier(&tok, &"b".repeat(64)), None);
-        assert_eq!(granted_tier(&tok, ""), None);
-        assert_eq!(granted_tier("", ""), None, "unminted token fails closed");
+        assert_eq!(granted_tier(&tok, None, &tok), Some(Tier::Admin));
+        assert_eq!(granted_tier(&tok, None, &"b".repeat(64)), None);
+        assert_eq!(granted_tier(&tok, None, ""), None);
+        assert_eq!(
+            granted_tier("", None, ""),
+            None,
+            "unminted token fails closed"
+        );
+    }
+
+    /// §4.4: the client token the daemon mints for the interactive user
+    /// grants Write (read+write, no admin); the daemon token still grants
+    /// Admin. Either token satisfies the tier the other cannot.
+    #[test]
+    fn granted_tier_is_write_for_the_client_token() {
+        use super::{granted_tier, Tier};
+        let (daemon, client) = ("a".repeat(64), "c".repeat(64));
+        assert_eq!(
+            granted_tier(&daemon, Some(&client), &client),
+            Some(Tier::Write)
+        );
+        assert_eq!(
+            granted_tier(&daemon, Some(&client), &daemon),
+            Some(Tier::Admin)
+        );
+        assert_eq!(granted_tier(&daemon, Some(&client), &"b".repeat(64)), None);
+        // An unminted client token slot fails closed.
+        assert_eq!(granted_tier(&daemon, None, &client), None);
+        assert_eq!(granted_tier(&daemon, Some(&client), ""), None);
+    }
+
+    #[test]
+    fn v1_admin_routes_refuse_the_client_token_via_tier_math() {
+        use super::{v1_required_tier as t, Tier};
+        // Write-tier routes accept a Write grant; admin routes need Admin.
+        assert!(t("PATCH", "/api/v1/settings").unwrap() <= Tier::Write);
+        assert!(t("POST", "/api/v1/system/restart").unwrap() > Tier::Write);
+    }
+
+    #[test]
+    fn client_token_issue_and_rotation() {
+        let dir = temp_dir("client");
+        let a = issue_client(&dir).expect("client token minted");
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(read_client(&dir).as_deref(), Some(a.as_str()));
+        let b = issue_client(&dir).expect("rotated");
+        assert_ne!(a, b, "every start rotates the client token");
+        assert_eq!(read_client(&dir).as_deref(), Some(b.as_str()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(client_token_path(&dir))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "client.token stays owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two token files are independent: minting one never clobbers the
+    /// other, and a planted client.token is replaced like a planted api.token.
+    #[test]
+    fn client_token_is_independent_of_daemon_token() {
+        let dir = temp_dir("independent");
+        let daemon = issue(&dir).unwrap();
+        let client = issue_client(&dir).unwrap();
+        assert_ne!(daemon, client);
+        assert_eq!(read(&dir).as_deref(), Some(daemon.as_str()));
+        assert_eq!(read_client(&dir).as_deref(), Some(client.as_str()));
+        std::fs::write(client_token_path(&dir), "0".repeat(64)).unwrap();
+        let fresh = issue_client(&dir).unwrap();
+        assert_ne!(fresh, "0".repeat(64));
+        assert_eq!(read_client(&dir).as_deref(), Some(fresh.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §4.4: only user-writable files count as client tokens. A `client.token`
+    /// whose owner differs from the reader (a foreign SID on Windows) must
+    /// refuse — modeled on Unix by a group/world-readable file.
+    #[cfg(unix)]
+    #[test]
+    fn read_client_rejects_a_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("foreign");
+        std::fs::write(client_token_path(&dir), "d".repeat(64)).unwrap();
+        let path = client_token_path(&dir);
+        let mut perm = std::fs::metadata(&path).unwrap().permissions();
+        perm.set_mode(0o644);
+        std::fs::set_permissions(&path, perm).unwrap();
+        assert_eq!(read_client(&dir), None, "world-readable file refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `read_client` follows the same trim/is_token rules as `read`.
+    #[test]
+    fn read_client_rejects_malformed_file() {
+        let dir = temp_dir("client-malformed");
+        assert_eq!(read_client(&dir), None);
+        std::fs::write(client_token_path(&dir), "short").unwrap();
+        assert_eq!(read_client(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows resolves the client token inside the *console user's* profile
+    /// (%LOCALAPPDATA%\tetherly), not the SYSTEM systemprofile tree; Unix
+    /// keeps it next to api.token. This test pins the Unix shape and the
+    /// daemon-side env override (the Windows mapping is pinned in §4.4 docs).
+    #[test]
+    fn client_token_sits_beside_the_daemon_token_by_default() {
+        let dir = temp_dir("colocated");
+        assert_eq!(
+            client_token_path(&dir),
+            dir.join("client.token"),
+            "same dir as api.token; the Windows SYSTEM daemon writes it to \
+             the console user's LOCALAPPDATA via the caller-supplied data dir"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     use super::*;

@@ -9266,3 +9266,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **集成验收（本机真 daemon 实证，隔离端口 45816）**：GET→`daemon`；PATCH client→`client`；PATCH bogus→400；SSE 订阅 3s（喂狗确认 snapshot 正常）；静默 12s 后 GET→`daemon` 且日志出现 `tray reclaim: shell keepalive expired; built-in tray restored`。线上 0.2.58 daemon 是旧契约（PATCH 该字段 400），随下次部署切换。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace` 40 段全绿；`cargo deny check` 四项 ok（CI 口径）；壳 27 测试绿 + clippy 净；windows-gnu 测试编译过（exe 不能在 Mac 执行，CI 跑）；tray_owner_tests 中 `use super::*` 在 windows-gnu 下触发 unused_imports 警告（该模块只依赖外部路径），已收窄导入。
 - **边界（M3 余项）**：Windows `client.token` 签发（§4.4）、通知点击聚焦主窗、bundle-desktop job 首次 CI 实跑验证、alphaValue 隐藏对菜单栏布局的视觉影响留真机冒烟（menu-bar 空位仍在，若观感不佳后续换 `NSStatusBar.removeStatusBarItem` 方案）。
+
+## 138. 控制客户端 M3-r10：client.token 双 token 鉴权落地（§4.4）——daemon 签发降权凭据 + 壳优先读取（未发版，main 续）
+
+接 §137。M3 收尾首块：Windows SYSTEM daemon 为交互用户签发 **客户端 token**（`read+write`，不含 admin）写入 `<data_dir>/client.token`，壳优先读取它、缺失回退 daemon token。macOS（daemon 以用户身份运行）签发同样成立，壳读到的就是 Write 级 client token——admin 操作（重启 daemon 等）留给 CLI/浏览器 token，符合 §4.4 权限分层本意。
+
+- **鉴权模型（apitoken.rs）**：`granted_tier(daemon, client: Option<&str>, presented)` 双凭据判定——daemon token 命中 → `Admin`；client token 命中 → `Write`；皆否 → `None`（fail closed，含 unminted client 槽位）。tier 数学不变：`Read < Write < Admin`，v1 路由判定照旧（`v1_required_tier`）。
+- **签发（issue_client / read_client / client_token_path）**：与 `issue` 同款 32 字节 hex + remove→`CREATE_NEW` 原子替换（预植文件永不观察新 token）；Unix 0600；Windows 复用 `api.token` 的保护 DACL（SYSTEM + Administrators + owner 全控，无继承 ACE）——daemon 用 `--data-dir` 指向**交互用户**的 LOCALAPPDATA（SYSTEM launcher 已传），文件 owner 即该用户 SID，§4.4 的"ACL 只允许该用户 SID 和 SYSTEM"由此成立。`read_client` 在 Unix 额外拒绝 group/world 可读文件（异主文件=不可信凭据）。
+- **listener 接线（uihttp.rs）**：`bind_and_spawn_with_token` 同时签发两枚（client 签发失败仅 WARN，壳回退 daemon token，不致命）；`accept_loop → handle` 新增 `client_token: Option<&str>` 参数，仅 v1 tier 判定消费它——旧 `/api/*` 特权路由仍只认 daemon token。
+- **壳侧（token.rs）**：`read_api_token` 改为 `client.token` → `api.token` 依次探测（env 覆盖不变）；错误信息改报数据目录（两个文件都可能缺）。
+- **通知点击聚焦（边界定案，不实现）**：tauri-plugin-notification 桌面端 show() 走 notify-rust，**无点击回调**（builder 只有 title/body/icon/sound/auto_cancel，on_action 是 mobile-only）；macOS 真点击聚焦需原生 UNUserNotificationCenter delegate + 真机验证，超出本轮——记 §4.4 边界，用户点 Dock/托盘左键已可唤起主窗（现有路径）。
+- **测试**：apitoken +7（双 token tier 判定 2、tier 数学 1、签发/轮换/独立于 daemon token/世界可读拒绝/坏文件拒绝/路径共置 4）；uihttp 集成 `v1_client_token_grants_write_but_not_admin`（真 HTTP：client token GET system 200、POST transfers 非 401/403、restart 403 Forbidden 包络、伪造 token 401）；壳 `env_discovery_sequential` 扩 client.token 优先/单独存在/全缺报数据目录。
+- **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1017 全绿（首跑 phase1 一例 §124 竞态 flake，复跑×2 稳定绿）；`cargo deny check` 四项 ok（CI 口径）；壳 27 测试 + clippy 净。
+- **边界（M3 余项）**：bundle-desktop job 首次 CI 实跑验证、alphaValue 隐藏真机冒烟、通知点击聚焦（原生 delegate，本轮定案不做）、§4.4 `needs_interactive_session` 409 语义（现有 opener SYSTEM 降权已覆盖实际场景，未单独实现错误码）。

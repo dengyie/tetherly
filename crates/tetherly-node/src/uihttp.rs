@@ -107,6 +107,20 @@ pub async fn bind_and_spawn_with_token(
             None
         }
     };
+    // §4.4 client token: a second, lower-tier credential (Write, never
+    // Admin) the shell reads from the data dir. Best-effort — when the mint
+    // fails the shell falls back to the daemon token as before.
+    let client_token: Option<Arc<str>> = match crate::apitoken::issue_client(node.data_dir()) {
+        Ok(t) => Some(Arc::from(t)),
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %crate::apitoken::client_token_path(node.data_dir()).display(),
+                "client token file not written; shell falls back to the daemon token"
+            );
+            None
+        }
+    };
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut attempts = 0;
     let listener = loop {
@@ -123,12 +137,13 @@ pub async fn bind_and_spawn_with_token(
     info!(
         port = bound,
         token = token.is_some(),
+        client_token = client_token.is_some(),
         "ui listening (loopback only)"
     );
     let gate: Arc<str> = token.clone().unwrap_or_else(|| Arc::from(""));
     let hub = EventHub::spawn(node.clone_handle());
     tokio::spawn(async move {
-        if let Err(e) = accept_loop(listener, node, bound, gate, hub).await {
+        if let Err(e) = accept_loop(listener, node, bound, gate, client_token, hub).await {
             warn!(%e, "ui http");
         }
     });
@@ -174,6 +189,7 @@ async fn accept_loop(
     node: Node,
     ui_port: u16,
     token: Arc<str>,
+    client_token: Option<Arc<str>>,
     hub: Arc<EventHub>,
 ) -> std::io::Result<()> {
     let mut stop = node.shutdown_signal();
@@ -191,9 +207,12 @@ async fn accept_loop(
                 }
                 let node = node.clone_handle();
                 let token = token.clone();
+                let client_token = client_token.clone();
                 let hub = hub.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle(stream, node, ui_port, &token, &hub).await {
+                    if let Err(e) =
+                        handle(stream, node, ui_port, &token, client_token.as_deref(), &hub).await
+                    {
                         // Clients hanging up mid-response (closed SSE tabs,
                         // aborted fetches) are routine, not daemon faults.
                         if matches!(
@@ -219,6 +238,7 @@ async fn handle(
     node: Node,
     ui_port: u16,
     token: &str,
+    client_token: Option<&str>,
     hub: &Arc<EventHub>,
 ) -> std::io::Result<()> {
     let deadline = tokio::time::Instant::now() + REQUEST_READ_TIMEOUT;
@@ -339,7 +359,11 @@ async fn handle(
     if path == tetherly_api::PREFIX || path.starts_with("/api/v1/") || path.starts_with("/api/v1?")
     {
         if let Some(need) = crate::apitoken::v1_required_tier(method, path) {
-            let granted = crate::apitoken::granted_tier(token, presented.as_deref().unwrap_or(""));
+            let granted = crate::apitoken::granted_tier(
+                token,
+                client_token,
+                presented.as_deref().unwrap_or(""),
+            );
             if granted < Some(need) {
                 warn!(
                     method,
@@ -2261,6 +2285,41 @@ mod tests {
         // Legacy routes keep their legacy shapes.
         let (_, code, _) = raw_with_head(port, "GET", "/api/health", None).await;
         assert_eq!(code, 200);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §4.4: the client token minted beside the daemon token grants Write —
+    /// read/write v1 routes pass, admin routes answer 403 — and unknown
+    /// credentials still fail closed with 401.
+    #[tokio::test]
+    async fn v1_client_token_grants_write_but_not_admin() {
+        let (node, dir) = temp_test_node("v1_client_token");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let client = crate::apitoken::read_client(&dir).expect("client token minted");
+        let client_auth = format!("Authorization: Bearer {client}");
+
+        // Write tier: reads and settings writes pass.
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/system", Some(&client_auth)).await;
+        assert_eq!(code, 200, "{body}");
+        let (_, code, body) =
+            raw_with_head(port, "POST", "/api/v1/transfers", Some(&client_auth)).await;
+        assert_ne!(code, 401, "{body}");
+        assert_ne!(code, 403, "{body}");
+
+        // Admin tier: process lifecycle refuses with the typed envelope.
+        let (_, code, body) =
+            raw_with_head(port, "POST", "/api/v1/system/restart", Some(&client_auth)).await;
+        assert_eq!(code, 403, "{body}");
+        let e: tetherly_api::ErrorBody = serde_json::from_value(body).unwrap();
+        assert_eq!(e.error.code, tetherly_api::ErrorCode::Forbidden);
+
+        // Fail closed on a fabricated token of the right shape.
+        let bogus = format!("Authorization: Bearer {}", "f".repeat(64));
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/system", Some(&bogus)).await;
+        assert_eq!(code, 401);
+        assert_eq!(body["error"]["code"], "unauthorized");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
