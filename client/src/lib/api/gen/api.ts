@@ -42,7 +42,13 @@ name: string, alias: string | null, platform: string | null, device_type: string
  * PeerProfile group (§144): the CLI peers inventory and SPA group-by
  * view; `None` when the device has no profile or no group set.
  */
-group: string | null, };
+group: string | null, 
+/**
+ * Why the device is blocked (§151): the CLI blocked inventory and SPA
+ * blocklist; `None` when the device is not blocked or was blocked
+ * without a reason.
+ */
+block_reason?: string, };
 
 export type Pairing = { pin_active: boolean, pin_expires_in_secs: number, };
 

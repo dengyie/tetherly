@@ -82,12 +82,17 @@
 
 注：读改写窗口内外并发改动标签集会被最后一写覆盖（无 If-Match/ETag）——单用户 CLI 场景可接受，附录留档。
 
+## 已迁移第四批（§151，契约扩展先行）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `POST /api/peers/disconnect` | `POST /devices/{id}/disconnect` | PeerDisconnectReport→Device；already_disconnected 折入 online（动作后回读 online=false 即已断） |
+| `GET /api/peers/blocked` | `GET /devices` 过滤 `blocked==true` | BlockedPeersReport→行内过滤；block_reason 新契约字段（§151）；排序从插入序变 id 序 |
+
 ## 剩余待迁（peers 写域）
 
 | 旧路由 | v1 状态 |
 |---|---|
-| `GET /api/peers/blocked` | Device DTO 无 block reason 字段——待契约扩展 |
-| `POST /api/peers/disconnect` | v1 无断开动作——待契约扩展 |
 | `GET /api/peers/ping`、`/heartbeat`、`/link`、`/link/probe` | 链路质量域 → diagnostics，待契约扩展 |
 
 ## 已定案的特殊项

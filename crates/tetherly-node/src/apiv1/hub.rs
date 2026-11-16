@@ -236,6 +236,7 @@ mod tests {
             features: vec![],
             tags: vec![],
             group: None,
+            block_reason: None,
         }
     }
 

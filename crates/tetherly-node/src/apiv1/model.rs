@@ -20,7 +20,7 @@ struct Parts {
     live: Option<LivePeer>,
     trusted: Option<TrustedPeer>,
     discovered: Option<DiscoveredPeerDto>,
-    blocked: bool,
+    blocked: Option<BlockedPeer>,
 }
 
 /// Merge every source into one device per id, sorted by id. `profile`
@@ -46,7 +46,8 @@ pub fn merge(
         parts.entry(key).or_default().discovered = Some(d);
     }
     for b in blocked {
-        parts.entry(b.device_id).or_default().blocked = true;
+        let key = b.device_id.clone();
+        parts.entry(key).or_default().blocked = Some(b);
     }
     parts
         .into_iter()
@@ -86,7 +87,8 @@ fn build(
         device_type,
         online: p.live.is_some(),
         trusted: p.trusted.as_ref().is_some_and(|t| !t.revoked),
-        blocked: p.blocked,
+        blocked: p.blocked.is_some(),
+        block_reason: p.blocked.and_then(|b| b.reason),
         path: p.live.as_ref().map(|l| match l.path {
             PathKind::Lan => LinkPath::Lan,
             PathKind::Overlay => LinkPath::Overlay,

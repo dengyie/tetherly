@@ -201,6 +201,11 @@ pub struct Device {
     /// PeerProfile group (§144): the CLI peers inventory and SPA group-by
     /// view; `None` when the device has no profile or no group set.
     pub group: Option<String>,
+    /// Why the device is blocked (§151): the CLI blocked inventory and SPA
+    /// blocklist; `None` when the device is not blocked or was blocked
+    /// without a reason.
+    #[cfg_attr(test, ts(optional))]
+    pub block_reason: Option<String>,
 }
 
 /// Pairing state. The PIN itself is never pushed on the event stream.

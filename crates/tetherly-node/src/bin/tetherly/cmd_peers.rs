@@ -492,16 +492,18 @@ pub(crate) async fn connect(
 
 /// `tetherly disconnect` -- Disconnect arm of the top-level dispatch.
 pub(crate) async fn disconnect(peer: String, json: bool, ui_port: u16) -> Result<()> {
-    let payload = serde_json::json!({ "peer": peer });
-    let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/disconnect", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    // §151: v1 device action — the Device row answers both questions the
+    // legacy PeerDisconnectReport carried: `online` is the session state,
+    // name/alias the display identity (already_disconnected folds in).
+    let (code, resp) =
+        tetherly_node::loopback_post(ui_port, &format!("/api/v1/devices/{peer}/disconnect"), &[])
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+                )
+            })?;
     if code != 200 {
         anyhow::bail!(
             "node refused disconnect (HTTP {code}): {}",
@@ -511,19 +513,13 @@ pub(crate) async fn disconnect(peer: String, json: bool, ui_port: u16) -> Result
     if json {
         println!("{}", String::from_utf8_lossy(&resp).trim());
     } else {
-        let rep: tetherly_node::PeerDisconnectReport =
+        let d: tetherly_api::Device =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-        let display_name = rep.alias.or(rep.name).unwrap_or_else(|| "peer".to_string());
-        if rep.already_disconnected {
-            println!(
-                "peer {} ({}) is already disconnected",
-                rep.device_id, display_name
-            );
+        let display_name = d.alias.clone().unwrap_or_else(|| d.name.clone());
+        if d.online {
+            println!("peer {} ({}) is still connected", d.id, display_name);
         } else {
-            println!(
-                "successfully disconnected session with {} ({})",
-                rep.device_id, display_name
-            );
+            println!("disconnected session with {} ({})", d.id, display_name);
         }
     }
     Ok(())
@@ -608,7 +604,10 @@ pub(crate) async fn unblock(peer: String, json: bool, ui_port: u16) -> Result<()
 
 /// `tetherly blocked` -- Blocked arm of the top-level dispatch.
 pub(crate) async fn blocked(json: bool, ui_port: u16) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/peers/blocked")
+    // §151: the v1 Device row carries the reason (block_reason); the list
+    // is the devices view filtered to `blocked == true`. Ordering shifts
+    // from insertion order to id order (documented in the map appendix).
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/devices")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -622,23 +621,32 @@ pub(crate) async fn blocked(json: bool, ui_port: u16) -> Result<()> {
             String::from_utf8_lossy(&resp)
         );
     }
+    let devices: Vec<tetherly_api::Device> =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+    let blocked: Vec<_> = devices.iter().filter(|d| d.blocked).collect();
     if json {
-        println!("{}", String::from_utf8_lossy(&resp).trim());
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "count": blocked.len(),
+                "peers": blocked.iter().map(|d| serde_json::json!({
+                    "device_id": d.id,
+                    "reason": d.block_reason,
+                })).collect::<Vec<_>>(),
+            })
+        );
+    } else if blocked.is_empty() {
+        println!("no peers currently blocked");
     } else {
-        let rep: tetherly_node::BlockedPeersReport =
-            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-        if rep.peers.is_empty() {
-            println!("no peers currently blocked");
-        } else {
-            println!("blocked peers ({}):", rep.peers.len());
-            for p in rep.peers {
-                let reason = p
-                    .reason
-                    .as_deref()
-                    .map(|r| format!(" · reason: \"{r}\""))
-                    .unwrap_or_default();
-                println!("  - {}{}", p.device_id, reason);
-            }
+        println!("blocked peers ({}):", blocked.len());
+        for d in blocked {
+            let reason = d
+                .block_reason
+                .as_deref()
+                .map(|r| format!(" · reason: \"{r}\""))
+                .unwrap_or_default();
+            println!("  - {}{}", d.id, reason);
         }
     }
     Ok(())
@@ -1064,4 +1072,71 @@ pub(crate) async fn print_routes_list(ui_port: u16, json: bool) -> Result<()> {
         _ => println!("  (no cached routes)"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod disconnect_blocked_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-discblk-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §151: `disconnect` and `blocked` speak v1 — the device disconnect
+    /// action and the devices-view filter with block_reason. Error paths
+    /// (unknown peer) still count legacy hits on the old implementation.
+    #[tokio::test]
+    async fn disconnect_and_blocked_speak_v1() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        // Error paths (unknown device, empty blocklist).
+        let _ = disconnect("tdev_nooooooooooooooo".into(), false, port).await;
+        blocked(false, port).await.unwrap();
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/peers")),
+            "disconnect/blocked still hit legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
 }

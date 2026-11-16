@@ -76,6 +76,7 @@ mod events {
             features: vec![],
             tags: vec![],
             group: None,
+            block_reason: None,
         }
     }
 
@@ -87,6 +88,19 @@ mod events {
         d.group = Some("studio".into());
         let v = serde_json::to_value(&d).unwrap();
         assert_eq!(v["group"], "studio");
+        let back: Device = serde_json::from_value(v).unwrap();
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn device_carries_block_reason() {
+        // §151: the CLI blocked inventory needs the reason attached to the
+        // Device row (`None` = not blocked); round trip must survive.
+        let mut d = device();
+        d.blocked = true;
+        d.block_reason = Some("spam".into());
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["block_reason"], "spam");
         let back: Device = serde_json::from_value(v).unwrap();
         assert_eq!(back, d);
     }

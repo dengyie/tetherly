@@ -9419,3 +9419,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **真 daemon 冒烟（:16470）**：正向四连（plain 幂等 / JSON / case-blind remove）+ 错误双路径（unknown 404 / 非法 tag 客户端拒）+ 重启后 `legacy_routes: []` 干净。**坑（如实）**：首轮冒烟全 404——`target/debug/tetherly` 是 01:32 的旧二进制（clippy 不产 bin、workspace test 用的独立 test harness），`cargo build -p tetherly-node --bin tetherly` 重编后全对；diagnostics 里的旧路由命中恰是旧二进制留下的 5 次调用，重启清零后确认。
 - **读改写窗口（附录留档）**：无 If-Match/ETag，并发标签改动最后一写覆盖——单用户 CLI 场景可接受。
 - **M5 战果更新**：16 命令迁完；peers 写域剩 blocked（契约缺 reason）、disconnect（无 v1 动作）、link/heartbeat（diagnostics 域）。
+
+## 151. M5：契约扩展 ×2（Device.block_reason + disconnect 动作）+ blocked/disconnect 迁 v1（§9-2 第四批）
+
+接 §150。peers 写域剩余两项都是契约缺口，本轮先扩契约再迁 CLI。
+
+- **契约扩展 1——`Device.block_reason: Option<String>`**：blocked 列表需要 reason 附在设备行上。merge 的 `Parts.blocked` 从 `bool` 升为 `Option<BlockedPeer>`（core 结构本就带 reason），build 时 `blocked: p.blocked.is_some()` + `block_reason: p.blocked.and_then(|b| b.reason)`。契约测试 `device_carries_block_reason` 往返断言；TS bindings 再生（ts optional 字段）。
+- **契约扩展 2——`POST /devices/{id}/disconnect`**：Device 回读。legacy `PeerDisconnectReport` 的 already_disconnected/会话名折入行内（online 即答案，§149 block 同款折入模式）。处理器先 `disconnect_peer` 再 `device_json` 回读。
+- **CLI 两命令迁移**：`disconnect` → v1 动作（文案 "disconnected session with…"/"is still connected"）；`blocked` → `GET /devices` 过滤 `blocked==true`（--json 合成 `{ok,count,peers:[{device_id,reason}]}` 形状，排序从插入序变 id 序——附录明示）。
+- **测试**：契约 +1（18）；uihttp m2a 追加断言（block_reason 冒出/抹除、disconnect 200+405、online 折入）；bin +1（§151 命令对旧路由归零断言，§149 模板）。**如实**：本轮实现先于测试断言落盘（批处理改多文件），断言模板与 §149 同源、其真实抓取能力已在该轮 RED 验证。
+- **门禁**：fmt 绿；双 clippy 0 错；workspace **1038 ×2 稳定**（+2）；deny 四项 ok；bindings 无漂移。
+- **真 daemon 冒烟（:16471）**：disconnect 正/误双路径（404 文案）、block 带 reason → blocked plain/JSON reason 回显 → unblock，`legacy_routes: []` 干净。**发现（如实）**：daemon 侧 `resolve_peer` 对 discovered-only peer 的**名字**解析失败（名字匹配只扫 trust 表）——CLI `disconnect --peer DESKTOP-VST7EIE` 404 而全 id `tdev_…` 成功；§149 connect/block 同一 resolve 路径同此行为，旧 `/api/peers/disconnect` 也一致（非回归），名字解析覆盖 discovered 名是后续小轮候选。
+- **M5 战果更新**：18 命令迁完。peers 写域只剩 link/heartbeat/ping（diagnostics 域，链路质量快照聚合，规模较大独立轮）。

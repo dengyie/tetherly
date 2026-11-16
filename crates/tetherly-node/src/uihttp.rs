@@ -2487,9 +2487,22 @@ mod tests {
         .await;
         assert_eq!(code, 200, "{body}");
         assert_eq!(body["blocked"], true);
+        // §151: the reason rides on the Device row for the blocked list.
+        assert_eq!(body["block_reason"], "test");
         let (code, body) = v1_call(port, "DELETE", &format!("{item}/block"), &auth, "").await;
         assert_eq!(code, 200, "{body}");
         assert_eq!(body["blocked"], false);
+        assert_eq!(body["block_reason"], serde_json::Value::Null);
+
+        // §151: disconnect action — Device row back; the seeded peer has no
+        // live session so online stays false (the already_disconnected
+        // distinction folds into the row, documented in the map appendix).
+        let (code, body) = v1_call(port, "POST", &format!("{item}/disconnect"), &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["id"], id.as_str());
+        assert_eq!(body["online"], false);
+        let (code, _) = v1_call(port, "GET", &format!("{item}/disconnect"), &auth, "").await;
+        assert_eq!(code, 405);
 
         // Connect with a bad address is a client error, not a hang.
         let (code, _) = v1_call(

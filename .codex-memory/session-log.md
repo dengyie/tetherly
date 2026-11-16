@@ -1381,3 +1381,9 @@
 - 发现：legacy add 对合法未知 id 静默建档（意外行为），收敛为显式 404；seed_trusted_peer 是 cfg(test) 库内后门，bin 测试走 trusted.json 种子。
 - 坑：target/debug/tetherly 可能是旧二进制（clippy 不产 bin）——冒烟前必 cargo build -p tetherly-node --bin tetherly。
 - 1036×2 稳定；门禁全绿。peers 写域剩 blocked/disconnect/link·heartbeat（均待契约）。
+
+## §151 (2026-11-17) — 契约扩展 block_reason + disconnect 动作
+- Device.block_reason: Option<String>（Parts.blocked bool→Option<BlockedPeer>）；POST /devices/{id}/disconnect Device 回读（already_disconnected 折入 online）。
+- CLI disconnect/blocked 迁 v1；blocked --json 合成 {ok,count,peers} 形状；排序插入序→id 序。
+- 冒烟发现：resolve_peer 名字匹配只扫 trust 表，discovered-only 名字 404、全 id 可用——非回归（legacy 同路径），名字解析覆盖 discovered 是候选小轮。
+- 1038×2；门禁全绿；bindings 再生。peers 写域只剩 link/heartbeat/ping（diagnostics 域）。

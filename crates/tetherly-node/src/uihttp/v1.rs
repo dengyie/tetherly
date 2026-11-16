@@ -99,7 +99,7 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/diagnostics/log-level" => Some(&["PATCH"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
         p => match device_action(p) {
-            Some((_, "connect")) => Some(&["POST"]),
+            Some((_, "connect")) | Some((_, "disconnect")) => Some(&["POST"]),
             Some((_, "block")) => Some(&["POST", "DELETE"]),
             _ => match transfer_action(p) {
                 Some((_, "cancel")) => Some(&["POST"]),
@@ -253,6 +253,7 @@ pub(super) async fn route(
         }
         (m, p) => match (m, device_action(p)) {
             ("POST", Some((id, "connect"))) => connect_device(node, id, body).await,
+            ("POST", Some((id, "disconnect"))) => disconnect_device(node, id).await,
             ("POST", Some((id, "block"))) => block_device(node, id, body).await,
             ("DELETE", Some((id, "block"))) => unblock_device(node, id).await,
             _ => match (m, transfer_action(p)) {
@@ -381,6 +382,15 @@ async fn connect_device(node: &Node, id: &str, body: &[u8]) -> Handled {
         .await
         .map_err(core_error)?;
     Ok(device_json(node, &id))
+}
+
+/// `POST /devices/{id}/disconnect`: tear down an active session. The
+/// legacy PeerDisconnectReport distinctions (already_disconnected, session
+/// names) fold into the Device row (§151): `online` after the call is the
+/// answer, `name`/`alias` carry the display identity.
+async fn disconnect_device(node: &Node, id: &str) -> Handled {
+    node.disconnect_peer(id).await.map_err(core_error)?;
+    Ok(device_json(node, id))
 }
 
 async fn block_device(node: &Node, id: &str, body: &[u8]) -> Handled {
