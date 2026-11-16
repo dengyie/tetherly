@@ -137,7 +137,7 @@ jobs:
         run: cargo install tauri-cli --locked --version "^2"
       - name: build bundle (.dmg on macOS, .msi on Windows)
         working-directory: client/src-tauri
-        run: cargo tauri build ${{ matrix.args }} --no-dev-server
+        run: cargo tauri build ${{ matrix.args }} --ci
       - name: stage bundle artifacts
         shell: bash
         run: |
