@@ -9335,3 +9335,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **真 daemon 冒烟（:16460/:36718）**：plain 输出全字段（Version 0.2.59 / PID / Uptime / 五端口 / 双 peer 计数 / latency 0.97ms）；`--json` 合成形状完整；`legacy_routes: []`。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1021 全绿（+1）；deny 四项 ok。
 - **第二波剩余**：`status`（等 v1 契约扩 `lan_only`/`transfer_stats`）、`sys`（`/api/sys` → v1 暂无系统遥测资源，需新 `GET /diagnostics/sys` 或并入 system）、`peers list`（重排 devices）。
+
+## 144. M5 CLI 迁移第三波：`tetherly peers` 迁 `/api/v1/devices` + 契约补 `Device.group`；§143 CI 败修复（未发版，main 续）
+
+接 §143。三件事：§143 的 CI 败修复、`Device` 契约补 `group`、`peers` roster 迁 v1。
+
+- **§143 CI 败如实修复（run 43881438366，ubuntu+macos 双败）**：`health_command_round_trips_v1` 在 CI 上 `GET /api/v1/system` 401。根因是**测试间全局状态竞态**——`loopback` 的 `set_api_token` 是进程级静态，cargo 测试线程并行，另一测试把它清成 `None` 后 health 的第二次 v1 调用撞 401（本地串行感知不到；health 两次调用把窗口翻倍才在 CI 暴露）。修复：两个 CLI 测试模块改用 `set_port_api_token`（per-port，注释明言就是为"one process drives several daemons"设计的）。**教训**：bin 测试里凡经 `loopback_*` 发请求，token 注入一律 per-port。
+- **契约补 `Device.group`（RED→GREEN）**：`peers` roster 与 SPA 的 group-by 视图都需要 `PeerProfile.group`，v1 `Device` 缺失。contract.rs 加 `device_carries_profile_group`（serialize 往返，RED 出 E0560）→ `Device` 加 `pub group: Option<String>`（文档注 §144）→ `model.rs` 的 `profile_of`/`merge`/`build` 改三元组（`profile` 闭包签名联动，hub.rs 测试夹具补 `group: None`）→ `TETHERLY_API_BLESS=1 cargo test -p tetherly-api bindings` 重生成 `client/src/lib/api/gen/api.ts`（`group: string | null`）。
+- **`tetherly peers` 迁 v1（RED→GREEN）**：旧 `GET /api/peers` 一次性给 `self_id/live[]/trusted[]/live_count/trusted_count` 五字段视图 → v1 `GET /api/v1/devices` 是**单一扁平列表**（`online`/`trusted`/`blocked` 标志），CLI 从中重建两段视图（live = `online==true`，trusted inventory = `trusted==true`）。字段映射：`device_id`→`id`，其余 name/alias/platform/addr/path/rtt_ms/features/device_type/group/tags 全部 1:1（`group` 正是本轮补的）。`--json` 直接透传 v1 形状（不再是旧视图形状——CLI 消费者如需分组自行按标志过滤）。`self_id` 头部行去掉（v1 devices 不含自身身份；`tetherly identity` 已有）。
+- **测试**：`peers_command_round_trips_v1_devices`（真 daemon + per-port token + legacy_routes 断言无 `/api/peers` 命中，RED 真实抓到旧路由调用）；`model.rs` `live_trusted_device_carries_link_and_alias` 扩 `group` 断言。
+- **真 daemon 冒烟（:16461/:36719）**：空 roster 三形态（plain/trusted/json——json 里两条 mDNS 发现设备含 `group:null`）、`legacy_routes: []`。
+- **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1023 全绿 ×2 稳定（首跑 `m3_9_reverse_control_takeover` 一例 §124 竞态 flake：`seat` 断言 None≠Some(Bottom)，单跑+复跑即绿，符合 §124 家族特征）；deny 四项 ok。
+- **第二波遗留（待契约扩展）**：`status`（`lan_only`+`transfer_stats`）、`sys`（系统遥测资源）——`peers` 后第三波完成；下一波候选是 `config`/`dial` 等单路由命令或直接进入 `/api/*` 别名下线盘点。

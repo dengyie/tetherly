@@ -195,6 +195,9 @@ pub struct Device {
     pub caps: Vec<String>,
     pub features: Vec<String>,
     pub tags: Vec<String>,
+    /// PeerProfile group (§144): the CLI peers inventory and SPA group-by
+    /// view; `None` when the device has no profile or no group set.
+    pub group: Option<String>,
 }
 
 /// Pairing state. The PIN itself is never pushed on the event stream.

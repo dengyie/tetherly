@@ -75,7 +75,20 @@ mod events {
             caps: vec![],
             features: vec![],
             tags: vec![],
+            group: None,
         }
+    }
+
+    #[test]
+    fn device_carries_profile_group() {
+        // §144: the CLI peers inventory and the SPA group-by view both need
+        // the PeerProfile group; it must survive a serialize round trip.
+        let mut d = device();
+        d.group = Some("studio".into());
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["group"], "studio");
+        let back: Device = serde_json::from_value(v).unwrap();
+        assert_eq!(back, d);
     }
 
     #[test]

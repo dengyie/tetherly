@@ -235,6 +235,7 @@ mod tests {
             caps: vec![],
             features: vec![],
             tags: vec![],
+            group: None,
         }
     }
 

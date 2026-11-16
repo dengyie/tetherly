@@ -1339,3 +1339,10 @@
 - status 迁移缺口备查：lan_only + transfer_stats 无 v1 资源，需先扩契约（ts-rs 漂移联动），单独立轮。
 - RED（legacy_routes 抓 /api/health）→ GREEN：health() 两次 v1 调用合成，--json 保持旧 one-shot 形状（脚本兼容）。
 - 门禁：fmt/双 clippy/workspace 1021/deny 全绿；真 daemon :16460 冒烟 plain+json 全字段 + legacy_routes []。
+
+## 2026-11-16 §143 CI 败修复 + §144 peers 迁 v1 + Device.group 契约
+- §143 CI 双平台败：health 测试 401——set_api_token 是进程级静态，cargo 并行测试竞态。修：set_port_api_token（per-port）。教训：bin 测试 token 一律 per-port。
+- Device 契约补 group（peers/SPA group-by 都要）：contract RED → lib.rs+model.rs 三元组+hub 夹具+TS 绑定 bless 重生成。
+- tetherly peers 迁 GET /api/v1/devices：扁平列表按 online/trusted 重建两段视图；--json 直接透传 v1 形状；self_id 头去掉。
+- 门禁 1023×2 稳定（首跑 m3_9 §124 flake）+ deny ok + 真 daemon :16461 冒烟（发现设备含 group:null）。
+- status/sys 还缺 v1 资源（lan_only/transfer_stats/系统遥测），等契约扩展轮。

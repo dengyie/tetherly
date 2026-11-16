@@ -32,7 +32,12 @@ export type Device = { id: string,
 /**
  * Best display name: live name, else discovered name, else alias, else id.
  */
-name: string, alias: string | null, platform: string | null, device_type: string, online: boolean, trusted: boolean, blocked: boolean, path: LinkPath | null, addr: string | null, rtt_ms: number | null, last_seen_ms: number | null, caps: Array<string>, features: Array<string>, tags: Array<string>, };
+name: string, alias: string | null, platform: string | null, device_type: string, online: boolean, trusted: boolean, blocked: boolean, path: LinkPath | null, addr: string | null, rtt_ms: number | null, last_seen_ms: number | null, caps: Array<string>, features: Array<string>, tags: Array<string>, 
+/**
+ * PeerProfile group (§144): the CLI peers inventory and SPA group-by
+ * view; `None` when the device has no profile or no group set.
+ */
+group: string | null, };
 
 export type Pairing = { pin_active: boolean, pin_expires_in_secs: number, };
 

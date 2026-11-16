@@ -45,7 +45,9 @@ pub(crate) async fn peers(
     if ping {
         return do_peer_ping(ui_port, peer, count, json).await;
     }
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/peers")
+    // §144: the roster comes from the v1 devices resource — one flat list
+    // with online/trusted/blocked flags, from which both views are rebuilt.
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/devices")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -65,85 +67,89 @@ pub(crate) async fn peers(
     }
     let v: serde_json::Value =
         serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-    let self_id = v["self_id"].as_str().unwrap_or("unknown");
-    let live_arr = v["live"].as_array();
-    let live_count = v["live_count"].as_u64().unwrap_or(0);
-    let trusted_count = v["trusted_count"].as_u64().unwrap_or(0);
+    let devices = v.as_array().cloned().unwrap_or_default();
+    let live: Vec<&serde_json::Value> = devices
+        .iter()
+        .filter(|d| d["online"].as_bool() == Some(true))
+        .collect();
+    let trusted_list: Vec<&serde_json::Value> = devices
+        .iter()
+        .filter(|d| d["trusted"].as_bool() == Some(true))
+        .collect();
 
-    println!("Node: {self_id} (live: {live_count}, trusted: {trusted_count})");
+    println!(
+        "Node: (live: {}, trusted: {})",
+        live.len(),
+        trusted_list.len()
+    );
     println!("\nActive Live Peers:");
-    match live_arr {
-        Some(arr) if !arr.is_empty() => {
-            for p in arr {
-                let dev = p["device_id"].as_str().unwrap_or("-");
-                let name = p["name"].as_str().unwrap_or("-");
-                let alias = p["alias"].as_str();
-                let display_name = match alias {
-                    Some(a) if !a.is_empty() && a != name => {
-                        format!("{name} (alias: \"{a}\")")
-                    }
-                    _ => name.to_string(),
-                };
-                let platform = p["platform"].as_str().unwrap_or("-");
-                let addr = p["addr"].as_str().unwrap_or("-");
-                let path = p["path"].as_str().unwrap_or("-");
-                let rtt_str = match p["rtt_ms"].as_u64() {
-                    Some(rtt) => format!("{rtt}ms"),
-                    None => "n/a".to_string(),
-                };
-                let feats_str = match p["features"].as_array() {
-                    Some(farr) if !farr.is_empty() => {
-                        let fstrs: Vec<&str> = farr.iter().filter_map(|x| x.as_str()).collect();
-                        format!(" · caps: [{}]", fstrs.join(", "))
-                    }
-                    _ => String::new(),
-                };
-                let dev_type = p["device_type"].as_str().unwrap_or("other");
-                let grp_str = match p["group"].as_str() {
-                    Some(g) if !g.is_empty() => format!(" · group: \"{g}\""),
-                    _ => String::new(),
-                };
-                let tags_str = match p["tags"].as_array() {
-                    Some(tarr) if !tarr.is_empty() => {
-                        let tstrs: Vec<&str> = tarr.iter().filter_map(|x| x.as_str()).collect();
-                        format!(" · tags: [{}]", tstrs.join(", "))
-                    }
-                    _ => String::new(),
-                };
-                println!(
-                    "  * {display_name} ({platform}/{dev_type}){grp_str}{tags_str} · {addr} [{path}] · rtt: {rtt_str}{feats_str} · {dev}"
-                );
+    if live.is_empty() {
+        println!("  (no live peers connected)");
+    }
+    for p in live {
+        let dev = p["id"].as_str().unwrap_or("-");
+        let name = p["name"].as_str().unwrap_or("-");
+        let alias = p["alias"].as_str();
+        let display_name = match alias {
+            Some(a) if !a.is_empty() && a != name => {
+                format!("{name} (alias: \"{a}\")")
             }
-        }
-        _ => println!("  (no live peers connected)"),
+            _ => name.to_string(),
+        };
+        let platform = p["platform"].as_str().unwrap_or("-");
+        let addr = p["addr"].as_str().unwrap_or("-");
+        let path = p["path"].as_str().unwrap_or("-");
+        let rtt_str = match p["rtt_ms"].as_u64() {
+            Some(rtt) => format!("{rtt}ms"),
+            None => "n/a".to_string(),
+        };
+        let feats_str = match p["features"].as_array() {
+            Some(farr) if !farr.is_empty() => {
+                let fstrs: Vec<&str> = farr.iter().filter_map(|x| x.as_str()).collect();
+                format!(" · caps: [{}]", fstrs.join(", "))
+            }
+            _ => String::new(),
+        };
+        let dev_type = p["device_type"].as_str().unwrap_or("other");
+        let grp_str = match p["group"].as_str() {
+            Some(g) if !g.is_empty() => format!(" · group: \"{g}\""),
+            _ => String::new(),
+        };
+        let tags_str = match p["tags"].as_array() {
+            Some(tarr) if !tarr.is_empty() => {
+                let tstrs: Vec<&str> = tarr.iter().filter_map(|x| x.as_str()).collect();
+                format!(" · tags: [{}]", tstrs.join(", "))
+            }
+            _ => String::new(),
+        };
+        println!(
+            "  * {display_name} ({platform}/{dev_type}){grp_str}{tags_str} · {addr} [{path}] · rtt: {rtt_str}{feats_str} · {dev}"
+        );
     }
 
     if trusted {
         println!("\nTrusted Peers Inventory:");
-        if let Some(arr) = v["trusted"].as_array() {
-            if arr.is_empty() {
-                println!("  (no trusted peers)");
-            } else {
-                for tp in arr {
-                    let dev = tp["device_id"].as_str().unwrap_or("-");
-                    let alias = tp["alias"].as_str().unwrap_or("-");
-                    let online = tp["online"].as_bool().unwrap_or(false);
-                    let status = if online { "ONLINE" } else { "OFFLINE" };
-                    let dev_type = tp["device_type"].as_str().unwrap_or("other");
-                    let grp_str = match tp["group"].as_str() {
-                        Some(g) if !g.is_empty() => format!(" · group: \"{g}\""),
-                        _ => String::new(),
-                    };
-                    let tags_str = match tp["tags"].as_array() {
-                        Some(tarr) if !tarr.is_empty() => {
-                            let tstrs: Vec<&str> = tarr.iter().filter_map(|x| x.as_str()).collect();
-                            format!(" · tags: [{}]", tstrs.join(", "))
-                        }
-                        _ => String::new(),
-                    };
-                    println!("  * [{status}] {alias} ({dev_type}){grp_str}{tags_str} · {dev}");
+        if trusted_list.is_empty() {
+            println!("  (no trusted peers)");
+        }
+        for tp in trusted_list {
+            let dev = tp["id"].as_str().unwrap_or("-");
+            let alias = tp["alias"].as_str().unwrap_or("-");
+            let online = tp["online"].as_bool().unwrap_or(false);
+            let status = if online { "ONLINE" } else { "OFFLINE" };
+            let dev_type = tp["device_type"].as_str().unwrap_or("other");
+            let grp_str = match tp["group"].as_str() {
+                Some(g) if !g.is_empty() => format!(" · group: \"{g}\""),
+                _ => String::new(),
+            };
+            let tags_str = match tp["tags"].as_array() {
+                Some(tarr) if !tarr.is_empty() => {
+                    let tstrs: Vec<&str> = tarr.iter().filter_map(|x| x.as_str()).collect();
+                    format!(" · tags: [{}]", tstrs.join(", "))
                 }
-            }
+                _ => String::new(),
+            };
+            println!("  * [{status}] {alias} ({dev_type}){grp_str}{tags_str} · {dev}");
         }
     }
     Ok(())

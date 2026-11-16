@@ -23,13 +23,13 @@ struct Parts {
 }
 
 /// Merge every source into one device per id, sorted by id. `profile`
-/// returns `(device_type, tags)` for an id.
+/// returns `(device_type, tags, group)` for an id.
 pub fn merge(
     live: Vec<LivePeer>,
     trusted: Vec<TrustedPeer>,
     discovered: Vec<DiscoveredPeerDto>,
     blocked: Vec<BlockedPeer>,
-    profile: impl Fn(&str) -> (String, Vec<String>),
+    profile: impl Fn(&str) -> (String, Vec<String>, Option<String>),
 ) -> Vec<Device> {
     let mut parts: BTreeMap<String, Parts> = BTreeMap::new();
     for p in live {
@@ -53,7 +53,11 @@ pub fn merge(
         .collect()
 }
 
-fn build(id: String, p: Parts, profile: &impl Fn(&str) -> (String, Vec<String>)) -> Device {
+fn build(
+    id: String,
+    p: Parts,
+    profile: &impl Fn(&str) -> (String, Vec<String>, Option<String>),
+) -> Device {
     let alias = p
         .trusted
         .as_ref()
@@ -73,7 +77,7 @@ fn build(id: String, p: Parts, profile: &impl Fn(&str) -> (String, Vec<String>))
         .map(|l| l.caps.clone())
         .or_else(|| p.discovered.as_ref().map(|d| d.caps.clone()))
         .unwrap_or_default();
-    let (device_type, tags) = profile(&id);
+    let (device_type, tags, group) = profile(&id);
     Device {
         name,
         alias,
@@ -96,6 +100,7 @@ fn build(id: String, p: Parts, profile: &impl Fn(&str) -> (String, Vec<String>))
         features: extract_features(&caps),
         caps,
         tags,
+        group,
         id,
     }
 }
@@ -114,15 +119,16 @@ pub fn device(node: &Node, id: &str) -> Option<Device> {
     devices(node).into_iter().find(|d| d.id == id)
 }
 
-fn profile_of(node: &Node, id: &str) -> (String, Vec<String>) {
+fn profile_of(node: &Node, id: &str) -> (String, Vec<String>, Option<String>) {
     match tetherly_core::DeviceId::parse(id) {
         Ok(did) => {
             let p = node.peer_profile(&did);
-            (p.device_type.as_str().to_string(), p.tags)
+            (p.device_type.as_str().to_string(), p.tags, p.group)
         }
         Err(_) => (
             crate::store::DeviceType::default().as_str().to_string(),
             Vec::new(),
+            None,
         ),
     }
 }
@@ -439,8 +445,8 @@ mod tests {
         }
     }
 
-    fn profile(_: &str) -> (String, Vec<String>) {
-        ("laptop".into(), vec!["home".into()])
+    fn profile(_: &str) -> (String, Vec<String>, Option<String>) {
+        ("laptop".into(), vec!["home".into()], Some("studio".into()))
     }
 
     fn find(devs: &[Device], n: u8) -> &Device {
@@ -469,6 +475,7 @@ mod tests {
         assert_eq!(d.caps, vec!["input".to_string()]);
         assert_eq!(d.device_type, "laptop");
         assert_eq!(d.tags, vec!["home".to_string()]);
+        assert_eq!(d.group.as_deref(), Some("studio"));
         assert_eq!(d.platform.as_deref(), Some("macos"));
     }
 

@@ -2086,11 +2086,16 @@ mod pin_v1_tests {
             tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
                 .await
                 .unwrap();
-        tetherly_node::set_api_token(Some(
-            tetherly_node::apitoken::read(&dir)
-                .expect("api.token minted")
-                .to_string(),
-        ));
+        // Per-port token: the global set_api_token is process-wide and these
+        // tests run concurrently — a sibling test's None would 401 this one.
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
 
         // No PIN yet: `--status` must treat v1's 404 as "not armed".
         pin(true, false, false, port).await.unwrap();
@@ -2120,7 +2125,7 @@ mod pin_v1_tests {
             "pin command still hits legacy routes: {hits:?}"
         );
 
-        tetherly_node::set_api_token(None);
+        tetherly_node::set_port_api_token(port, None);
     }
 }
 
@@ -2159,11 +2164,16 @@ mod health_v1_tests {
             tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
                 .await
                 .unwrap();
-        tetherly_node::set_api_token(Some(
-            tetherly_node::apitoken::read(&dir)
-                .expect("api.token minted")
-                .to_string(),
-        ));
+        // Per-port token: the global set_api_token is process-wide and these
+        // tests run concurrently — a sibling test's None would 401 this one.
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
 
         health(false, port).await.unwrap();
         health(true, port).await.unwrap();
@@ -2182,6 +2192,76 @@ mod health_v1_tests {
             "health command still hits legacy routes: {hits:?}"
         );
 
-        tetherly_node::set_api_token(None);
+        tetherly_node::set_port_api_token(port, None);
+    }
+}
+
+#[cfg(test)]
+mod peers_list_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-peers-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §144: the CLI peers inventory speaks v1 — `GET /api/v1/devices`,
+    /// off the frozen legacy `/api/peers` alias.
+    #[tokio::test]
+    async fn peers_command_round_trips_v1_devices() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        // Empty roster: both plain and --json forms must render.
+        super::cmd_peers::peers(false, false, None, 0, false, port)
+            .await
+            .unwrap();
+        super::cmd_peers::peers(false, false, None, 0, true, port)
+            .await
+            .unwrap();
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/peers")),
+            "peers command still hits legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_port_api_token(port, None);
     }
 }
