@@ -19,7 +19,9 @@ pub fn tray_set_visible(visible: bool) {
     VISIBLE.store(visible, Ordering::Release);
 }
 
-/// Read-side used by the platform loops.
+/// Read-side used by the platform loops. On platforms without a tray loop
+/// (Linux stub) the only consumer disappears, hence the allow.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn tray_visible() -> bool {
     VISIBLE.load(Ordering::Acquire)
 }

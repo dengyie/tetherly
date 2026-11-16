@@ -3620,7 +3620,7 @@ mod tray_owner_tests {
         let (owner, changed) = node.set_tray_owner(TrayOwner::Client).unwrap();
         assert_eq!((owner, changed), (TrayOwner::Client, true));
         // Idempotent claims are no-ops.
-        assert_eq!(node.set_tray_owner(TrayOwner::Client).unwrap().1, false);
+        assert!(!node.set_tray_owner(TrayOwner::Client).unwrap().1);
 
         // Just inside the window: not expired.
         clock.set(100_000 + TRAY_TAKEOVER_RECLAIM_MS - 1);
