@@ -492,7 +492,7 @@ mod commands {
             interval_secs: 15,
             deadline_secs: 45,
         };
-        let v = serde_json::to_value(&cfg).unwrap();
+        let v = serde_json::to_value(cfg).unwrap();
         assert_eq!(v["interval_secs"], 15);
         let back: HeartbeatConfig = serde_json::from_value(v).unwrap();
         assert_eq!(back, cfg);

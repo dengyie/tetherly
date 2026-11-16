@@ -1244,8 +1244,8 @@ mod link_domain_v1_tests {
         let err = do_peer_ping(port, None, 1, false).await.unwrap_err();
         assert!(err.to_string().contains("no connected peer"), "{err}");
         let _ = do_peer_ping(port, Some("tdev_nooooooooooooooo".into()), 1, false).await;
-        let _ = handle_link_cmd(None, false, port).await.unwrap();
-        let _ = handle_link_cmd(
+        handle_link_cmd(None, false, port).await.unwrap();
+        handle_link_cmd(
             Some(LinkCmd::Config {
                 interval: Some(30),
                 deadline: None,
@@ -1257,6 +1257,7 @@ mod link_domain_v1_tests {
         )
         .await
         .unwrap();
+        // Probe on unknown peer returns Err; drop it like the ping case above.
         let _ = handle_link_cmd(
             Some(LinkCmd::Probe {
                 peer: Some("tdev_nooooooooooooooo".into()),
