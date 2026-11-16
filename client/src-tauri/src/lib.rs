@@ -17,6 +17,12 @@ use tauri::{AppHandle, Listener, Manager, State};
 
 use crate::trayui::TrayUi;
 
+/// Wire constant shared with the SPA (client/src/lib/transport/traybridge.ts):
+/// the tray panel window emits its actions on this channel.
+pub mod traybridge {
+    pub const TRAY_ACTION_CHANNEL: &str = "tetherly://tray-action";
+}
+
 /// The embedded tray glyph ([`tray::GLYPH`]); the runtime tints it per state.
 pub fn tray_icon_rgba() -> &'static [u8] {
     &tray::GLYPH
@@ -71,6 +77,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(daemon)
         .invoke_handler(tauri::generate_handler![api])
         .setup(|app| {
@@ -154,6 +162,34 @@ pub fn run() {
                     }
                 });
             });
+            // Tray panel SPA actions (§6.3): 打开主窗口 shows the main shell
+            // and hides the popover; toggles/errors are already reflected via
+            // the settings.changed event loop, so only open-main needs a hook.
+            let act = handle.clone();
+            handle.listen(crate::traybridge::TRAY_ACTION_CHANNEL, move |ev| {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(ev.payload()) {
+                    if payload["action"] == "open-main" {
+                        trayui::show_main_window(&act);
+                        if let Some(panel) = act.get_webview_window("tray-panel") {
+                            let _ = panel.hide();
+                        }
+                    }
+                }
+            });
+            // 深链接 (§6.3): tetherly://open (any tetherly:// url) opens the
+            // main window — covers cold start via get_current + runtime via
+            // on_open_url. Scheme comes from plugins.deep-link.desktop in
+            // tauri.conf.json; the bundler registers it per-platform.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let dl = handle.clone();
+                handle.deep_link().on_open_url(move |_| {
+                    trayui::show_main_window(&dl);
+                });
+                if handle.deep_link().get_current().is_ok_and(|c| c.is_some()) {
+                    trayui::show_main_window(&handle);
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

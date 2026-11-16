@@ -16,11 +16,13 @@ use tauri::{
     tray::{TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Runtime,
 };
+use tauri_plugin_autostart::ManagerExt as _;
 
 use crate::tray::{TrayFold, TrayState};
 
 pub const MENU_TOGGLE: &str = "toggle-share";
 pub const MENU_OPEN: &str = "open-main";
+pub const MENU_AUTOSTART: &str = "toggle-autostart";
 pub const MENU_QUIT: &str = "quit";
 /// Payload channel the tray uses to tell the app "user clicked pause/resume".
 pub const TOGGLE_REQUEST: &str = "tetherly://toggle-share";
@@ -44,6 +46,19 @@ impl<R: Runtime> TrayUi<R> {
         let status = MenuItem::with_id(app, "status", "daemon 未连接", false, None::<&str>)?;
         let toggle = MenuItem::with_id(app, MENU_TOGGLE, "暂停共享", true, None::<&str>)?;
         let open = MenuItem::with_id(app, MENU_OPEN, "打开主窗口", true, None::<&str>)?;
+        // 自启 (§6.3): label reflects the REAL OS state, refreshed on build.
+        let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
+        let autostart = MenuItem::with_id(
+            app,
+            MENU_AUTOSTART,
+            if autostart_on {
+                "取消开机自启"
+            } else {
+                "开机自启"
+            },
+            true,
+            None::<&str>,
+        )?;
         let quit = MenuItem::with_id(app, MENU_QUIT, "退出 Tetherly", true, None::<&str>)?;
         let menu = Menu::with_items(
             app,
@@ -52,6 +67,7 @@ impl<R: Runtime> TrayUi<R> {
                 &PredefinedMenuItem::separator(app)?,
                 &toggle,
                 &open,
+                &autostart,
                 &PredefinedMenuItem::separator(app)?,
                 &quit,
             ],
@@ -67,6 +83,8 @@ impl<R: Runtime> TrayUi<R> {
                     let _ = app.emit(TOGGLE_REQUEST, ());
                 } else if event.id() == MENU_OPEN {
                     show_main_window(app);
+                } else if event.id() == MENU_AUTOSTART {
+                    toggle_autostart(app);
                 } else if event.id() == MENU_QUIT {
                     app.exit(0);
                 }
@@ -75,13 +93,16 @@ impl<R: Runtime> TrayUi<R> {
                 if let TrayIconEvent::Click {
                     button,
                     button_state,
+                    position,
                     ..
                 } = event
                 {
                     if button == tauri::tray::MouseButton::Left
                         && button_state == tauri::tray::MouseButtonState::Up
                     {
-                        show_main_window(tray.app_handle());
+                        // Left click toggles the panel popover (§6.3); the
+                        // main window stays behind the 打开主窗口 menu item.
+                        toggle_panel(tray.app_handle(), &position);
                     }
                 }
             })
@@ -175,5 +196,95 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+}
+
+/// Flip the OS autostart entry and rewrite the menu label from the NEW state.
+pub fn toggle_autostart<R: Runtime>(app: &AppHandle<R>) {
+    let mgr = app.autolaunch();
+    let turn_on = !mgr.is_enabled().unwrap_or(false);
+    let res = if turn_on { mgr.enable() } else { mgr.disable() };
+    match res {
+        Ok(_) => {
+            if let Some(item) = app.menu().and_then(|m| m.get(MENU_AUTOSTART)) {
+                if let Some(mi) = item.as_menuitem() {
+                    let _ = mi.set_text(if turn_on {
+                        "取消开机自启"
+                    } else {
+                        "开机自启"
+                    });
+                }
+            }
+            tracing::info!("autostart -> {turn_on}");
+        }
+        Err(e) => tracing::warn!("autostart toggle failed: {e}"),
+    }
+}
+
+/// Tray panel geometry (§6.3: 360×480 popover).
+const PANEL_W: f64 = 360.0;
+const PANEL_H: f64 = 480.0;
+
+/// Toggle the 360×480 frameless panel. It is created lazily near the tray
+/// icon (the click's physical cursor position), then shown/hidden. Focus-out
+/// hides it (the window-event hook installs once at creation).
+pub fn toggle_panel<R: Runtime>(app: &AppHandle<R>, cursor: &tauri::PhysicalPosition<f64>) {
+    const LABEL: &str = "tray-panel";
+    // Anchor: horizontally centered under the cursor (the tray icon), a few
+    // px below it. The click position is physical; the builder wants logical.
+    let anchor = |app: &AppHandle<R>| {
+        let scale = app
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .map(|m| m.scale_factor())
+            .unwrap_or(1.0);
+        (
+            (cursor.x / scale - PANEL_W / 2.0).max(0.0),
+            (cursor.y / scale + 6.0).max(0.0),
+        )
+    };
+    let panel = match app.get_webview_window(LABEL) {
+        Some(w) => w,
+        None => {
+            let mut b = tauri::WebviewWindowBuilder::new(
+                app,
+                LABEL,
+                tauri::WebviewUrl::App("#tray".into()),
+            )
+            .title("Tetherly")
+            .decorations(false)
+            .resizable(false)
+            .skip_taskbar(true)
+            .shadow(true)
+            .always_on_top(true)
+            .inner_size(PANEL_W, PANEL_H);
+            let (x, y) = anchor(app);
+            b = b.position(x, y);
+            match b.build() {
+                Ok(w) => {
+                    let wh = w.clone();
+                    w.on_window_event(move |e| {
+                        if let tauri::WindowEvent::Focused(false) = e {
+                            let _ = wh.hide();
+                        }
+                    });
+                    w
+                }
+                Err(e) => {
+                    tracing::warn!("tray panel build failed: {e}");
+                    return;
+                }
+            }
+        }
+    };
+    if panel.is_visible().unwrap_or(false) {
+        let _ = panel.hide();
+    } else {
+        // Re-anchor on every open so multi-monitor moves keep it near the icon.
+        let (x, y) = anchor(app);
+        let _ = panel.set_position(tauri::LogicalPosition::new(x, y));
+        let _ = panel.show();
+        let _ = panel.set_focus();
     }
 }

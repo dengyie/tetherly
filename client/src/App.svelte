@@ -23,6 +23,12 @@
   import Layout from "./routes/Layout.svelte";
   import Settings from "./routes/Settings.svelte";
   import Activity from "./routes/Activity.svelte";
+  import Tray from "./routes/Tray.svelte";
+
+  // Tray panel mode: the shell opens the 360×480 frameless window at index
+  // with the #tray fragment (§6.3) — the compact single-screen view replaces
+  // header + navigation entirely.
+  const isTrayPanel = $state(location.hash === "#tray");
 
   // Token arrives via the daemon URL fragment (#token=…); read and strip it
   // immediately so it never stays in the address bar or history.
@@ -109,7 +115,10 @@
   };
 </script>
 
-<div class="shell">
+<div class="shell" data-tray={isTrayPanel ? "panel" : "main"}>
+  {#if isTrayPanel}
+    <Tray {devices} {input} {transfers} {settings} link={$linkState} {api} />
+  {:else}
   <header>
     <span class="brand">Tetherly</span>
     <span class="link" data-state={$linkState}>{stateLabel[$linkState]}</span>
@@ -143,6 +152,7 @@
       <Diagnostics {api} />
     {/if}
   </main>
+  {/if}
 </div>
 
 <style>

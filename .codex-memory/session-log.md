@@ -1283,3 +1283,12 @@
 - proxy mock daemon 测试改循环读满（\r\n\r\n + Content-Length），单次 read 在 head+body 分段时是竞态。
 - 验证：fmt / host+gnu clippy 0 错 / workspace **1006** 全绿 / deny ok（CI 口径）。并行 cargo 抢 target 锁假失败再次复现——门必须串行。
 - 留下轮：托盘面板 popover、自启、深链接、.dmg/.msi、<120MB 实测、通知点击聚焦、Windows client.token。
+
+## 2026-11-16 M3 三轮：托盘面板 + 自启 + 深链接 + 安装包 + 内存实测
+- **托盘面板**：左键 toggle_panel 懒创建 360×480 无边框窗，URL 用 `WebviewUrl::App("#tray")`（实测 url.join 产 tauri://localhost#tray，SPA 读 hash 判定）。**`tauri::tray::Rect` 私有且字段是 dpi 枚举**——锚点改用 Click.position（PhysicalPosition 光标点）；on_window_event 返回 () 别 let _（clippy）。失焦即隐（Focused(false)）。
+- **自启**：autostart 插件 ManagerExt 要显式 use；菜单 label 永远从 is_enabled() 读真实 OS 态再重写。
+- **深链接**：conf 声明 schemes=["tetherly"]，on_open_url + get_current 双路径都 show_main_window。
+- **安装包**：release.yml 加 bundle-desktop（tauri-cli + cargo tauri build --no-dev-server）。本地实产 .app 8.18MiB / .dmg 2.82MiB。hdiutil 残留挂载报"资源忙碌"→ detach -force 重跑。
+- **内存实测（M3 验收收口）**：release 壳 + WebContent XPC 双进程 ps 采样：峰值 116MB、稳态 91-96MB < 120MB 达标（daemon 23MB 不计壳口径）。注意壳必须确认 SSE ESTABLISHED 再采样，刚起的瞬时样本连不上 daemon。
+- 验证：双 clippy 0 错 / workspace 1006 绿 / deny ok（瞬时 advisory 警告复跑绿）/ vitest 28 / svelte-check 0 / dist 入 git。
+- 留下轮：Windows client.token、通知点击聚焦、GPU/Networking XPC 全链口径、tray_owner（需 daemon SettingsPatch 先扩）、bundle job CI 首跑。

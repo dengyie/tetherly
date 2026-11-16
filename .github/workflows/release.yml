@@ -110,6 +110,47 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Installer bundles for the Tauri 2 shell (M3 §6.3): .dmg on macOS,
+  # .msi on Windows. The SPA dist is committed (the daemon embeds it via
+  # include_str!), so no Node step is needed — the bundler reads
+  # client/src-tauri/tauri.conf.json with frontendDist ../dist as-is.
+  bundle-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: "--target aarch64-apple-darwin"
+          - os: windows-latest
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: disable git autocrlf
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/src-tauri
+      - name: install tauri-cli
+        run: cargo install tauri-cli --locked --version "^2"
+      - name: build bundle (.dmg on macOS, .msi on Windows)
+        working-directory: client/src-tauri
+        run: cargo tauri build ${{ matrix.args }} --no-dev-server
+      - name: stage bundle artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find target -path '*/bundle/*' \( -name '*.dmg' -o -name '*.msi' \) -exec cp {} dist/ \;
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tetherly-shell-bundle-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
   build-android:
     runs-on: ubuntu-latest
     steps:
@@ -149,7 +190,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build-linux, build-desktop, build-android]
+    needs: [build-linux, build-desktop, bundle-desktop, build-android]
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     runs-on: ubuntu-latest
     permissions:
