@@ -6,29 +6,25 @@ use super::*;
 
 /// `tetherly unpair` -- Unpair arm of the top-level dispatch.
 pub(crate) async fn unpair(device_id: String, ui_port: u16) -> Result<()> {
-    let payload = serde_json::json!({ "device_id": device_id });
-    let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/unpair", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    // §149: v1 device action — 204 forgotten, 404 not paired.
+    let (code, resp) =
+        tetherly_node::loopback_delete(ui_port, &format!("/api/v1/devices/{device_id}"))
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
-    if code != 200 {
+                )
+            })?;
+    if code == 204 {
+        println!("unpaired and severed connection with {device_id}");
+    } else if code == 404 {
+        println!("peer {device_id} was not in trusted peers list");
+    } else {
         anyhow::bail!(
             "node refused unpair (HTTP {code}): {}",
             String::from_utf8_lossy(&resp)
         );
-    }
-    let v: serde_json::Value =
-        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-    let unpaired = v.get("unpaired").and_then(|u| u.as_bool()).unwrap_or(false);
-    if unpaired {
-        println!("unpaired and severed connection with {device_id}");
-    } else {
-        println!("peer {device_id} was not in trusted peers list");
     }
     Ok(())
 }
@@ -157,19 +153,23 @@ pub(crate) async fn peers(
 
 /// `tetherly alias` -- Alias arm of the top-level dispatch.
 pub(crate) async fn alias(peer: String, alias: String, ui_port: u16) -> Result<()> {
-    let payload = serde_json::json!({
-        "peer": peer,
-        "alias": alias,
-    });
+    // §149: v1 device patch — the daemon resolves id/alias/prefix.
+    let payload = serde_json::json!({ "alias": alias });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/alias", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "PATCH",
+        &format!("/api/v1/devices/{peer}"),
+        Some(&bytes),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to set peer alias (HTTP {code}): {}",
@@ -178,7 +178,7 @@ pub(crate) async fn alias(peer: String, alias: String, ui_port: u16) -> Result<(
     }
     let v: serde_json::Value =
         serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-    let device_id = v.get("device_id").and_then(|s| s.as_str()).unwrap_or(&peer);
+    let device_id = v.get("id").and_then(|s| s.as_str()).unwrap_or(&peer);
     let new_alias = v.get("alias").and_then(|s| s.as_str()).unwrap_or(&alias);
     println!("Updated alias for {device_id} -> \"{new_alias}\"");
     Ok(())
@@ -455,19 +455,19 @@ pub(crate) async fn connect(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let payload = serde_json::json!({
-        "peer": peer,
-        "addr": addr,
-    });
+    // §149: v1 connect action — the Device DTO folds "just connected" and
+    // "already connected" into `online` (distinction dropped, documented).
+    let payload = serde_json::json!({ "addr": addr });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/connect", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    let (code, resp) =
+        tetherly_node::loopback_post(ui_port, &format!("/api/v1/devices/{peer}/connect"), &bytes)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
     if code != 200 {
         anyhow::bail!(
             "node refused connect (HTTP {code}): {}",
@@ -477,24 +477,15 @@ pub(crate) async fn connect(
     if json {
         println!("{}", String::from_utf8_lossy(&resp).trim());
     } else {
-        let rep: tetherly_node::PeerConnectReport =
+        let d: tetherly_api::Device =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-        let display_name = rep.alias.or(rep.name).unwrap_or_else(|| "peer".to_string());
-        if rep.already_connected {
-            println!(
-                "peer {} ({}) is already connected (addr: {})",
-                rep.device_id,
-                display_name,
-                rep.addr.as_deref().unwrap_or("unknown")
-            );
-        } else {
-            println!(
-                "successfully connected to {} ({}) at {}",
-                rep.device_id,
-                display_name,
-                rep.addr.as_deref().unwrap_or("unknown")
-            );
-        }
+        let display_name = d.alias.clone().unwrap_or_else(|| d.name.clone());
+        println!(
+            "connected to {} ({}) at {}",
+            display_name,
+            d.id,
+            d.addr.as_deref().unwrap_or("unknown")
+        );
     }
     Ok(())
 }
@@ -545,19 +536,19 @@ pub(crate) async fn block(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let payload = serde_json::json!({
-        "peer": peer,
-        "reason": reason,
-    });
+    // §149: v1 block action — the report's already_blocked / session
+    // terminated distinctions fold into the plain result (documented).
+    let payload = serde_json::json!({ "reason": reason });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/block", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    let (code, resp) =
+        tetherly_node::loopback_post(ui_port, &format!("/api/v1/devices/{peer}/block"), &bytes)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
     if code != 200 {
         anyhow::bail!(
             "node refused block (HTTP {code}): {}",
@@ -567,62 +558,50 @@ pub(crate) async fn block(
     if json {
         println!("{}", String::from_utf8_lossy(&resp).trim());
     } else {
-        let rep: tetherly_node::PeerBlockReport =
+        let d: tetherly_api::Device =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-        let display_name = rep.alias.or(rep.name).unwrap_or_else(|| "peer".to_string());
-        let reason_str = rep
-            .reason
+        let display_name = d.alias.clone().unwrap_or_else(|| d.name.clone());
+        let reason_str = reason
             .as_deref()
             .map(|r| format!(" (reason: \"{r}\")"))
             .unwrap_or_default();
-        if rep.already_blocked {
-            println!(
-                "peer {} ({}) is already blocked{}",
-                rep.device_id, display_name, reason_str
-            );
-        } else {
-            let active_str = if rep.disconnected_active {
-                " (active session terminated)"
-            } else {
-                ""
-            };
-            println!(
-                "successfully blocked peer {} ({}){}{}",
-                rep.device_id, display_name, reason_str, active_str
-            );
-        }
+        println!(
+            "blocked peer {} ({}{}){}",
+            display_name,
+            d.id,
+            reason_str,
+            if d.online { " (was connected)" } else { "" }
+        );
     }
     Ok(())
 }
 
 /// `tetherly unblock` -- Unblock arm of the top-level dispatch.
 pub(crate) async fn unblock(peer: String, json: bool, ui_port: u16) -> Result<()> {
-    let payload = serde_json::json!({ "peer": peer });
-    let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/unblock", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
-    if code != 200 {
+    // §149: v1 unblock action — 200 unblocked, 404 unknown device; the
+    // was_blocked distinction folds into the plain result (documented).
+    let (code, resp) =
+        tetherly_node::loopback_delete(ui_port, &format!("/api/v1/devices/{peer}/block"))
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+    if code == 200 {
+        if json {
+            println!("{}", String::from_utf8_lossy(&resp).trim());
+        } else {
+            println!("unblocked peer {peer}");
+        }
+    } else if code == 404 && !json {
+        println!("peer {peer} was not in the blocklist");
+    } else if code != 200 {
         anyhow::bail!(
             "node refused unblock (HTTP {code}): {}",
             String::from_utf8_lossy(&resp)
         );
-    }
-    if json {
-        println!("{}", String::from_utf8_lossy(&resp).trim());
-    } else {
-        let rep: tetherly_node::PeerUnblockReport =
-            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-        if rep.was_blocked {
-            println!("successfully unblocked peer {}", rep.device_id);
-        } else {
-            println!("peer {} was not in the blocklist", rep.device_id);
-        }
     }
     Ok(())
 }

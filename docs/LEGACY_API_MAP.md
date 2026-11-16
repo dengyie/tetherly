@@ -63,18 +63,24 @@
 | `api/audit{qs}/*` | 1 | ~1 | — | 待契约扩展 / 分批迁移 |
 | `api/audit/*` | 1 | ~1 | cmd_audit | 待契约扩展 / 分批迁移 |
 
-## 下一波就绪（v1 端点已在位，§149 候选）
+## 已迁移第二批（§149，v1 设备动作）
 
-| 旧路由 | v1 | 备注 |
+| 旧路由 | v1 | 报告形态差异（明示） |
 |---|---|---|
-| `POST /api/peers/connect` | `POST /devices/{id}/connect` | ConnectRequest{addr?} |
-| `POST /api/peers/block` | `POST /devices/{id}/block` | BlockRequest{reason?} |
-| `POST /api/peers/unblock` | `DELETE /devices/{id}/block` | |
-| `POST /api/peers/alias` | `PATCH /devices/{id}` `{alias}` | |
-| `POST /api/peers/tags/*` | `PATCH /devices/{id}` `{tags}` | |
-| `POST /api/peers/unpair` | `DELETE /devices/{id}` | 忘记设备 |
-| `GET /api/peers/blocked` | `GET /devices` 按 `blocked` 标志过滤 | |
-| `GET /api/peers/ping`、`/heartbeat`、`/link`、`/link/probe` | 无 v1（链路质量域 → diagnostics） | 待契约扩展 |
+| `POST /api/peers/connect` | `POST /devices/{id}/connect` | PeerConnectReport→Device；already_connected 折入 online |
+| `POST /api/peers/block` | `POST /devices/{id}/block` | PeerBlockReport→Device；already_blocked/终止会话细节折入 |
+| `POST /api/peers/unblock` | `DELETE /devices/{id}/block` | PeerUnblockReport→Device；was_blocked 折入（404→友好文案） |
+| `POST /api/peers/alias` | `PATCH /devices/{id}` `{alias}` | Device 回读 alias |
+| `POST /api/peers/unpair` | `DELETE /devices/{id}` | 204 忘记 / 404 未配对（语义 1:1） |
+
+## 剩余待迁（peers 写域）
+
+| 旧路由 | v1 状态 |
+|---|---|
+| `POST /api/peers/tags/*` | `PATCH /devices/{id}` `{tags}` 全量替换——CLI 语义是加/删单条，需读改写，§150 |
+| `GET /api/peers/blocked` | Device DTO 无 block reason 字段——待契约扩展 |
+| `POST /api/peers/disconnect` | v1 无断开动作——待契约扩展 |
+| `GET /api/peers/ping`、`/heartbeat`、`/link`、`/link/probe` | 链路质量域 → diagnostics，待契约扩展 |
 
 ## 已定案的特殊项
 

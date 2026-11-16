@@ -2596,3 +2596,76 @@ mod ping_v1_tests {
         tetherly_node::set_port_api_token(port, None);
     }
 }
+
+#[cfg(test)]
+mod peers_write_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-peersw-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §149: the peers write commands speak v1 device actions — block,
+    /// unblock, alias, unpair, connect — off the frozen `/api/peers/*`
+    /// aliases. Error paths still count legacy hits, so the diagnostics
+    /// assertion covers them.
+    #[tokio::test]
+    async fn peers_write_commands_round_trip_v1_device_actions() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        let missing = "tdev_nooooooooooooooooooooooo";
+        // Error paths (unknown device) — each leaves a route hit.
+        let _ =
+            super::cmd_peers::block(missing.to_string(), Some("spam".into()), false, port).await;
+        let _ = super::cmd_peers::unblock(missing.to_string(), false, port).await;
+        let _ = super::cmd_peers::alias(missing.to_string(), "x".into(), port).await;
+        let _ = super::cmd_peers::unpair(missing.to_string(), port).await;
+        let _ = super::cmd_peers::connect(missing.to_string(), None, false, port).await;
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/peers")),
+            "peers write commands still hit legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+}
