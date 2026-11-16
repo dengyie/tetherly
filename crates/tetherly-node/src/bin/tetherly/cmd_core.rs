@@ -14,7 +14,9 @@ pub(crate) async fn identity(cfg: NodeConfig) -> Result<()> {
 /// `tetherly pin` -- Pin arm of the top-level dispatch.
 pub(crate) async fn pin(status: bool, clear: bool, json: bool, ui_port: u16) -> Result<()> {
     if clear {
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/pin/clear", b"{}")
+        // §142: v1 pairing/pin — a 204 clears whatever was armed, and unlike
+        // the legacy alias it is idempotent (no separate "was one armed?" flag).
+        let (code, resp) = tetherly_node::loopback_delete(ui_port, "/api/v1/pairing/pin")
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -22,26 +24,19 @@ pub(crate) async fn pin(status: bool, clear: bool, json: bool, ui_port: u16) -> 
                      start one with `tetherly --data-dir <dir> run` first"
                 )
             })?;
-        if code != 200 {
+        if code != 204 {
             anyhow::bail!(
                 "node refused PIN clear request (HTTP {code}): {}",
                 String::from_utf8_lossy(&resp)
             );
         }
-        let v: serde_json::Value =
-            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&v)?);
+            println!("{{\"cleared\": true}}");
         } else {
-            let cleared = v.get("cleared").and_then(|c| c.as_bool()).unwrap_or(false);
-            if cleared {
-                println!("armed PIN successfully revoked and cleared.");
-            } else {
-                println!("no active PIN was armed.");
-            }
+            println!("armed PIN successfully revoked and cleared.");
         }
     } else if status {
-        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/pin")
+        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/pairing/pin")
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -49,6 +44,15 @@ pub(crate) async fn pin(status: bool, clear: bool, json: bool, ui_port: u16) -> 
                      start one with `tetherly --data-dir <dir> run` first"
                 )
             })?;
+        // v1 models "no PIN armed" as 404, not a 200 with active:false.
+        if code == 404 {
+            if json {
+                println!("{{\"active\": false}}");
+            } else {
+                println!("No active PIN armed.");
+            }
+            return Ok(());
+        }
         if code != 200 {
             anyhow::bail!(
                 "node refused PIN status request (HTTP {code}): {}",
@@ -58,31 +62,28 @@ pub(crate) async fn pin(status: bool, clear: bool, json: bool, ui_port: u16) -> 
         let v: serde_json::Value =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&v)?);
+            let mut obj = v.clone();
+            obj["active"] = serde_json::Value::Bool(true);
+            println!("{}", serde_json::to_string_pretty(&obj)?);
         } else {
-            let active = v.get("active").and_then(|a| a.as_bool()).unwrap_or(false);
-            if active {
-                let pin = v.get("pin").and_then(|p| p.as_str()).unwrap_or("???? ????");
-                let expires = v
-                    .get("expires_in_secs")
-                    .and_then(|e| e.as_u64())
-                    .unwrap_or(0);
-                let ttl = v.get("ttl_secs").and_then(|t| t.as_u64()).unwrap_or(180);
-                println!("Active PIN: {pin} (valid for {expires}s / {ttl}s TTL)");
-            } else {
-                println!("No active PIN armed.");
-            }
+            let pin = v.get("pin").and_then(|p| p.as_str()).unwrap_or("???? ????");
+            let expires = v
+                .get("expires_in_secs")
+                .and_then(|e| e.as_u64())
+                .unwrap_or(0);
+            println!("Active PIN: {pin} (valid for {expires}s / 180s TTL)");
         }
     } else {
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/pin", b"{}")
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+        let (code, resp) =
+            tetherly_node::loopback_post(ui_port, "/api/v1/pairing/pin/rotate", b"{}")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
-        if code != 200 {
+                    )
+                })?;
+        if code != 201 {
             anyhow::bail!(
                 "node refused PIN request (HTTP {code}): {}",
                 String::from_utf8_lossy(&resp)
@@ -91,7 +92,9 @@ pub(crate) async fn pin(status: bool, clear: bool, json: bool, ui_port: u16) -> 
         let v: serde_json::Value =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&v)?);
+            let mut obj = v.clone();
+            obj["active"] = serde_json::Value::Bool(true);
+            println!("{}", serde_json::to_string_pretty(&obj)?);
         } else {
             let pin = v
                 .get("pin")
@@ -2004,4 +2007,79 @@ pub(crate) fn print_system_report(v: &serde_json::Value) {
         "  CPU Runtime:      {cpu_time_ms}ms ({:.2}s)",
         cpu_time_ms as f64 / 1000.0
     );
+}
+
+#[cfg(test)]
+mod pin_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-pin-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §142: the CLI pin command speaks v1 pairing/pin — generate arms a PIN
+    /// via `POST /api/v1/pairing/pin/rotate`, status reads it via
+    /// `GET /api/v1/pairing/pin` (404 = none), clear revokes it via
+    /// `DELETE /api/v1/pairing/pin` (204).
+    #[tokio::test]
+    async fn pin_command_round_trips_v1_pairing_pin() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_api_token(Some(
+            tetherly_node::apitoken::read(&dir)
+                .expect("api.token minted")
+                .to_string(),
+        ));
+
+        // No PIN yet: `--status` must treat v1's 404 as "not armed".
+        pin(true, false, false, port).await.unwrap();
+
+        // Generate: v1 rotate returns 201 with a PinGrant.
+        pin(false, false, false, port).await.unwrap();
+        // Status now sees the active grant.
+        pin(true, false, false, port).await.unwrap();
+
+        // Clear: v1 DELETE returns 204, status returns to 404.
+        pin(false, true, false, port).await.unwrap();
+        pin(true, false, false, port).await.unwrap();
+
+        // §9: the pin command must be off the frozen legacy routes entirely —
+        // the daemon's legacy_routes observation (§129) stays empty.
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/pin")),
+            "pin command still hits legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_api_token(None);
+    }
 }

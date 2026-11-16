@@ -1325,3 +1325,11 @@
 - 盘点：/api/* 命中观察 §129 已全量（record + /api/v1/diagnostics legacy_routes），无需新代码，数据自部署起积累。
 - ui/index.html 顶部注入退役横幅（迁 / 提示 + 链接），单文件形态不变。
 - 门禁：fmt/双 target clippy/workspace 1019/deny 全绿；真 daemon 冒烟横幅两形态都在。
+
+## 2026-11-16 M5 CLI 迁移第一波：pin 命令迁 v1
+- 盘点：28 个 cmd_* ~230 处 loopback 调用全打旧 /api/*（v1 引用为零）；第一波选 pin（三臂 ↔ v1 pairing/pin 一一对应）。
+- 映射：GET /api/pin→GET v1 pairing/pin（404=无 PIN）；POST /api/pin→rotate（201）；POST /api/pin/clear→DELETE（204 幂等）。
+- RED 用 §129 观察设施：legacy_routes 断言真实抓到 3 路由命中，GREEN 后归零——观察数据首次当迁移验收工具。
+- cmd_core 首个真 daemon 测试模块（NodeConfig::default + loopback_only + token 注入）；clippy 抓 "items after test module" 移到文件尾。
+- 真 daemon 冒烟（:16459/:36717 避让生产 45716/45717）：三臂全过 + legacy_routes []。生产占 45717 时 run --port 0 不可用，隔离冒烟要显式挑端口。
+- 后续波次：status/sys（Snapshot/system 对齐）→ peers list（devices 重排）→ 其余按 diagnostics 快照分批；Android 用到的路由等 Compose 改版（§9-4）。
