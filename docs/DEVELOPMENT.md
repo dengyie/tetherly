@@ -9323,3 +9323,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **真 daemon 冒烟（隔离 :16459/:36717，避让生产 45716/45717）**：generate 出 PIN、status 显示 active+TTL、`--json` 出 `active/pin/expires_in_secs`、clear 后 status 404→"No active PIN armed."、再 generate 出新 PIN；`/api/v1/diagnostics` `legacy_routes: []`。生产 Tetherly.app 占 45716/45717 时 `run --port 0` 不再可用——隔离冒烟需显式避开。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错（host 初跑抓到 "items after a test module"，测试模块移至文件尾修复）；workspace 全绿；deny 四项 ok。
 - **CLI 迁移后续波次（盘点备查）**：第二波 `status`/`sys`（`/api/state`、`/api/sys` → `Snapshot`/`system`，print 字段需对齐 DTO）；第三波 `peers list`（`/api/peers` → `GET /devices`，live/trusted 分组需重排）；其余 24 个模块按 diagnostics 快照分批，Android 迁移前不动它用的路由（§9-4）。
+
+## 143. M5 CLI 迁移第二波第一刀：`tetherly health` 迁 `/api/v1/health` + `/api/v1/system`（未发版，main 续）
+
+接 §142。第二波先盘点 `status`/`health`/`sys` 三个读取型命令的字段需求，选 `health` 先行——它是唯一不需要新 v1 资源就能 1:1 迁移的。
+
+- **盘点结论（status 迁移的缺口，备查）**：`print_status_summary` 消费 `/api/state` 的 `device_id/name/platform/pin_active/lan_only/peers[]/transfers[]/transfer_stats`。v1 已有 `GET /system`（identity/ports/PeerCounts）+ `GET /pairing`（pin_active）+ `GET /devices`（live 设备含 path/addr）+ `GET /transfers`（Transfer DTO 全字段）；**缺口**是 `lan_only`（overlay 状态不在 v1 契约）与 `transfer_stats`（会话聚合无 v1 资源）——status 迁移前需先扩 v1 契约（ts-rs/schemars 漂移检查联动），单独立轮。
+- **映射**：旧 `GET /api/health` 一次性回 `HealthReport{ok,status,version,device_id,name,platform,pid,uptime_secs,ports,live_peers,trusted_peers}` → v1 拆两个资源：`GET /api/v1/health`（`Health{ok,api,version}`）+ `GET /api/v1/system`（`System`，`PeerCounts{live,trusted}` 对应 live/trusted_peers）。旧 `status` 字段恒为 "ok"（失败节点无 listener 可应答），CLI 固定输出。
+- **cmd_core::health 重写**：先打 v1 health 拿 version（latency 计时以它为准），再打 v1 system 补齐 identity/ports/peers 详情；`--json` 用 `serde_json::json!` 合成旧 one-shot 形状（消费方脚本兼容：`ok/status/version/device_id/.../live_peers/trusted_peers`）。两个 v1 调用独立 map_err（无 token 场景 health 本身匿名可读，system 401 时整体 bail）。
+- **测试**：`health_command_round_trips_v1`（真 daemon，§142 模式复用）——plain 与 `--json` 两形态全跑 + `legacy_routes` 断言无 `/api/health` 命中（RED 阶段真实抓到旧路由调用）。
+- **真 daemon 冒烟（:16460/:36718）**：plain 输出全字段（Version 0.2.59 / PID / Uptime / 五端口 / 双 peer 计数 / latency 0.97ms）；`--json` 合成形状完整；`legacy_routes: []`。
+- **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1021 全绿（+1）；deny 四项 ok。
+- **第二波剩余**：`status`（等 v1 契约扩 `lan_only`/`transfer_stats`）、`sys`（`/api/sys` → v1 暂无系统遥测资源，需新 `GET /diagnostics/sys` 或并入 system）、`peers list`（重排 devices）。

@@ -806,9 +806,15 @@ pub(crate) async fn sys(watch: bool, interval: u64, json: bool, ui_port: u16) ->
 }
 
 /// `tetherly health` -- Health arm of the top-level dispatch.
+///
+/// §143: speaks v1 — `GET /api/v1/health` for the liveness+version pair and
+/// `GET /api/v1/system` for the identity/ports/peer-count details. The old
+/// `/api/health` alias folded both into one `HealthReport`; v1 splits them,
+/// and the human `status` line is a constant ("ok" — the legacy field could
+/// never be anything else since a failing node had no listener to answer).
 pub(crate) async fn health(json: bool, ui_port: u16) -> Result<()> {
     let t0 = std::time::Instant::now();
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/health")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/health")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -823,28 +829,62 @@ pub(crate) async fn health(json: bool, ui_port: u16) -> Result<()> {
             String::from_utf8_lossy(&resp)
         );
     }
+    let basic: tetherly_api::Health = serde_json::from_slice(&resp)?;
     if json {
-        println!("{}", String::from_utf8_lossy(&resp));
+        // Compose the two v1 resources into the legacy one-shot shape.
+        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/system")
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("no running node reachable on 127.0.0.1:{ui_port} ({e})")
+            })?;
+        if code != 200 {
+            anyhow::bail!("node system query failed (HTTP {code})");
+        }
+        let sys: tetherly_api::System = serde_json::from_slice(&resp)?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": basic.ok,
+                "status": "ok",
+                "version": basic.version,
+                "device_id": sys.device_id,
+                "name": sys.name,
+                "platform": sys.platform,
+                "pid": sys.pid,
+                "uptime_secs": sys.uptime_secs,
+                "ports": sys.ports,
+                "live_peers": sys.peers.live,
+                "trusted_peers": sys.peers.trusted,
+            })
+        );
     } else {
-        let rep: tetherly_node::HealthReport = serde_json::from_slice(&resp)?;
-        println!("Node Health Status: {} (200 OK)", rep.status);
-        println!("  Version:          {}", rep.version);
-        println!("  Device ID:        {}", rep.device_id);
-        println!("  Node Name:        {} ({})", rep.name, rep.platform);
-        println!("  PID:              {}", rep.pid);
+        println!("Node Health Status: ok (200 OK)");
+        println!("  Version:          {}", basic.version);
+        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/system")
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("no running node reachable on 127.0.0.1:{ui_port} ({e})")
+            })?;
+        if code != 200 {
+            anyhow::bail!("node system query failed (HTTP {code})");
+        }
+        let sys: tetherly_api::System = serde_json::from_slice(&resp)?;
+        println!("  Device ID:        {}", sys.device_id);
+        println!("  Node Name:        {} ({})", sys.name, sys.platform);
+        println!("  PID:              {}", sys.pid);
         println!(
             "  Uptime:           {} ({}s)",
-            format_uptime(rep.uptime_secs),
-            rep.uptime_secs
+            format_uptime(sys.uptime_secs),
+            sys.uptime_secs
         );
         println!("  Bound Ports:");
-        println!("    Control (Mesh): {}", rep.ports.control);
-        println!("    File Transfer:  {}", rep.ports.file);
-        println!("    Input (Remote): {}", rep.ports.input);
-        println!("    Screen (Video): {}", rep.ports.screen);
-        println!("    UI (Loopback):  {}", rep.ports.ui);
-        println!("  Live Peers:       {}", rep.live_peers);
-        println!("  Trusted Peers:    {}", rep.trusted_peers);
+        println!("    Control (Mesh): {}", sys.ports.control);
+        println!("    File Transfer:  {}", sys.ports.file);
+        println!("    Input (Remote): {}", sys.ports.input);
+        println!("    Screen (Video): {}", sys.ports.screen);
+        println!("    UI (Loopback):  {}", sys.ports.ui);
+        println!("  Live Peers:       {}", sys.peers.live);
+        println!("  Trusted Peers:    {}", sys.peers.trusted);
         println!("  Loopback Latency: {:.2}ms", rtt.as_secs_f64() * 1000.0);
     }
     Ok(())
@@ -2078,6 +2118,68 @@ mod pin_v1_tests {
                 .unwrap_or_default()
                 .starts_with("/api/pin")),
             "pin command still hits legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_api_token(None);
+    }
+}
+
+#[cfg(test)]
+mod health_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-health-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §143: the CLI health command speaks v1 — `GET /api/v1/health` +
+    /// `GET /api/v1/system`, off the frozen legacy `/api/health` alias.
+    #[tokio::test]
+    async fn health_command_round_trips_v1() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_api_token(Some(
+            tetherly_node::apitoken::read(&dir)
+                .expect("api.token minted")
+                .to_string(),
+        ));
+
+        health(false, port).await.unwrap();
+        health(true, port).await.unwrap();
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/health")),
+            "health command still hits legacy routes: {hits:?}"
         );
 
         tetherly_node::set_api_token(None);

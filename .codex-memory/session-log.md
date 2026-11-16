@@ -1333,3 +1333,9 @@
 - cmd_core 首个真 daemon 测试模块（NodeConfig::default + loopback_only + token 注入）；clippy 抓 "items after test module" 移到文件尾。
 - 真 daemon 冒烟（:16459/:36717 避让生产 45716/45717）：三臂全过 + legacy_routes []。生产占 45717 时 run --port 0 不可用，隔离冒烟要显式挑端口。
 - 后续波次：status/sys（Snapshot/system 对齐）→ peers list（devices 重排）→ 其余按 diagnostics 快照分批；Android 用到的路由等 Compose 改版（§9-4）。
+
+## 2026-11-16 M5 CLI 迁移第二波第一刀：health 迁 v1
+- §142 CI 绿。盘点 status/health/sys 三读取命令字段需求：health 唯一无缺口可 1:1 迁（GET /api/v1/health + /system 合成旧 HealthReport 形状）。
+- status 迁移缺口备查：lan_only + transfer_stats 无 v1 资源，需先扩契约（ts-rs 漂移联动），单独立轮。
+- RED（legacy_routes 抓 /api/health）→ GREEN：health() 两次 v1 调用合成，--json 保持旧 one-shot 形状（脚本兼容）。
+- 门禁：fmt/双 clippy/workspace 1021/deny 全绿；真 daemon :16460 冒烟 plain+json 全字段 + legacy_routes []。
