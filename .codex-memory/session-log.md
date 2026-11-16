@@ -1402,3 +1402,9 @@
 - logs 判定更新：v1 端点 §145 已有，CLI 无 logs 子命令——旧 /api/log/* 改判"删除候选，等消费面核查"。
 - 坑（复现确认）：--all-targets clippy 已固化默认；phase1 套件模式偶发超时 ×2（enterprise_file_limits/action_predefined），隔离重跑全绿。
 - 冒烟 :36733：reset PATCH 回读、405 矩阵、legacy_routes 0。23 命令迁完。剩余：dial 契约扩展、logs 消费面核查。
+
+## §154 (2026-11-17) — dial 契约扩展 + POST /pairing/dial + CLI 迁 v1
+- 契约：DialRequest{addr,peer,pin}（deny_unknown_fields）/DialReport{ok,addr}；契约 23。
+- v1：POST /api/v1/pairing/dial（pin 先 set 再 dial_peer，400 透传 legacy 文案）；CLI dial 换 URL，输出不变。
+- 冒烟 :36734：400 三态（无 target/不可达/坏 pin）、405+Allow、deny_unknown_fields 报字段清单、legacy_routes 0。
+- 24 命令迁完；dial 特殊项清账。M5 主体迁移完成，剩 logs 消费面核查。

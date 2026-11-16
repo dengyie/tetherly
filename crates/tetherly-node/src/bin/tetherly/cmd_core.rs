@@ -647,14 +647,22 @@ pub(crate) async fn dial(
         "pin": pin,
     });
     let body = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/dial", &body)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    // §154: speaks v1 — POST /api/v1/pairing/dial (DialRequest/DialReport
+    // contract, same pin-then-dial semantics as the legacy /api/dial).
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/pairing/dial",
+        Some(&body),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "node refused dial (HTTP {code}): {}",
@@ -2783,6 +2791,105 @@ mod metrics_v1_tests {
             .await
             .unwrap();
         assert_eq!(code, 200);
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+}
+
+#[cfg(test)]
+mod dial_v1_tests {
+    use super::*;
+
+    fn temp_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cli-dial-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (
+            Node::start(NodeConfig {
+                data_dir: dir.clone(),
+                loopback_only: true,
+                ui_port: 0,
+                ..NodeConfig::default()
+            })
+            .unwrap(),
+            dir,
+        )
+    }
+
+    /// §154: `tetherly dial` speaks v1 `POST /pairing/dial` — error paths
+    /// (no target, bad addr) return 400 with the legacy wording, and no
+    /// legacy `/api/dial` hit is left on the diagnostics snapshot.
+    #[tokio::test]
+    async fn dial_command_round_trips_v1() {
+        let (node, dir) = temp_node("roundtrip");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        // No target at all → CLI-side bail before any HTTP.
+        let err = dial(None, None, None, port).await.unwrap_err();
+        assert!(err.to_string().contains("--addr"), "{err}");
+
+        // Unreachable address → node refused (400 via v1).
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let err = dial(Some(addr), None, None, port).await.unwrap_err();
+        assert!(err.to_string().contains("node refused dial"), "{err}");
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/diagnostics")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let hits = v["legacy_routes"].as_array().unwrap();
+        assert!(
+            hits.iter().all(|h| !h["route"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/api/dial")),
+            "dial command still hits legacy routes: {hits:?}"
+        );
+
+        tetherly_node::set_port_api_token(port, None);
+    }
+
+    /// §154: method allowlist — GET /pairing/dial is 405 with Allow: POST.
+    #[tokio::test]
+    async fn dial_v1_method_matrix() {
+        let (node, dir) = temp_node("matrix");
+        let (port, _token) =
+            tetherly_node::uihttp::bind_and_spawn_with_token(node.clone_handle(), 0)
+                .await
+                .unwrap();
+        tetherly_node::set_port_api_token(
+            port,
+            Some(
+                tetherly_node::apitoken::read(&dir)
+                    .expect("api.token minted")
+                    .to_string(),
+            ),
+        );
+
+        let (code, resp) = tetherly_node::loopback_get(port, "/api/v1/pairing/dial")
+            .await
+            .unwrap();
+        assert_eq!(code, 405, "GET dial must be 405: {resp:?}");
+        let allow = String::from_utf8_lossy(&resp);
+        assert!(allow.contains("POST"), "405 must advertise POST: {allow}");
 
         tetherly_node::set_port_api_token(port, None);
     }

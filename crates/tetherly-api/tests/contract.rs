@@ -638,4 +638,23 @@ mod commands {
         .unwrap();
         assert_eq!(reset, TrafficTelemetry::default());
     }
+
+    #[test]
+    fn dial_request_and_report_round_trip() {
+        // §154: POST /pairing/dial — deny_unknown_fields, exactly-one target
+        // enforced handler-side; report mirrors the legacy {ok, addr} shape.
+        let req: DialRequest =
+            serde_json::from_value(json!({"addr": "192.168.1.7:45717", "pin": "12345678"}))
+                .unwrap();
+        assert_eq!(req.addr.as_deref(), Some("192.168.1.7:45717"));
+        assert!(serde_json::from_value::<DialRequest>(json!({"host": "x"})).is_err());
+        let rep = DialReport {
+            ok: true,
+            addr: "192.168.1.7:45717".into(),
+        };
+        let v = serde_json::to_value(&rep).unwrap();
+        assert_eq!(v["ok"], true);
+        let back: DialReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back, rep);
+    }
 }

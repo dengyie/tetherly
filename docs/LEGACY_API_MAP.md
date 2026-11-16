@@ -99,9 +99,17 @@
 | `POST /api/peers/ping` | `POST /devices/{id}/ping` | DevicePingReport 契约（device_id/rtt_ms/path/addr）；auto-target（单在线 peer 自动选）移到 CLI 侧 |
 | `POST /api/peers/link/probe` | `POST /devices/{id}/probe` | LinkProbeReport 契约；grade 字符串化；count/interval_ms 可选参数同语义 |
 
+## 已迁移第六批（§153-§154，诊断遥测 + 拨号契约扩展）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `GET /api/metrics`（+`/api/traffic`） | `GET /diagnostics/metrics` | TrafficTelemetry 逐字段镜像 TrafficReport；legacy `ok:true` 折掉（200 即 ok） |
+| `POST /api/metrics/reset`（+`/api/traffic/reset`） | `PATCH /diagnostics/metrics` | POST 动作→幂等 PATCH；reset 折入同一 GET 回读形状 |
+| `POST /api/dial` | `POST /pairing/dial` | DialRequest/DialReport 契约；pin 先设后拨；400 透传 legacy 文案（不可达/坏 pin/缺 target） |
+
 ## 已定案的特殊项
 
-- `POST /api/dial`：首配对拨号（addr+PIN），v1 无对应资源——等 `POST /pairing/dial` 契约扩展（§146 定案）。
+- ~~`POST /api/dial`~~：§154 迁 `POST /devices`→`/pairing/dial`（DialRequest/DialReport 契约；pin 先设后拨，400 透传 legacy 文案）。已迁移第六批。
 - `/api/log/*`：v1 已有 `GET /diagnostics/logs`、`PATCH /diagnostics/log-level`（§145 建成）；CLI 无 `logs` 子命令、面板/UX 层消费——旧路由删除候选，等消费面核查。
 - `/api/metrics`（+`/api/traffic` 别名、`/reset`）：§153 迁 v1——`GET /api/v1/diagnostics/metrics`（TrafficTelemetry 逐字段镜像）+ `PATCH /diagnostics/metrics`（reset 折入同一 GET 回读）；CLI `metrics`/`traffic` 已迁（第五批延伸）。
 - `tray.rs` 内的 `tray_keepalive`/SSE 使用 v1，不在下线范围。

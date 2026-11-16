@@ -9455,3 +9455,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **门禁**：fmt 绿；**--all-targets clippy 0 错**（§152 教训已固化为默认参数）；windows-gnu clippy 0 错；deny 四项 ok；workspace 最终 40/40 全绿——**如实**：中途两次 phase1 套件模式单测超时（`enterprise_file_limits` / `action_predefined`，§124 负载竞争家族），按隔离协议重跑：单测 ×2 绿、套件整跑绿、最终全量零失败。
 - **隔离冒烟（:36733，LAN :46733）**：metrics 表格+JSON 形状、traffic 别名、--reset 确认行+报告、POST 405、PATCH {"reset":true} 直连回读、`legacy_routes` 总命中 **0**。
 - **M5 战果更新**：23 命令迁完（metrics+traffic 别名）。剩余：dial（`POST /pairing/dial` 契约扩展）、logs 消费面核查（无 CLI 命令，等删除窗口）。
+
+## 154. M5：dial 契约扩展（DialRequest/DialReport）+ POST /pairing/dial + CLI dial 迁 v1
+
+接 §153。M5 特殊项最后一笔：首配对拨号拿到 v1 资源端点，附录"已定案的特殊项"清账。
+
+- **契约扩展 ×2**（tetherly-api）：`DialRequest{addr,peer,pin}`（deny_unknown_fields；addr/peer 恰一由 handler 校验——CLI 与 tray 历来同语义）、`DialReport{ok,addr}`（镜像 legacy `{ok, addr}` 回读形状，addr 是实际拨通的 resolved socket）。契约测试 +1（23）：恰一字段反例 + 未知字段拒绝 + 报告往返。
+- **v1 端点**：`POST /api/v1/pairing/dial`（Write；pairing 资源域——PIN 本属 pairing，拨号是 pairing 的动作语义）。处理器：pin 有值先 `parse_pin`+`set_pin`（400 透传 pin 错误），再 `dial_peer(target)`（连接拒绝/不可达 400 透传 legacy 同款文案），成功回 `DialReport{ok:true, addr}`。allowed() 补 `Some(&["POST"])`。
+- **CLI 迁移**（cmd_core.rs `dial`）：`POST /api/dial` → `POST /api/v1/pairing/dial`（loopback_request + api_token_for）；错误文案 "node refused dial (HTTP …)" 不变，成功 "dialed <target>" 不变。
+- **测试**：bin +2（`dial_v1_tests`：无 target CLI 侧 bail、不可达地址 400 透传、legacy_routes /api/dial 归零；方法矩阵 GET→405 且 Allow: POST）；契约 23；lib 352；bin 16。
+- **门禁**：fmt 绿；--all-targets clippy 0 错；windows-gnu clippy 0 错；deny 四项 ok；workspace 三遍 40/40——**如实**：首次全量 phase1 套件单测超时 1 例（§124 负载竞争家族单次偶发），隔离重跑连续两遍零失败后放行。
+- **隔离冒烟（:36734，LAN :46734）**：无 target 本地报错、不可达 400（"Connection refused"）、坏 pin 400（"bad pin: invalid pin"）、GET 405、空 body 400 "missing addr or peer"、未知字段 deny 拒绝（报可接受字段清单）、`legacy_routes` 总命中 **0**。
+- **M5 战果更新**：24 命令迁完；dial 特殊项清账。剩余唯一：logs 旧 `/api/log/*` 消费面核查（v1 端点 §145 已备，无 CLI 命令）——M5 主体迁移**完成**。

@@ -12,9 +12,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
 use tetherly_api::{
-    BlockRequest, ConnectRequest, DevicePatch, Diagnostics, ErrorBody, ErrorCode, Event, Health,
-    HeartbeatPatch, LinkProbeRequest, LogLevel, LogLevelRequest, LogTail, PinGrant, SettingsPatch,
-    SysHost, SysProcess, SysTelemetry, Topic, API_VERSION,
+    BlockRequest, ConnectRequest, DevicePatch, Diagnostics, DialReport, DialRequest, ErrorBody,
+    ErrorCode, Event, Health, HeartbeatPatch, LinkProbeRequest, LogLevel, LogLevelRequest, LogTail,
+    PinGrant, SettingsPatch, SysHost, SysProcess, SysTelemetry, Topic, API_VERSION,
 };
 use tetherly_core::CoreError;
 use tokio::io::AsyncWriteExt;
@@ -98,6 +98,7 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/settings" => Some(&["GET", "PATCH"]),
         "/api/v1/pairing/pin" => Some(&["GET", "DELETE"]),
         "/api/v1/pairing/pin/rotate" | "/api/v1/input/release" => Some(&["POST"]),
+        "/api/v1/pairing/dial" => Some(&["POST"]),
         "/api/v1/diagnostics/log-level" => Some(&["PATCH"]),
         "/api/v1/diagnostics/metrics" => Some(&["GET", "PATCH"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -186,6 +187,7 @@ pub(super) async fn route(
         ("GET", "/api/v1/pairing") => Ok(json(200, &crate::apiv1::model::pairing(node))),
         ("GET", "/api/v1/pairing/pin") => Ok(get_pin(node)),
         ("POST", "/api/v1/pairing/pin/rotate") => rotate_pin(node),
+        ("POST", "/api/v1/pairing/dial") => dial_peer(node, body).await,
         ("DELETE", "/api/v1/pairing/pin") => {
             node.clear_pin();
             Ok(no_content())
@@ -517,6 +519,35 @@ fn rotate_pin(node: &Node) -> Handled {
     pin_grant(node)
         .map(|g| json(201, &g))
         .ok_or_else(|| error(ErrorCode::Internal, "PIN not active after generation"))
+}
+
+/// `POST /pairing/dial`: optionally prime the PIN, then dial one target by
+/// direct address or discovered name/id. §154 folds the legacy `/api/dial`
+/// reply (`{ok, addr}`) into the DialReport contract.
+async fn dial_peer(node: &Node, body: &[u8]) -> Handled {
+    let req: DialRequest = parse_body(body)?;
+    if let Some(p) = req.pin.as_deref() {
+        let digits = tetherly_core::pin::parse_pin(p)
+            .map_err(|e| error(ErrorCode::BadRequest, format!("bad pin: {e}")))?;
+        node.set_pin(digits);
+    }
+    let target = req
+        .addr
+        .as_deref()
+        .or(req.peer.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| error(ErrorCode::BadRequest, "missing addr or peer"))?;
+    let resolved = node
+        .dial_peer(target)
+        .await
+        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    Ok(json(
+        200,
+        &DialReport {
+            ok: true,
+            addr: resolved.to_string(),
+        },
+    ))
 }
 
 async fn log_tail(query: Option<&str>) -> Handled {

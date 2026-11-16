@@ -217,6 +217,28 @@ pub struct Pairing {
     pub pin_expires_in_secs: u64,
 }
 
+/// §154: `POST /pairing/dial` body — dial a peer by direct address or a
+/// discovered name/id, optionally priming the pairing PIN first. Exactly one
+/// of `addr`/`peer` must be set; the empty-request shape is a handler 400.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct DialRequest {
+    pub addr: Option<String>,
+    pub peer: Option<String>,
+    pub pin: Option<String>,
+}
+
+/// §154: dial result — mirrored from the legacy `/api/dial` reply shape
+/// (`{ok, addr}`) so CLI consumers are unchanged; `addr` is the resolved
+/// socket the session actually dialed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DialReport {
+    pub ok: bool,
+    pub addr: String,
+}
+
 /// Who holds the cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -1180,6 +1202,8 @@ mod bindings {
             decl::<LogTail>(&cfg),
             decl::<LogLevel>(&cfg),
             decl::<LogLevelRequest>(&cfg),
+            decl::<DialRequest>(&cfg),
+            decl::<DialReport>(&cfg),
             decl::<ChannelTraffic>(&cfg),
             decl::<ProtocolMessages>(&cfg),
             decl::<TrafficTelemetry>(&cfg),
