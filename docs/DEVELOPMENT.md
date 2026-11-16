@@ -9303,3 +9303,12 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **第二次 release（run 43862007888）全绿**：build-linux 3m49s / build-desktop ×2 / **bundle-desktop macOS 12m58s（.dmg）+ Windows 16m12s（.msi）** / build-android / publish 11s。Release 12 产物齐全：daemon+CLI 三平台、macOS viewer、Android apk+so、**Tetherly_0.2.59_aarch64.dmg、Tetherly_0.2.59_x64_en-US.msi**。main ci（workflow fix）43861828320 亦绿。
 - **部署**：生产随 `scripts/deploy.sh --target all --tag v0.2.59` 切换；部署后线上 daemon 契约含 tray_owner/client.token（§137/§138 的 PATCH 不再 400），`/` 即新 SPA。M4 验收窗口（生产两端一周无回退）自部署日起算。
 - **边界**：alphaValue 托盘隐藏观感留真机冒烟（装 .dmg 后看菜单栏空位）；`/next/` 旧书签不再服务（next_url 已同指 `/`）；M5 收敛待 M4 验收通过后启动。
+
+## 141. M5 预收敛：旧控制台退役横幅 + 观察基础设施盘点（未发版，main 续）
+
+接 §140。M5 收敛的完整验收需等 M4 生产一周无回退，本轮做不依赖验收窗口的预收敛件。
+
+- **观察基础设施盘点（§8 M5 "旧 `/api/*` 别名带日志观察"）**：§129 M2a 已建全量——`hub.legacy.record`（method+route 模板+caller 分类，256 key 上限防扫描膨胀）在 `handle` 入口计数，`GET /api/v1/diagnostics` 的 `legacy_routes` 快照暴露。旧控制台迁移观察无需新代码；数据自 v0.2.59 部署起积累（部署前 `/` 是旧控制台，命中全是它自己）。
+- **退役横幅（ui/index.html）**：`<main>` 顶部注入一条内联样式横幅——"⚠️ 这是旧版控制台（`/legacy/`），新版控制台已迁至 `/`。旧版将在后续版本移除，请迁移你的书签。"，链接指向 `/`。单文件形态不变（无外部资产），next.rs `legacy_entry_is_the_single_file_console` 测试（无 `src=` 断言）保持通过。
+- **验证**：真 daemon 隔离端口冒烟——`/legacy/` 与 `/legacy/deep/link` 均含横幅与迁移链接；fmt / host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1019 全绿；deny 四项 ok。
+- **M5 剩余（等 M4 验收）**：删 `ui/index.html` 与 `/legacy/` 路由、旧 `/api/*` 别名按 diagnostics 快照逐个下线（路由 ~555→~60）、Android Compose 改版。

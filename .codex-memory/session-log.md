@@ -1320,3 +1320,8 @@
 - 首跑如实失败：--no-dev-server 是 tauri-cli v1 flag，v2 双平台秒死（43859667167）；fix → --ci（033d3b3），删 tag 重打重触发。
 - 第二次全绿（43862007888）：.dmg 12m58s + .msi 16m12s 首次产出，Release 12 产物齐，publish ✓。
 - 待办：deploy.sh --tag v0.2.59 生产切换（用户执行）；alphaValue 真机冒烟；M4 一周验收窗口自部署起算。
+
+## 2026-11-16 M5 预收敛：legacy 退役横幅
+- 盘点：/api/* 命中观察 §129 已全量（record + /api/v1/diagnostics legacy_routes），无需新代码，数据自部署起积累。
+- ui/index.html 顶部注入退役横幅（迁 / 提示 + 链接），单文件形态不变。
+- 门禁：fmt/双 target clippy/workspace 1019/deny 全绿；真 daemon 冒烟横幅两形态都在。
