@@ -1308,3 +1308,9 @@
 - 测试：apitoken 16（+7）、uihttp 集成 v1_client_token（Write 过/Admin 403/伪造 401）、壳 token 优先级。
 - 门禁：fmt/clippy host+win-gnu 0 错；workspace 1017 全绿（首跑 phase1 §124 flake 复跑绿）；deny 四项 ok。
 - M3 余项：bundle-desktop CI 首跑、alphaValue 真机冒烟、通知点击（原生 delegate）、409 interactive（opener 降权已覆盖）。
+
+## 2026-11-16 M4：/ 切新 SPA + /legacy/ + 托盘深链接优先 + popover 退役
+- 路由：/ = client/dist SPA（vite base /next/ → /，重建），/assets/* 固定资产（未知 404），/legacy/* = ui/index.html 单文件；get_index/INDEX 死代码删；next_url 同指 /。
+- 托盘：open_client_or_dashboard（deep link 优先、浏览器回退）接 macOS openDashboard + Windows 左键/双击/IDM_DASHBOARD；Windows start 对未注册 scheme 偏乐观记边界。
+- popover 全退役：platform/popover.rs（387 行）+ tray.rs Windows 子模块（385 行）+ IDM_PANEL + 菜单项/selector。
+- 门禁：fmt/双 target clippy 0 错；workspace 1019 全绿；deny ok。真 daemon 45826 实证全路由。

@@ -9279,3 +9279,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **测试**：apitoken +7（双 token tier 判定 2、tier 数学 1、签发/轮换/独立于 daemon token/世界可读拒绝/坏文件拒绝/路径共置 4）；uihttp 集成 `v1_client_token_grants_write_but_not_admin`（真 HTTP：client token GET system 200、POST transfers 非 401/403、restart 403 Forbidden 包络、伪造 token 401）；壳 `env_discovery_sequential` 扩 client.token 优先/单独存在/全缺报数据目录。
 - **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1017 全绿（首跑 phase1 一例 §124 竞态 flake，复跑×2 稳定绿）；`cargo deny check` 四项 ok（CI 口径）；壳 27 测试 + clippy 净。
 - **边界（M3 余项）**：bundle-desktop job 首次 CI 实跑验证、alphaValue 隐藏真机冒烟、通知点击聚焦（原生 delegate，本轮定案不做）、§4.4 `needs_interactive_session` 409 语义（现有 opener SYSTEM 降权已覆盖实际场景，未单独实现错误码）。
+
+## 139. 控制客户端 M4 切换：`/` 换新 SPA + `/legacy/` 保留旧控制台 + 托盘优先唤起客户端 + popover 退役（未发版，main 续）
+
+接 §138。M4 三件套一次交付（§8 里程碑表）：路由切换、托盘深链接优先、popover 退役。
+
+- **路由切换（uihttp.rs + uihttp/next.rs）**：`/`（及 `/index.html`）改服务新 SPA 入口（`client/dist/index.html` 内嵌）；SPA 资产挂 `/assets/app.js`、`/assets/index.css`（固定名，未知 `/assets/*` 404——资产名固定，miss 是 bug 不是 SPA 路由）；旧控制台移 `/legacy/`（`/legacy`、`/legacy/`、任意 `/legacy/*` 深路径都回落单文件入口——旧控制台无外部资产，API 调用是同源绝对路径，子路径解析不存在）。`client/vite.config.ts` `base` 从 `/next/` 改 `/`，SPA 重建后入口引用 `/assets/*`。`api_core::get_index` + uihttp 顶层 `INDEX` 常量删除（死代码）。
+- **CLI 兼容（apitoken.rs）**：`next_url` 语义改为与 `dashboard_url` 同指 `/`（M4 后 SPA 就是控制台，`tetherly dashboard --next` 保留仅兼容，两者 URL 相同）。
+- **托盘优先客户端（§8 M4：深链接 `tetherly://open`）**：新 `apitoken::open_client_or_dashboard(ui_port, token)`——先 `open tetherly://open`（macOS）/`cmd /C start tetherly://open`（Windows），非零退出或 spawn 失败回退 tokenized dashboard URL（浏览器路径永不拒绝，与 `tetherly dashboard --open` 同型）。接线三处：macOS `openDashboard:` 菜单项；Windows `WM_LBUTTONUP`/`WM_LBUTTONDBLCLK`（合并分支）；Windows `IDM_DASHBOARD`。壳侧 §6.3 已注册 `tetherly://` scheme 且收到 URL 聚焦主窗，无需改动。**边界**：Windows `cmd /C start` 对未注册 scheme 几乎总返回成功（弹"选择应用"对话框），回退在该平台偏乐观——记为已知行为。
+- **popover 退役（§8 M4）**：删 `platform/popover.rs`（macOS NSPopover 面板，387 行）与 `platform.rs` 的 `pub mod popover`；删 tray.rs 内 Windows 状态面板子模块 `mod popover`（popup 窗口+fetch 渲染，385 行）与 `IDM_PANEL`；macOS 菜单"📊 状态面板"项与 `togglePopover:` selector 删除；Windows 左键从 toggle popover 改为优先唤起客户端。客户端壳的托盘面板与 `/` 控制台覆盖其职责。
+- **测试**：next.rs 重写 5 例（入口引用 M4 根路径、资产 content-type、未知资产 404、旧控制台单文件形态+子路径回落、doctype）；uihttp 集成 `m4_root_serves_spa_legacy_and_assets`（真 HTTP：`/` 引用根资产、两资产 200+ctype、未知资产 404、`/legacy` 三形态 200 且无外部 script、非 GET 404）；apitoken `next_url` 断言改指 `/`。
+- **集成验收（本机真 daemon，隔离端口 45826，TETHERLY_DATA_DIR=/tmp/tetherly-m4-test）**：`/` 出 SPA 入口（引 `/assets/app.js`）；`/assets/app.js` 200 text/javascript、`/assets/index.css` 200 text/css、`/assets/nope.js` 404；`/legacy/` 旧控制台、`/legacy/deep/link` 200；`/api/v1/health` 200 不受影响。
+- **验证（门禁串行）**：fmt 绿；host + windows-gnu clippy `--all-targets -D warnings` 双 0 错（windows-gnu 报 `IDM_PANEL` dead_code 已删）；`cargo test --workspace --locked` 1019 全绿（+2）；`cargo deny check` 四项 ok。
+- **边界（M4 验收/余项）**：§8 验收是"生产两端连续使用一周没有回退"——随下次发版部署后观察；`/next/` 旧路径不再服务（未留重定向，书签自行迁移；`next_url` 已同指 `/` 无影响）；M5 才删 `ui/index.html` 与 `/legacy/`、下线旧 `/api/*` 别名。

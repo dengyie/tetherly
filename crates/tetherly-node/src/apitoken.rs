@@ -327,12 +327,50 @@ pub fn dashboard_url(ui_port: u16, token: Option<&str>) -> String {
     }
 }
 
-/// Same contract as [`dashboard_url`] for the ADR-139 SPA at `/next/`
-/// (M2b). The legacy console stays the default until the M4 switch.
+/// Same contract as [`dashboard_url`] for the ADR-139 SPA. Since M4 the
+/// SPA IS the console at `/`; the CLI flag now exists only for
+/// compatibility and both URLs point at the same entry.
 pub fn next_url(ui_port: u16, token: Option<&str>) -> String {
     match token {
-        Some(t) => format!("http://127.0.0.1:{ui_port}/next/#token={t}"),
-        None => format!("http://127.0.0.1:{ui_port}/next/"),
+        Some(t) => format!("http://127.0.0.1:{ui_port}/#token={t}"),
+        None => format!("http://127.0.0.1:{ui_port}/"),
+    }
+}
+
+/// M4: the shell owns the tray surface (§6.3), so tray clicks prefer the
+/// Tauri client over the browser: open the `tetherly://open` deep link
+/// first (the shell shows its main window; the bundler registered the
+/// scheme), falling back to the tokenized dashboard URL when no client is
+/// installed (spawn error — the browser path never refuses, matching
+/// `tetherly dashboard --open`).
+pub fn open_client_or_dashboard(ui_port: u16, token: Option<&str>) -> bool {
+    #[cfg(target_os = "macos")]
+    let client = std::process::Command::new("open")
+        .arg("tetherly://open")
+        .status();
+    #[cfg(windows)]
+    let client = std::process::Command::new("cmd")
+        .args(["/C", "start", "", "tetherly://open"])
+        .status();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let client: Result<std::process::ExitStatus, std::io::Error> =
+        std::process::Command::new("xdg-open")
+            .arg("tetherly://open")
+            .status();
+    match client {
+        Ok(s) if s.success() => true,
+        _ => {
+            let url = dashboard_url(ui_port, token);
+            #[cfg(target_os = "macos")]
+            let browser = std::process::Command::new("open").arg(&url).spawn();
+            #[cfg(windows)]
+            let browser = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &url])
+                .spawn();
+            #[cfg(not(any(target_os = "macos", windows)))]
+            let browser = std::process::Command::new("xdg-open").arg(&url).spawn();
+            browser.is_ok()
+        }
     }
 }
 
@@ -610,10 +648,12 @@ mod tests {
             dashboard_url(45716, Some("abc")),
             "http://127.0.0.1:45716/#token=abc"
         );
-        assert_eq!(next_url(45716, None), "http://127.0.0.1:45716/next/");
+        // M4: the SPA is the console; next_url kept for CLI compat and
+        // points at the same entry as dashboard_url.
+        assert_eq!(next_url(45716, None), "http://127.0.0.1:45716/");
         assert_eq!(
             next_url(45716, Some("abc")),
-            "http://127.0.0.1:45716/next/#token=abc"
+            "http://127.0.0.1:45716/#token=abc"
         );
     }
 }

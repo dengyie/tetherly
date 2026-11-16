@@ -28,7 +28,6 @@ pub use tetherly_loopback::{
     set_port_api_token,
 };
 
-const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_BODY: usize = 2 * 1024 * 1024;
 /// Whole-request read budget (headers + body). A loopback client that stalls
@@ -661,14 +660,14 @@ async fn route(
         return v1::route(method, path_only, query_str, body, node, hub).await;
     }
     match (method, path_only) {
-        ("GET", "/") | ("GET", "/index.html") => {
-            api_core::get_index(method, query_str, body, node).await
-        }
-        // ADR-139 M2b: the new SPA lives at /next/ (legacy console stays at
-        // /). GET-only, assets 404, unknown /next/* paths fall back to the
-        // entry so deep links still boot the app.
-        ("GET", "/next") | ("GET", "/next/") => next::get_entry(),
-        ("GET", p) if p.starts_with("/next/") => next::get_asset(p),
+        // ADR-139 M4: the new SPA is the default console at `/`; the legacy
+        // console moved to /legacy/ and stays there until M5 deletes it.
+        // GET-only; unknown /legacy/* paths fall back to the legacy entry so
+        // its hash-free asset references keep resolving.
+        ("GET", "/") | ("GET", "/index.html") => next::get_entry(),
+        ("GET", p) if p.starts_with("/assets/") => next::get_asset(p),
+        ("GET", "/legacy") | ("GET", "/legacy/") => next::get_legacy_entry(),
+        ("GET", p) if p.starts_with("/legacy/") => next::get_legacy_asset(p),
         ("GET", "/api/state") => api_core::get_state(method, query_str, body, node).await,
         ("GET", "/api/config") => api_core::get_config(method, query_str, body, node).await,
         ("POST", "/api/config") | ("PUT", "/api/config") => {
@@ -2113,6 +2112,23 @@ mod tests {
         tetherly_loopback::parse_http_response(&out)
     }
 
+    /// GET with only the raw response head returned (for content-type
+    /// assertions on non-JSON bodies the JSON parser would mangle).
+    async fn raw_head(port: u16, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let head = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(head.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        String::from_utf8_lossy(&out[..split]).to_string()
+    }
+
     /// Gated-route call with the token the test node's listener minted.
     async fn authed(
         port: u16,
@@ -2319,6 +2335,53 @@ mod tests {
         let (_, code, body) = raw_with_head(port, "GET", "/api/v1/system", Some(&bogus)).await;
         assert_eq!(code, 401);
         assert_eq!(body["error"]["code"], "unauthorized");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-139 M4 switch: `/` serves the new SPA entry, `/assets/*` the
+    /// embedded bundle, `/legacy/` the old single-file console — all over
+    /// real HTTP against the live listener.
+    #[tokio::test]
+    async fn m4_root_serves_spa_legacy_and_assets() {
+        let (node, dir) = temp_test_node("v1_m4_switch");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // `/` is the SPA entry and references the rooted assets.
+        let (code, body) = raw_request(port, "GET", "/", None, b"").await;
+        assert_eq!(code, 200);
+        let html = String::from_utf8(body).unwrap();
+        assert!(html.contains("/assets/app.js"), "{html}");
+        assert!(html.contains("/assets/index.css"), "{html}");
+
+        // The referenced assets resolve with their content types.
+        for (path, ctype) in [
+            ("/assets/app.js", "text/javascript"),
+            ("/assets/index.css", "text/css"),
+        ] {
+            let (code, body) = raw_request(port, "GET", path, None, b"").await;
+            assert_eq!(code, 200, "GET {path}");
+            assert!(!body.is_empty(), "GET {path} non-empty");
+            let head = raw_head(port, path).await;
+            assert!(head.contains(ctype), "GET {path}: {head}");
+        }
+        // Unknown assets 404 (fixed names; a miss is a bug, not an SPA route).
+        let (code, _) = raw_request(port, "GET", "/assets/nope.js", None, b"").await;
+        assert_eq!(code, 404);
+
+        // /legacy/ serves the old single-file console (inline scripts only).
+        for p in ["/legacy", "/legacy/", "/legacy/deep/link"] {
+            let (code, body) = raw_request(port, "GET", p, None, b"").await;
+            assert_eq!(code, 200, "GET {p}");
+            let html = String::from_utf8(body).unwrap();
+            assert!(html.contains("Tetherly"), "GET {p}");
+            assert!(!html.contains("<script src="), "GET {p} no external js");
+        }
+
+        // Non-GET on the consoles falls through the GET-only arms to the
+        // router's 404 fallback.
+        let (code, _) = raw_request(port, "POST", "/", None, b"").await;
+        assert_eq!(code, 404);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

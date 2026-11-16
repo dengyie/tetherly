@@ -3,15 +3,6 @@
 
 use super::*;
 
-pub(super) async fn get_index(
-    _method: &str,
-    _query_str: Option<&str>,
-    _body: &[u8],
-    _node: &Node,
-) -> UiResponse {
-    UiResponse::new(200, "text/html; charset=utf-8", INDEX.as_bytes().to_vec())
-}
-
 pub(super) async fn get_state(
     _method: &str,
     _query_str: Option<&str>,
