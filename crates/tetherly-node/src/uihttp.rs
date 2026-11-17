@@ -2378,7 +2378,8 @@ mod tests {
         // Client token: Read passes, Admin shutdown refuses.
         let client = crate::apitoken::read_client(&dir).expect("client token");
         let client_auth = format!("Authorization: Bearer {client}");
-        let (_, code, _) = raw_with_head(port, "GET", "/api/v1/discovery", Some(&client_auth)).await;
+        let (_, code, _) =
+            raw_with_head(port, "GET", "/api/v1/discovery", Some(&client_auth)).await;
         assert_eq!(code, 200);
         let (_, code, body) =
             raw_with_head(port, "POST", "/api/v1/system/shutdown", Some(&client_auth)).await;
@@ -2386,8 +2387,7 @@ mod tests {
         assert_eq!(body["error"]["code"], "forbidden", "{body}");
 
         // A missing token is 401, not 403 (fail closed before tier math).
-        let (_, code, _) =
-            raw_with_head(port, "POST", "/api/v1/system/shutdown", None).await;
+        let (_, code, _) = raw_with_head(port, "POST", "/api/v1/system/shutdown", None).await;
         assert_eq!(code, 401);
 
         // Unknown v1 method on a known path is 405 with the typed envelope.

@@ -85,10 +85,12 @@ impl LockoutTable {
     /// evicted by a concurrent sweep of stale entries.
     fn sweep(&mut self, now_ms: u64) {
         if self.by_peer.len() > LOCKOUT_SWEEP_FLOOR {
-            self.by_peer.retain(|_, l| l.fails() > 0 && !l.expired(now_ms));
+            self.by_peer
+                .retain(|_, l| l.fails() > 0 && !l.expired(now_ms));
         }
         if self.by_ip.len() > LOCKOUT_SWEEP_FLOOR {
-            self.by_ip.retain(|_, l| l.fails() > 0 && !l.expired(now_ms));
+            self.by_ip
+                .retain(|_, l| l.fails() > 0 && !l.expired(now_ms));
         }
     }
 
@@ -262,7 +264,10 @@ mod tests {
             t.by_peer.len()
         );
         // The genuine locked peer is untouched.
-        assert!(t.check(Some(&live), None, 1000), "live lock survives the sweep");
+        assert!(
+            t.check(Some(&live), None, 1000),
+            "live lock survives the sweep"
+        );
     }
 
     /// An expired lock is spent: after LOCKOUT the entry is swept away and a
@@ -274,7 +279,10 @@ mod tests {
         for i in 0..PIN_MAX_FAILS {
             t.fail(Some(&id), None, 1000 + i as u64);
         }
-        assert!(t.check(Some(&id), None, 1000), "locked while the lock lives");
+        assert!(
+            t.check(Some(&id), None, 1000),
+            "locked while the lock lives"
+        );
         // Past expiry + past the floor, one more fail (a new attempt) sweeps
         // the stale entry: the map must not retain the expired record. The
         // lock runs from the LAST fail (1004), so expiry is 1004+LOCKOUT.
