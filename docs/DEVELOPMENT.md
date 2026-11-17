@@ -9478,3 +9478,14 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **纪律更新（用户指令，本轮起固化）**：本地不再构建产物、不再跑全量 workspace 测试——最终验证全部交给 CI；本地只跑单测目标（`cargo test -p X --lib <过滤>`）且每轮前后 `pgrep` 扫残留测试进程。起因：本轮一次后台全量测试被超时强杀后，其派生的测试节点进程成为孤儿并级联重启，拖垮用户机器（已如实复盘并整改：孤儿根因=强杀 harness 不级联杀子进程；整改=禁后台强杀 + 单测面 + 残留扫描）。
 - **门禁**：fmt 绿；--all-targets clippy 0 错；windows-gnu clippy 0 错；deny 四项 ok；本地定向测试 lib 352 / bin 16 / 契约 23 全绿；残留进程扫描清零。全量 workspace ×2 与冒烟交 CI 验证。
 - **M5 战果**：24 命令迁完 + 三组旧别名（dial/metrics/log 共 8 条路由）物理删除。剩余候选：`/api/state`、`/api/config` 等更早期别名组按 diagnostics 快照逐组核对后同法删除。
+
+## 155a. §155 CI 修复链复盘（4 轮红→绿，6 提交）
+
+§155 主体提交 e15d041 后 CI 连红 4 轮，全部如实记录：
+
+1. **21a768a**：`tests/phase1.rs` 16 处旧 `/api/metrics`、`/api/dial` 调用漏扫——本轮删除前只扫了 `crates/` 与 `client/`，未扫仓库根 `tests/`。教训固化为删除纪律：**删除任何 legacy 路由前全仓 grep（含根 tests/）**。metrics/dial 探针迁 v1（reset 读回断言改为 `total_tx_bytes==0`，因 §153 折掉 `ok` 字段）。
+2. **31a917f**：python 脚本插入的长行未格式化，CI fmt 步红。教训：**脚本化编辑后必跑 `cargo fmt`**。
+3. **44f4bfb**：`TrafficReport→TrafficTelemetry` 反序列化 ×5 用错类型——`tetherly_node::TrafficTelemetry` 是 node 内部运行时结构（字段私有、无 `Deserialize`），测试须用契约层的 `tetherly_api::TrafficTelemetry`（逐字段可反序列化镜像）。根 `Cargo.toml` dev-dependencies 补 `tetherly-api`。教训：**同名/孪生类型优先用契约层**——v1 响应形状的 SSOT 在 tetherly-api。
+4. **a05a490**：reset PATCH 经 `loopback_request` 显式传 `None` token 吃 401——v1 非 GET 路径一律要 token（`v1_required_tier` → Write 层）；同函数里 GET 能过是因为 `loopback_get` 内部自动附带 `api_token_for(port)`。修复：PATCH 传 `tetherly_node::api_token_for(host_ui).as_deref()`，与 CLI 侧同法。教训：**phase1 测试里裸 `loopback_request(..., None)` 对 v1 写路径天然 401，写 v1 断言时默认带 per-port token**。
+
+第 4 轮 macos/windows/android/deny 四作业绿，ubuntu 独红 `m3_2_peer_gone_returns_cursor`（phase3.rs:262 "cursor did not return home"，2.5s 宽限+5s 断言窗口被 runner 调度抖动吃掉）——§124 flake 家族（mac/windows 同测试同轮全绿、与本轮改动零路径交集），按隔离协议 `gh run rerun --failed` 重跑绿，run 44070194176 五作业全 success，§155 收口。

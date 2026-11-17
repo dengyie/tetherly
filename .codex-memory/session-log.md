@@ -1414,3 +1414,4 @@
 - 测试改造：log 路由测试→404+503 双断言（v1 承接）；token-gate 503 探针换 v1 log-level（daemon/restart 真重启返 200 不能当探针——二次修正如实记）。
 - 事故复盘：后台全量测试超时强杀→孤儿测试节点级联重启→用户机器死机。整改（用户指令）：本地禁产物构建/禁全量测试（交 CI）、禁后台强杀、单测面+残留扫描。
 - 门禁全绿；lib352/bin16/契约23；全量交 CI。M5：24 命令 + 8 条旧路由删除。
+- §155 CI 修复链（如实）：e15d041→21a768a→31a917f→d0fabcc→44f4bfb→a05a490 共 6 提交，4 轮红。①phase1 metrics/dial 旧调用漏扫（教训：删除前全仓扫含根 tests/）；②python 插入行未 fmt；③TrafficReport→TrafficTelemetry 反序列化 ×5——注意 tetherly_node::TrafficTelemetry 是 node 内部结构（字段私有无 Deserialize），测试要用 tetherly_api::TrafficTelemetry（根 Cargo.toml dev-deps 补 tetherly-api）；④reset PATCH 走 loopback_request 显式传 None token 吃 401——v1 非 GET 一律要 token（v1_required_tier→Write），须传 api_token_for(port)，与 CLI 同法；loopback_get 自动附带所以 GET 全过。第 4 轮 mac/win/android/deny 绿，ubuntu 独红 m3_2（§124 flake 家族，隔离重跑绿，run 44070194176 五作业 success）。§155 收口。
