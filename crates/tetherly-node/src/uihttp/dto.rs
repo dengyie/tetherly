@@ -173,15 +173,6 @@ pub(super) struct PeerGroupBody {
 }
 
 #[derive(serde::Deserialize)]
-pub(super) struct DialBody {
-    #[serde(default)]
-    pub(super) addr: Option<String>,
-    #[serde(default)]
-    pub(super) peer: Option<String>,
-    pub(super) pin: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
 pub(super) struct NotifyBody {
     pub(super) title: String,
     pub(super) body: String,

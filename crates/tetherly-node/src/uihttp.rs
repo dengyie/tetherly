@@ -52,7 +52,6 @@ mod api_focus;
 mod api_handoff;
 mod api_input;
 mod api_locate;
-mod api_log;
 mod api_media;
 mod api_messages;
 mod api_mic;
@@ -678,7 +677,6 @@ async fn route(
         ("POST", "/api/pin/clear") | ("DELETE", "/api/pin") => {
             api_core::post_pin_clear(method, query_str, body, node).await
         }
-        ("POST", "/api/dial") => api_core::post_dial(method, query_str, body, node).await,
         ("POST", "/api/peers/unpair") => {
             api_peers::post_peers_unpair(method, query_str, body, node).await
         }
@@ -770,12 +768,6 @@ async fn route(
         ("GET", "/api/net") => api_core::get_net(method, query_str, body, node).await,
         ("POST", "/api/net/refresh") | ("POST", "/api/net/probe") => {
             api_core::post_net_refresh(method, query_str, body, node).await
-        }
-        ("GET", "/api/metrics") | ("GET", "/api/traffic") => {
-            api_core::get_metrics(method, query_str, body, node).await
-        }
-        ("POST", "/api/metrics/reset") | ("POST", "/api/traffic/reset") => {
-            api_core::post_metrics_reset(method, query_str, body, node).await
         }
         ("GET", "/api/clip/policy") => {
             api_clip::get_clip_policy(method, query_str, body, node).await
@@ -1389,13 +1381,6 @@ async fn route(
             api_screen_tile::post_screen_tile_motion_reset(method, query_str, body, node).await
         }
         ("GET", "/api/input") => api_input::get_input(method, query_str, body, node).await,
-        ("GET", "/api/log") | ("GET", "/api/log/status") => {
-            api_log::get_log(method, query_str, body, node).await
-        }
-        ("GET", "/api/log/tail") => api_log::get_log_tail(method, query_str, body, node).await,
-        ("POST", "/api/log/level") | ("PUT", "/api/log/level") => {
-            api_log::post_log_level(method, query_str, body, node).await
-        }
         ("GET", "/api/input/trace") => {
             api_input::get_input_trace(method, query_str, body, node).await
         }
@@ -2061,25 +2046,40 @@ mod tests {
         (node, dir)
     }
 
-    /// v0.2.49 log API: status is always served; tail and level answer 503
-    /// (not a panic, not a 404) when the process never installed file
-    /// logging — the library/test case. The live paths are covered by
-    /// `logging::tests`.
+    /// §155: the legacy `/api/log/*` aliases are deleted — every path is a
+    /// plain 404 now, and the v1 equivalents (`GET /api/v1/diagnostics/logs`,
+    /// `PATCH /api/v1/diagnostics/log-level`) answer the same degraded 503
+    /// when file logging is not installed.
     #[tokio::test]
-    async fn log_api_routes_are_wired_and_degrade_without_file_logging() {
+    async fn legacy_log_routes_deleted_v1_serves_the_domain() {
         let (node, _dir) = temp_test_node("log_api");
         let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
-        let (code, body) = loopback_get(port, "/api/log").await.unwrap();
-        assert_eq!(code, 200);
-        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(rep["cap_bytes"], crate::logsink::LOG_FILE_CAP);
-        let (code, _) = loopback_get(port, "/api/log/tail?lines=5").await.unwrap();
-        assert_eq!(code, 503);
+        for path in ["/api/log", "/api/log/status", "/api/log/tail?lines=5"] {
+            let (code, _) = loopback_get(port, path).await.unwrap();
+            assert_eq!(code, 404, "{path} must be deleted");
+        }
         let (code, _) = authed(
             port,
             &_dir,
             "POST",
             "/api/log/level",
+            Some(br#"{"filter":"debug"}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 404, "/api/log/level must be deleted");
+
+        // v1 parity: tail degrades to 503 without file logging, same as the
+        // deleted legacy route did.
+        let (code, _) = authed(port, &_dir, "GET", "/api/v1/diagnostics/logs?tail=5", None)
+            .await
+            .unwrap();
+        assert_eq!(code, 503);
+        let (code, _) = authed(
+            port,
+            &_dir,
+            "PATCH",
+            "/api/v1/diagnostics/log-level",
             Some(br#"{"filter":"debug"}"#),
         )
         .await
@@ -2182,9 +2182,9 @@ mod tests {
             let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .unwrap();
-            let body = br#"{"filter":"debug"}"#;
+            let body = br#"{}"#;
             let head = format!(
-                "POST /api/log/level HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "POST /api/daemon/restart HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             s.write_all(head.as_bytes()).await.unwrap();
@@ -2207,13 +2207,13 @@ mod tests {
         let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
         let token = crate::apitoken::read(&dir).expect("listener issues a token file");
 
-        let (code, body) = raw_request(port, "POST", "/api/log/level", None, b"{}").await;
+        let (code, body) = raw_request(port, "POST", "/api/daemon/restart", None, b"{}").await;
         assert_eq!(code, 401, "{}", String::from_utf8_lossy(&body));
         let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(rep["ok"], false);
 
         let wrong = format!("X-Tetherly-Token: {}", "0".repeat(64));
-        let (code, _) = raw_request(port, "POST", "/api/log/level", Some(&wrong), b"{}").await;
+        let (code, _) = raw_request(port, "POST", "/api/daemon/restart", Some(&wrong), b"{}").await;
         assert_eq!(code, 401);
 
         let (code, _) = raw_request(port, "POST", "/api/daemon/restart", None, b"{}").await;
@@ -2221,11 +2221,29 @@ mod tests {
         let (code, _) = raw_request(port, "DELETE", "/api/action/local?id=x", None, b"").await;
         assert_eq!(code, 401);
 
+        // §155: the 503-degradation probe uses the v1 log-level route now —
+        // the legacy /api/log/level alias it replaced is deleted, and
+        // /api/daemon/restart actually restarts (200 + async shutdown), so it
+        // cannot stand in for a "reaches the handler" assertion here.
         let good = format!("X-Tetherly-Token: {token}");
-        let (code, _) = raw_request(port, "POST", "/api/log/level", Some(&good), b"{}").await;
+        let (code, _) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/diagnostics/log-level",
+            Some(&good),
+            br#"{"filter":"debug"}"#,
+        )
+        .await;
         assert_eq!(code, 503, "authorized request reaches the handler");
         let bearer = format!("Authorization: Bearer {token}");
-        let (code, _) = raw_request(port, "POST", "/api/log/level", Some(&bearer), b"{}").await;
+        let (code, _) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/diagnostics/log-level",
+            Some(&bearer),
+            br#"{"filter":"debug"}"#,
+        )
+        .await;
         assert_eq!(code, 503);
 
         let (code, _) = raw_request(port, "GET", "/api/health", None, b"").await;

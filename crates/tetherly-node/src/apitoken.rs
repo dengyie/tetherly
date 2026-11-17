@@ -63,10 +63,8 @@ pub fn requires_token(method: &str, path: &str) -> bool {
                 | "/api/file/batch"
                 | "/api/file/drag/intent"
                 | "/api/files/drag/intent"
-        ) | (
-            "POST" | "PUT",
-            "/api/action/policy" | "/api/config" | "/api/log/level"
-        ) | ("POST" | "PUT" | "DELETE", "/api/action/local")
+        ) | ("POST" | "PUT", "/api/action/policy" | "/api/config")
+            | ("POST" | "PUT" | "DELETE", "/api/action/local")
     )
 }
 
@@ -548,8 +546,6 @@ mod tests {
             ("PUT", "/api/action/policy"),
             ("POST", "/api/config"),
             ("PUT", "/api/config"),
-            ("POST", "/api/log/level"),
-            ("PUT", "/api/log/level"),
             ("POST", "/api/file/inbox/open"),
             ("POST", "/api/inbox/open"),
             ("POST", "/api/handoff/inbox/open"),
@@ -574,7 +570,6 @@ mod tests {
             ("GET", "/api/config"),
             ("GET", "/api/action/local"),
             ("GET", "/api/action/policy"),
-            ("GET", "/api/log/tail?lines=5"),
             ("POST", "/api/action/trigger"),
             ("POST", "/api/handoff/send"),
             ("POST", "/api/copy"),

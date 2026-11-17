@@ -1408,3 +1408,9 @@
 - v1：POST /api/v1/pairing/dial（pin 先 set 再 dial_peer，400 透传 legacy 文案）；CLI dial 换 URL，输出不变。
 - 冒烟 :36734：400 三态（无 target/不可达/坏 pin）、405+Allow、deny_unknown_fields 报字段清单、legacy_routes 0。
 - 24 命令迁完；dial 特殊项清账。M5 主体迁移完成，剩 logs 消费面核查。
+
+## §155 (2026-11-17) — 旧路由删除轮：dial/metrics/log 8 条别名下线
+- 删 uihttp 路由臂×3 + api_log 模块 + api_core 三 handler + DialBody；apitoken 门禁/测试表同步修剪。
+- 测试改造：log 路由测试→404+503 双断言（v1 承接）；token-gate 503 探针换 v1 log-level（daemon/restart 真重启返 200 不能当探针——二次修正如实记）。
+- 事故复盘：后台全量测试超时强杀→孤儿测试节点级联重启→用户机器死机。整改（用户指令）：本地禁产物构建/禁全量测试（交 CI）、禁后台强杀、单测面+残留扫描。
+- 门禁全绿；lib352/bin16/契约23；全量交 CI。M5：24 命令 + 8 条旧路由删除。

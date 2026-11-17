@@ -9467,3 +9467,14 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **门禁**：fmt 绿；--all-targets clippy 0 错；windows-gnu clippy 0 错；deny 四项 ok；workspace 三遍 40/40——**如实**：首次全量 phase1 套件单测超时 1 例（§124 负载竞争家族单次偶发），隔离重跑连续两遍零失败后放行。
 - **隔离冒烟（:36734，LAN :46734）**：无 target 本地报错、不可达 400（"Connection refused"）、坏 pin 400（"bad pin: invalid pin"）、GET 405、空 body 400 "missing addr or peer"、未知字段 deny 拒绝（报可接受字段清单）、`legacy_routes` 总命中 **0**。
 - **M5 战果更新**：24 命令迁完；dial 特殊项清账。剩余唯一：logs 旧 `/api/log/*` 消费面核查（v1 端点 §145 已备，无 CLI 命令）——M5 主体迁移**完成**。
+
+## 155. M5：旧路由删除轮——/api/dial、/api/metrics(+traffic)、/api/log/* 全部下线
+
+接 §154。M5 终点动作：全部迁完且消费面归零的旧别名从路由表删除（§9 判定来源：diagnostics legacy_routes 快照 + 调用方 UA 分类）。
+
+- **删除清单**：`POST /api/dial`（§154 迁）、`GET /api/metrics|traffic` + `POST /api/metrics/reset|traffic/reset`（§153 迁）、`GET /api/log|log/status|log/tail` + `POST|PUT /api/log/level`（v1 §145 已承接）。路由臂 ×3 处从 uihttp.rs 摘除；`api_log` 模块（get_log/get_log_tail/post_log_level + LevelBody）整体删除；`api_core` 的 post_dial/get_metrics/post_metrics_reset 三函数与 DialBody DTO 删除。
+- **apitoken 同步**：`requires_token` 门禁摘掉 `/api/log/level`（PUT/POST）；两个测试表删对应行。门禁语义不变——v1 log-level 已在 v1 tier 表内。
+- **测试改造（RED→GREEN 各一次）**：`log_api_routes_are_wired…` → `legacy_log_routes_deleted_v1_serves_the_domain`（旧路径 ×4 全 404 + v1 等价端点同款 503 降级）；`privileged_routes_require_the_api_token` 的 503 探针从 `/api/log/level` 换到 `PATCH /api/v1/diagnostics/log-level`（如实：先换到 `/api/daemon/restart` 后发现它授权后真重启返 200，不能充当"到达 handler"探针，二次修正）；`refused_request_with_late_body` 换 `/api/daemon/restart`（401 在 handler 前触发，语义安全）。bin 测试的 metrics/dial legacy_routes 归零断言删除后天然成立，未改。
+- **纪律更新（用户指令，本轮起固化）**：本地不再构建产物、不再跑全量 workspace 测试——最终验证全部交给 CI；本地只跑单测目标（`cargo test -p X --lib <过滤>`）且每轮前后 `pgrep` 扫残留测试进程。起因：本轮一次后台全量测试被超时强杀后，其派生的测试节点进程成为孤儿并级联重启，拖垮用户机器（已如实复盘并整改：孤儿根因=强杀 harness 不级联杀子进程；整改=禁后台强杀 + 单测面 + 残留扫描）。
+- **门禁**：fmt 绿；--all-targets clippy 0 错；windows-gnu clippy 0 错；deny 四项 ok；本地定向测试 lib 352 / bin 16 / 契约 23 全绿；残留进程扫描清零。全量 workspace ×2 与冒烟交 CI 验证。
+- **M5 战果**：24 命令迁完 + 三组旧别名（dial/metrics/log 共 8 条路由）物理删除。剩余候选：`/api/state`、`/api/config` 等更早期别名组按 diagnostics 快照逐组核对后同法删除。

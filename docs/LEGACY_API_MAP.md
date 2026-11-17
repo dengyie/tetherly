@@ -110,7 +110,8 @@
 ## 已定案的特殊项
 
 - ~~`POST /api/dial`~~：§154 迁 `POST /devices`→`/pairing/dial`（DialRequest/DialReport 契约；pin 先设后拨，400 透传 legacy 文案）。已迁移第六批。
-- `/api/log/*`：v1 已有 `GET /diagnostics/logs`、`PATCH /diagnostics/log-level`（§145 建成）；CLI 无 `logs` 子命令、面板/UX 层消费——旧路由删除候选，等消费面核查。
-- `/api/metrics`（+`/api/traffic` 别名、`/reset`）：§153 迁 v1——`GET /api/v1/diagnostics/metrics`（TrafficTelemetry 逐字段镜像）+ `PATCH /diagnostics/metrics`（reset 折入同一 GET 回读）；CLI `metrics`/`traffic` 已迁（第五批延伸）。
+- ~~`/api/log/*`~~：§155 删除（v1 `GET /diagnostics/logs`、`PATCH /diagnostics/log-level` 同语义承接；消费面核查 CLI/前端/tray 全零后删除）。
+- ~~`/api/metrics`（+`/api/traffic`、`/reset`）~~：§153 迁 v1、§155 删除旧别名（`GET/PATCH /api/v1/diagnostics/metrics`）。
+- ~~`POST /api/dial`~~：§154 迁 v1、§155 删除旧别名（`POST /api/v1/pairing/dial`）。
 - `tray.rs` 内的 `tray_keepalive`/SSE 使用 v1，不在下线范围。
 - 判定来源：调用方 UA 分类（cli/curl/browser/android），删除每组别名前先查 diagnostics 快照确认零命中。

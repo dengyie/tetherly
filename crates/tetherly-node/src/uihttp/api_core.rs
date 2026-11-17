@@ -80,41 +80,6 @@ pub(super) async fn post_pin_clear(
     json_ok(&serde_json::json!({ "ok": true, "cleared": cleared }))
 }
 
-pub(super) async fn post_dial(
-    _method: &str,
-    _query_str: Option<&str>,
-    body: &[u8],
-    node: &Node,
-) -> UiResponse {
-    match serde_json::from_slice::<DialBody>(body) {
-        Ok(d) => {
-            if let Some(p) = d.pin {
-                match tetherly_core::pin::parse_pin(&p) {
-                    Ok(digits) => node.set_pin(digits),
-                    Err(e) => return err(400, &e.to_string()),
-                }
-            }
-            let target = d
-                .addr
-                .as_deref()
-                .or(d.peer.as_deref())
-                .filter(|s| !s.trim().is_empty());
-            let target = match target {
-                Some(t) => t,
-                None => return err(400, "missing addr or peer"),
-            };
-            match node.dial_peer(target).await {
-                Ok(resolved_addr) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "addr": resolved_addr.to_string(),
-                })),
-                Err(e) => err(400, &e.to_string()),
-            }
-        }
-        Err(_) => err(400, "bad json"),
-    }
-}
-
 pub(super) async fn get_caps(
     _method: &str,
     _query_str: Option<&str>,
@@ -239,29 +204,6 @@ pub(super) async fn post_net_refresh(
 ) -> UiResponse {
     let rep = node.refresh_network().await;
     json_ok(&rep)
-}
-
-pub(super) async fn get_metrics(
-    _method: &str,
-    _query_str: Option<&str>,
-    _body: &[u8],
-    node: &Node,
-) -> UiResponse {
-    json_ok(&node.traffic_report())
-}
-
-pub(super) async fn post_metrics_reset(
-    _method: &str,
-    _query_str: Option<&str>,
-    _body: &[u8],
-    node: &Node,
-) -> UiResponse {
-    node.reset_traffic_metrics();
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "reset": true,
-        "timestamp_ms": node_clock_ms()
-    }))
 }
 
 pub(super) async fn get_health(
