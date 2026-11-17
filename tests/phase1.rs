@@ -3615,9 +3615,15 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
 
     // 5. Reset metrics via PATCH /api/v1/diagnostics/metrics (idempotent
     // reset folded into the same readback; §153).
-    let (code_rst, body_rst) = tetherly_node::loopback_request(host_ui, "PATCH", "/api/v1/diagnostics/metrics", Some(b"{}"), None)
-        .await
-        .expect("reset metrics succeeds");
+    let (code_rst, body_rst) = tetherly_node::loopback_request(
+        host_ui,
+        "PATCH",
+        "/api/v1/diagnostics/metrics",
+        Some(b"{}"),
+        None,
+    )
+    .await
+    .expect("reset metrics succeeds");
     assert_eq!(code_rst, 200);
     let rst_json: serde_json::Value = serde_json::from_slice(&body_rst).unwrap();
     assert_eq!(rst_json["total_tx_bytes"], 0);
