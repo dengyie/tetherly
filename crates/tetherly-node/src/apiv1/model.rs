@@ -8,11 +8,14 @@ use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
     Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, ChannelTraffic,
-    Device, HandoffStatus, HeartbeatConfig, Inbox, InboxFile, Input, Layout, LayoutEdge,
-    LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, LocalCaps, MessageDirection, Pairing,
-    PeerCaps, PeerCounts, PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, Settings,
-    SettingsGeneral, SettingsTransfer, Snapshot, System, TrafficTelemetry, Transfer,
-    TransferDirection, TransferPhase, TransferStats, Transfers, API_VERSION,
+    Device, FileBatchItem, FileBatchReport, FileDecision, FileDecisionReport, FileDispatchItem,
+    FileDispatchReport, FileOffer, FileOffers, HandoffStatus, HeartbeatConfig, Inbox, InboxFile,
+    Input, Layout, LayoutEdge, LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, LocalCaps,
+    MessageDirection, Outbox, OutboxClearReport, OutboxEntryDto, OutboxResendReport, Pairing,
+    PeerCaps, PeerCounts, PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, ResumeMarker,
+    ResumeMarkers, Settings, SettingsGeneral, SettingsTransfer, Snapshot, Storage,
+    StorageCleanReport, System, TrafficTelemetry, Transfer, TransferDirection, TransferPhase,
+    TransferStats, Transfers, API_VERSION,
 };
 use tetherly_core::{CoreError, DisplayEdge, PathKind, TrustedPeer};
 
@@ -232,9 +235,11 @@ pub fn transfers(node: &Node) -> Transfers {
     }
 }
 
-/// The inbox resource: files waiting in `data_dir/inbox`.
-pub fn inbox(node: &Node) -> Inbox {
-    let r = node.inbox_report(None, None);
+/// The inbox resource: files waiting in `data_dir/inbox`. §162a: `search` /
+/// `limit` mirror the legacy `/api/file/inbox` query (substring match on the
+/// file name, capped listing) — `None` returns the unfiltered resource.
+pub fn inbox(node: &Node, search: Option<&str>, limit: Option<usize>) -> Inbox {
+    let r = node.inbox_report(search, limit);
     Inbox {
         count: r.count as u64,
         total_bytes: r.total_bytes,
@@ -248,6 +253,270 @@ pub fn inbox(node: &Node) -> Inbox {
                 is_safe: f.is_safe,
             })
             .collect(),
+    }
+}
+
+// ---- §162b: file-domain mappers (offers / send / outbox / storage) ----
+
+/// The pending-offers resource: legacy `/api/file/offers` report mapped onto
+/// the contract; a `peer` filter that resolves to nothing yields the empty
+/// resource (legacy parity).
+pub fn file_offers(
+    node: &Node,
+    id: Option<&str>,
+    peer: Option<&str>,
+) -> Result<FileOffers, CoreError> {
+    let r = node.file_offers(id, peer)?;
+    Ok(FileOffers {
+        count: r.count as u64,
+        auto_accept_trusted: r.auto_accept_trusted,
+        offers: r
+            .offers
+            .iter()
+            .map(|o| FileOffer {
+                transfer_id: o.transfer_id.clone(),
+                filename: o.filename.clone(),
+                total_bytes: o.total_bytes,
+                resume_from: o.resume_from,
+                source: o.source.clone(),
+                peer: o.peer.clone(),
+                peer_alias: o.peer_alias.clone(),
+                size: o.size,
+                sha256: o.sha256.clone(),
+                timestamp_ms: o.timestamp_ms,
+                offered_ms: o.offered_ms,
+            })
+            .collect(),
+    })
+}
+
+/// The decision report folds the single (`id`) and batch (`all`/`peer`)
+/// legacy shapes: one decision or counts + per-offer outcomes.
+pub fn file_decision_single(
+    accepted: bool,
+    rep: crate::runtime::FileDecisionReport,
+) -> FileDecisionReport {
+    let decision = FileDecision {
+        accepted,
+        action: rep.action.clone(),
+        transfer_id: rep.transfer_id.clone(),
+        peer: rep.peer.clone(),
+        filename: rep.filename.clone(),
+        total_bytes: rep.total_bytes,
+        resume_from: rep.resume_from,
+        timestamp_ms: rep.timestamp_ms,
+    };
+    FileDecisionReport {
+        accepted: Some(accepted),
+        action: Some(rep.action),
+        transfer_id: Some(rep.transfer_id),
+        peer: Some(rep.peer),
+        filename: Some(rep.filename),
+        total_bytes: Some(rep.total_bytes),
+        accepted_count: u64::from(accepted),
+        rejected_count: u64::from(!accepted),
+        total_evaluated: 1,
+        decisions: vec![decision],
+    }
+}
+
+/// Batch accept/reject report mapping (legacy `FileBatchDecisionReport`).
+pub fn file_decision_batch(rep: crate::runtime::FileBatchDecisionReport) -> FileDecisionReport {
+    FileDecisionReport {
+        accepted: None,
+        action: Some(rep.action),
+        transfer_id: None,
+        peer: None,
+        filename: None,
+        total_bytes: None,
+        accepted_count: rep.accepted_count as u64,
+        rejected_count: rep.rejected_count as u64,
+        total_evaluated: rep.total_evaluated as u64,
+        decisions: rep
+            .decisions
+            .into_iter()
+            .map(|d| FileDecision {
+                accepted: d.accepted,
+                action: d.action,
+                transfer_id: d.transfer_id,
+                peer: d.peer,
+                filename: d.filename,
+                total_bytes: d.total_bytes,
+                resume_from: d.resume_from,
+                timestamp_ms: d.timestamp_ms,
+            })
+            .collect(),
+    }
+}
+
+/// Multi-peer file dispatch report mapping (legacy `MultiFileSendReport`);
+/// the selector serializes in its `as_label` form like messages dispatch.
+pub fn file_dispatch(rep: crate::runtime::MultiFileSendReport) -> FileDispatchReport {
+    FileDispatchReport {
+        selector: rep.selector.as_label(),
+        filename: rep.filename,
+        size: rep.size,
+        sha256: rep.sha256,
+        target_count: rep.target_count as u64,
+        success_count: rep.success_count as u64,
+        skipped_offline_count: rep.skipped_offline_count as u64,
+        failed_count: rep.failed_count as u64,
+        dispatches: rep
+            .dispatches
+            .into_iter()
+            .map(|d| FileDispatchItem {
+                peer: d.peer,
+                peer_alias: d.peer_alias,
+                transfer_id: d.transfer_id,
+                outbox_id: d.outbox_id,
+                success: d.success,
+                error: d.error,
+            })
+            .collect(),
+    }
+}
+
+/// Batch send report mapping (legacy `BatchSendReport`).
+pub fn file_batch(rep: crate::runtime::BatchSendReport) -> FileBatchReport {
+    FileBatchReport {
+        batch_id: rep.batch_id,
+        peer: rep.peer,
+        peer_alias: rep.peer_alias,
+        total_files: rep.total_files as u64,
+        successful_files: rep.successful_files as u64,
+        failed_files: rep.failed_files as u64,
+        total_bytes: rep.total_bytes,
+        items: rep
+            .items
+            .into_iter()
+            .map(|i| FileBatchItem {
+                transfer_id: i.transfer_id,
+                name: i.name,
+                size: i.size,
+                sha256: i.sha256,
+                status: i.status,
+                error: i.error,
+            })
+            .collect(),
+    }
+}
+
+/// The outbox resource: ring total plus the queried page (peer/status/limit).
+pub fn outbox(
+    node: &Node,
+    peer: Option<&str>,
+    status: Option<crate::runtime::OutboxStatus>,
+    limit: Option<usize>,
+) -> Result<Outbox, CoreError> {
+    let r = node.outbox_history(peer, status, limit)?;
+    Ok(Outbox {
+        total: r.total as u64,
+        returned: r.returned as u64,
+        entries: r.entries.into_iter().map(outbox_entry).collect(),
+    })
+}
+
+/// One outbox record mapping (`OutboxStatus` serializes snake_case).
+fn outbox_entry(e: crate::runtime::OutboxEntry) -> OutboxEntryDto {
+    OutboxEntryDto {
+        id: e.id,
+        transfer_id: e.transfer_id,
+        peer: e.peer,
+        peer_alias: e.peer_alias,
+        filename: e.filename,
+        size: e.size,
+        sha256: e.sha256,
+        source_path: e.source_path,
+        status: e.status.as_str().to_string(),
+        error: e.error,
+        started_ms: e.started_ms,
+        completed_ms: e.completed_ms,
+        speed_bps: e.speed_bps,
+    }
+}
+
+/// `DELETE /outbox` report mapping (peer/status targets preserved).
+pub fn outbox_clear(rep: crate::runtime::OutboxClearReport) -> OutboxClearReport {
+    OutboxClearReport {
+        cleared_count: rep.cleared_count as u64,
+        target_peer: rep.target_peer,
+        target_status: rep.target_status.map(|s| s.as_str().to_string()),
+    }
+}
+
+/// `POST /outbox/{id}/resend` report mapping.
+pub fn outbox_resend(rep: crate::runtime::OutboxResendReport) -> OutboxResendReport {
+    OutboxResendReport {
+        original_id: rep.original_id,
+        new_transfer_id: rep.new_transfer_id,
+    }
+}
+
+/// The resume-markers resource mapping (`ResumeMarkerDto` field-for-field).
+pub fn resume_markers(node: &Node) -> ResumeMarkers {
+    let r = node.resume_markers_report();
+    ResumeMarkers {
+        count: r.count as u64,
+        total_partial_bytes: r.total_partial_bytes,
+        markers: r
+            .markers
+            .into_iter()
+            .map(|m| ResumeMarker {
+                transfer_id: m.transfer_id,
+                source: m.source,
+                source_alias: m.source_alias,
+                total_bytes: m.total_bytes,
+                offset_bytes: m.offset_bytes,
+                progress_percent: m.progress_percent,
+                chunk_aligned: m.chunk_aligned,
+                part_file_exists: m.part_file_exists,
+                part_file_bytes: m.part_file_bytes,
+            })
+            .collect(),
+    }
+}
+
+/// The storage resource mapping (resume marker detail folds into the count).
+pub fn storage(node: &Node) -> Storage {
+    let r = node.storage_report();
+    Storage {
+        data_dir: r.data_dir,
+        inbox_dir: r.inbox_dir,
+        inbox_total_bytes: r.inbox_total_bytes,
+        inbox_file_count: r.inbox_file_count as u64,
+        partial_bytes: r.partial_bytes,
+        partial_count: r.partial_count as u64,
+        orphaned_partial_count: r.orphaned_partial_count as u64,
+        orphaned_partial_bytes: r.orphaned_partial_bytes,
+        meta_bytes: r.meta_bytes,
+        resume_markers_count: r.resume_markers_count as u64,
+    }
+}
+
+/// `POST /storage/clean` report mapping.
+pub fn storage_clean(rep: crate::runtime::StorageCleanReport) -> StorageCleanReport {
+    StorageCleanReport {
+        freed_bytes: rep.freed_bytes,
+        deleted_files_count: rep.deleted_files_count as u64,
+        cleared_resume_entries: rep.cleared_resume_entries as u64,
+    }
+}
+
+/// The auto-accept policy resource: policy + session auto-accept counter.
+pub fn auto_accept_policy(node: &Node) -> tetherly_api::AutoAcceptPolicyDto {
+    let rep = node.auto_accept_policy_report();
+    tetherly_api::AutoAcceptPolicyDto {
+        enabled: rep.policy.enabled,
+        allowed_groups: rep.policy.allowed_groups,
+        allowed_tags: rep.policy.allowed_tags,
+        allowed_types: rep
+            .policy
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+        max_file_size: rep.policy.max_file_size,
+        auto_accepted_count: rep.auto_accepted_count,
     }
 }
 

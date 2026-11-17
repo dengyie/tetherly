@@ -34,12 +34,13 @@ pub(crate) async fn send(
                 "peer": peer,
                 "tag": tag,
                 "group": group,
-                "type": device_type,
+                "device_type": device_type,
                 "all": all,
             });
             let bytes = serde_json::to_vec(&payload)?;
+            // §162b: v1 transfers resource — the multi (selector) send.
             let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/file/send-multi", &bytes)
+                tetherly_node::loopback_post(ui_port, "/api/v1/transfers/multi", &bytes)
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -124,15 +125,16 @@ pub(crate) async fn send(
             "peer": peer,
         });
         let bytes = serde_json::to_vec(&payload)?;
-        // The daemon hashes the whole file before answering /api/file/send
+        // The daemon hashes the whole file before answering POST /transfers
         // (the transfer id is content-addressed) — the default 30s budget
         // fails large sends on loaded machines while the transfer actually
         // completes: a false failure. Give the hash a wide deadline.
         const FILE_SEND_CONNECT: std::time::Duration = std::time::Duration::from_secs(5);
         const FILE_SEND_REQUEST: std::time::Duration = std::time::Duration::from_secs(300);
+        // §162b: v1 transfers resource — the single-peer send.
         let (code, resp) = tetherly_node::loopback_post_with_deadlines(
             ui_port,
-            "/api/file/send",
+            "/api/v1/transfers",
             &bytes,
             FILE_SEND_CONNECT,
             FILE_SEND_REQUEST,
@@ -236,7 +238,8 @@ pub(crate) async fn send(
             "peer": peer,
         });
         let bytes = serde_json::to_vec(&payload)?;
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/send-batch", &bytes)
+        // §162b: v1 transfers resource — the batch (one peer, many files).
+        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/transfers/batch", &bytes)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -254,7 +257,7 @@ pub(crate) async fn send(
             println!("{}", String::from_utf8_lossy(&resp));
             return Ok(());
         }
-        let rep: tetherly_node::BatchSendReport =
+        let rep: tetherly_api::FileBatchReport =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
         let target = rep.peer_alias.as_deref().unwrap_or(&rep.peer);
         println!(
@@ -281,7 +284,8 @@ pub(crate) async fn send(
 
 /// `tetherly resume` -- Resume arm of the top-level dispatch.
 pub(crate) async fn resume(json: bool, ui_port: u16) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/file/resume")
+    // §162b: v1 resume-markers resource.
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/resume")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -299,7 +303,7 @@ pub(crate) async fn resume(json: bool, ui_port: u16) -> Result<()> {
         println!("{}", String::from_utf8_lossy(&resp));
         return Ok(());
     }
-    let rep: tetherly_node::ResumeMarkersReport =
+    let rep: tetherly_api::ResumeMarkers =
         serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
     if rep.markers.is_empty() {
         println!("No resumable transfer markers found in inbox.");
@@ -338,15 +342,16 @@ pub(crate) async fn resume(json: bool, ui_port: u16) -> Result<()> {
 
 /// `tetherly cancel` -- Cancel arm of the top-level dispatch.
 pub(crate) async fn cancel(id: String, ui_port: u16) -> Result<()> {
-    let body = serde_json::to_vec(&serde_json::json!({ "id": id }))?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/cancel", &body)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    // §162a: v1 transfers resource — cancel is a POST action on the item.
+    let (code, resp) =
+        tetherly_node::loopback_post(ui_port, &format!("/api/v1/transfers/{id}/cancel"), b"")
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+                )
+            })?;
     if code != 200 {
         anyhow::bail!(
             "cancel failed (HTTP {code}): {}",
@@ -372,7 +377,26 @@ pub(crate) async fn transfers(
 
 /// `tetherly clear transfers` -- ClearTransfers arm of the top-level dispatch.
 pub(crate) async fn clear_transfers(ui_port: u16) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/clear", b"{}")
+    // §162a: v1 transfers resource — DELETE drops the terminal entries. The
+    // cleared count is the terminal_count read just before the delete (the
+    // v1 response is the updated resource, not a count report).
+    let (pre_code, pre_resp) = tetherly_node::loopback_get(ui_port, "/api/v1/transfers")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    let cleared = if pre_code == 200 {
+        serde_json::from_slice::<serde_json::Value>(&pre_resp)
+            .ok()
+            .and_then(|v| v.get("terminal_count").and_then(|c| c.as_u64()))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let (code, resp) = tetherly_node::loopback_delete(ui_port, "/api/v1/transfers")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -386,9 +410,6 @@ pub(crate) async fn clear_transfers(ui_port: u16) -> Result<()> {
             String::from_utf8_lossy(&resp)
         );
     }
-    let v: serde_json::Value =
-        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-    let cleared = v.get("cleared").and_then(|c| c.as_u64()).unwrap_or(0);
     println!("cleared {cleared} finished transfer(s) from history");
     Ok(())
 }
@@ -460,7 +481,8 @@ pub(crate) async fn auto_accept(
 pub(crate) async fn storage(action: StorageCmd) -> Result<()> {
     match action {
         StorageCmd::Status { json, ui_port } => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/storage")
+            // §162b: v1 storage resource.
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/storage")
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -477,7 +499,7 @@ pub(crate) async fn storage(action: StorageCmd) -> Result<()> {
             if json {
                 println!("{}", String::from_utf8_lossy(&resp));
             } else {
-                let rep: tetherly_node::StorageReport = serde_json::from_slice(&resp)?;
+                let rep: tetherly_api::Storage = serde_json::from_slice(&resp)?;
                 println!("Node Storage Status:");
                 println!("  Data Directory:    {}", rep.data_dir);
                 println!("  Inbox Directory:   {}", rep.inbox_dir);
@@ -502,21 +524,23 @@ pub(crate) async fn storage(action: StorageCmd) -> Result<()> {
         StorageCmd::Clean { all, ui_port } => {
             let payload = serde_json::json!({ "orphaned_only": !all });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/storage/clean", &bytes)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            // §162b: v1 storage resource — the clean action.
+            let (code, resp) =
+                tetherly_node::loopback_post(ui_port, "/api/v1/storage/clean", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                        )
+                    })?;
             if code != 200 {
                 anyhow::bail!(
                     "storage clean failed (HTTP {code}): {}",
                     String::from_utf8_lossy(&resp)
                 );
             }
-            let rep: tetherly_node::StorageCleanReport = serde_json::from_slice(&resp)?;
+            let rep: tetherly_api::StorageCleanReport = serde_json::from_slice(&resp)?;
             println!("Storage cleanup complete:");
             println!("  Freed Space:     {}", format_bytes(rep.freed_bytes));
             println!("  Deleted Files:   {}", rep.deleted_files_count);
@@ -537,10 +561,12 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
             json,
             ui_port,
         } => {
-            let mut path = "/api/file/inbox".to_string();
+            // §162a: v1 inbox resource — search/limit are served by the same
+            // query params the legacy list took (server-side, same semantics).
+            let mut path = "/api/v1/inbox".to_string();
             let mut query_params = Vec::new();
             if let Some(s) = search {
-                query_params.push(format!("search={s}"));
+                query_params.push(format!("search={}", url_encode(&s)));
             }
             if let Some(l) = limit {
                 query_params.push(format!("limit={l}"));
@@ -566,7 +592,7 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
             if json {
                 println!("{}", String::from_utf8_lossy(&resp));
             } else {
-                let rep: tetherly_node::InboxReport = serde_json::from_slice(&resp)?;
+                let rep: tetherly_api::Inbox = serde_json::from_slice(&resp)?;
                 if rep.files.is_empty() {
                     println!("Inbox is empty (0 files).");
                 } else {
@@ -604,10 +630,33 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
             json,
             ui_port,
         } => {
-            let payload = serde_json::json!({ "name": name });
-            let bytes = serde_json::to_vec(&payload)?;
+            // §162a: v1 inbox resource — DELETE /api/v1/inbox/{name} returns
+            // the updated resource; the freed size is the file's size read
+            // just before the delete.
+            let encoded = url_encode(&name);
+            let (pre_code, pre_resp) = tetherly_node::loopback_get(ui_port, "/api/v1/inbox")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            let mut freed_bytes = 0u64;
+            if pre_code == 200 {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&pre_resp) {
+                    if let Some(files) = v.get("files").and_then(|f| f.as_array()) {
+                        freed_bytes = files
+                            .iter()
+                            .find(|f| f.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+                            .and_then(|f| f.get("size"))
+                            .and_then(|s| s.as_u64())
+                            .unwrap_or(0);
+                    }
+                }
+            }
             let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/file/inbox/delete", &bytes)
+                tetherly_node::loopback_delete(ui_port, &format!("/api/v1/inbox/{encoded}"))
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -624,11 +673,9 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
             if json {
                 println!("{}", String::from_utf8_lossy(&resp));
             } else {
-                let rep: tetherly_node::InboxDeleteReport = serde_json::from_slice(&resp)?;
                 println!(
-                    "Deleted inbox file '{}' (freed {}).",
-                    rep.name,
-                    format_bytes(rep.freed_bytes)
+                    "Deleted inbox file '{name}' (freed {}).",
+                    format_bytes(freed_bytes)
                 );
             }
         }
@@ -647,10 +694,23 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
                     return Ok(());
                 }
             }
-            let payload = serde_json::json!({ "before_secs": before_secs });
-            let bytes = serde_json::to_vec(&payload)?;
+            // §162a: v1 inbox resource — DELETE /api/v1/inbox?before=<secs>
+            // carries the legacy cutoff. The deleted count / freed size are
+            // the deltas between the snapshots taken before and after.
+            let snapshot = || async {
+                tetherly_node::loopback_get(ui_port, "/api/v1/inbox")
+                    .await
+                    .ok()
+                    .filter(|(c, _)| *c == 200)
+                    .and_then(|(_, r)| serde_json::from_slice::<serde_json::Value>(&r).ok())
+            };
+            let before_snap = snapshot().await;
+            let mut query = String::new();
+            if let Some(secs) = before_secs {
+                query = format!("?before={secs}");
+            }
             let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/file/inbox/clear", &bytes)
+                tetherly_node::loopback_delete(ui_port, &format!("/api/v1/inbox{query}"))
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -664,14 +724,32 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
                     String::from_utf8_lossy(&resp)
                 );
             }
+            let after_snap = snapshot().await;
+            let counts = |v: Option<serde_json::Value>| -> (u64, u64) {
+                match v {
+                    Some(x) => (
+                        x.get("count").and_then(|c| c.as_u64()).unwrap_or(0),
+                        x.get("total_bytes").and_then(|c| c.as_u64()).unwrap_or(0),
+                    ),
+                    None => (0, 0),
+                }
+            };
+            let (pre_count, pre_bytes) = counts(before_snap);
+            let (post_count, post_bytes) = counts(after_snap);
+            let deleted = pre_count.saturating_sub(post_count);
+            let freed = pre_bytes.saturating_sub(post_bytes);
             if json {
-                println!("{}", String::from_utf8_lossy(&resp));
-            } else {
-                let rep: tetherly_node::InboxClearReport = serde_json::from_slice(&resp)?;
                 println!(
-                    "Inbox cleared: deleted {} files (freed {}).",
-                    rep.deleted_count,
-                    format_bytes(rep.freed_bytes)
+                    "{}",
+                    serde_json::json!({
+                        "deleted_count": deleted,
+                        "freed_bytes": freed,
+                    })
+                );
+            } else {
+                println!(
+                    "Inbox cleared: deleted {deleted} files (freed {}).",
+                    format_bytes(freed)
                 );
             }
         }
@@ -680,8 +758,9 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
             dest,
             ui_port,
         } => {
+            // §162b: v1 inbox resource — raw bytes at /inbox/{name}/content.
             let encoded_name = url_encode(&name);
-            let path = format!("/api/file/inbox/download?name={encoded_name}");
+            let path = format!("/api/v1/inbox/{encoded_name}/content");
             let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
                 .await
                 .map_err(|e| {
@@ -724,17 +803,22 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
             json,
             ui_port,
         } => {
-            let payload = serde_json::json!({ "name": name });
-            let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/file/inbox/open", &bytes)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                                     start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+            // §162a: v1 inbox resource — POST /api/v1/inbox reveals the
+            // directory (name omitted); POST /api/v1/inbox/{name}/open now
+            // answers the open report (name + on-disk path) instead of an
+            // empty 204.
+            let path = match &name {
+                Some(n) => format!("/api/v1/inbox/{}/open", url_encode(n)),
+                None => "/api/v1/inbox".to_string(),
+            };
+            let (code, resp) = tetherly_node::loopback_post(ui_port, &path, b"")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
             if code != 200 {
                 anyhow::bail!(
                     "inbox open failed (HTTP {code}): {}",
@@ -744,11 +828,11 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
             if json {
                 println!("{}", String::from_utf8_lossy(&resp));
             } else {
-                let rep: tetherly_node::InboxOpenReport = serde_json::from_slice(&resp)?;
+                let rep: tetherly_api::InboxOpenReport = serde_json::from_slice(&resp)?;
                 if let Some(f) = rep.name {
                     println!(
-                        "Opened file '{}' in system default handler (path: {}).",
-                        f, rep.path
+                        "Opened file '{f}' in system default handler (path: {}).",
+                        rep.path
                     );
                 } else {
                     println!(
@@ -879,10 +963,10 @@ pub(crate) async fn handle_outbox_list(
 ) -> Result<()> {
     let mut query_params = Vec::new();
     if let Some(p) = &peer {
-        query_params.push(format!("peer={p}"));
+        query_params.push(format!("peer={}", url_encode(p)));
     }
     if let Some(s) = &status {
-        query_params.push(format!("status={s}"));
+        query_params.push(format!("status={}", url_encode(s)));
     }
     if let Some(l) = limit {
         query_params.push(format!("limit={l}"));
@@ -892,7 +976,8 @@ pub(crate) async fn handle_outbox_list(
     } else {
         format!("?{}", query_params.join("&"))
     };
-    let path = format!("/api/file/outbox{qs}");
+    // §162b: v1 outbox resource — same peer/status/limit query as legacy.
+    let path = format!("/api/v1/outbox{qs}");
     let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
         .await
         .map_err(|e| {
@@ -974,12 +1059,21 @@ pub(crate) async fn handle_outbox_clear(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let payload = serde_json::json!({
-        "peer": peer,
-        "status": status,
-    });
-    let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/outbox/clear", &bytes)
+    // §162b: v1 outbox resource — DELETE /outbox?peer=&status= replaces the
+    // legacy body-driven clear; the CLI printer keeps reading the report.
+    let mut query_params = Vec::new();
+    if let Some(p) = &peer {
+        query_params.push(format!("peer={}", url_encode(p)));
+    }
+    if let Some(s) = &status {
+        query_params.push(format!("status={}", url_encode(s)));
+    }
+    let qs = if query_params.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query_params.join("&"))
+    };
+    let (code, resp) = tetherly_node::loopback_delete(ui_port, &format!("/api/v1/outbox{qs}"))
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1007,18 +1101,19 @@ pub(crate) async fn handle_outbox_clear(
 }
 
 pub(crate) async fn handle_outbox_resend(id: &str, json: bool, ui_port: u16) -> Result<()> {
-    let payload = serde_json::json!({
-        "id": id,
-    });
-    let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/outbox/resend", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    // §162b: v1 outbox resource — POST /outbox/{id}/resend.
+    let (code, resp) = tetherly_node::loopback_post(
+        ui_port,
+        &format!("/api/v1/outbox/{}/resend", url_encode(id)),
+        b"",
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to resend outbox file (HTTP {code}): {}",
@@ -1090,27 +1185,9 @@ pub(crate) async fn do_transfers(
     direction: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let mut query_params = Vec::new();
-    if let Some(ref target_id) = id {
-        query_params.push(format!("id={target_id}"));
-    }
-    if active {
-        query_params.push("active=true".to_string());
-    }
-    if terminal {
-        query_params.push("terminal=true".to_string());
-    }
-    if let Some(ref dir) = direction {
-        query_params.push(format!("direction={dir}"));
-    }
-
-    let path = if query_params.is_empty() {
-        "/api/file/transfers".to_string()
-    } else {
-        format!("/api/file/transfers?{}", query_params.join("&"))
-    };
-
-    let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
+    // §162a: v1 transfers resource — the filters are view concerns, applied
+    // client-side over the full list the resource returns.
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/transfers")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1119,13 +1196,6 @@ pub(crate) async fn do_transfers(
             )
         })?;
 
-    if code == 404 {
-        if let Some(ref target_id) = id {
-            anyhow::bail!("transfer not found: {target_id}");
-        } else {
-            anyhow::bail!("endpoint returned 404: {}", String::from_utf8_lossy(&resp));
-        }
-    }
     if code != 200 {
         anyhow::bail!(
             "query transfers failed (HTTP {code}): {}",
@@ -1133,25 +1203,92 @@ pub(crate) async fn do_transfers(
         );
     }
 
-    let v: serde_json::Value =
+    let mut v: serde_json::Value =
         serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+
+    // Client-side filtering mirroring the legacy /api/file/transfers query:
+    // phase buckets, direction aliases, and the single-transfer id lookup.
+    if let Some(list) = v.get_mut("transfers").and_then(|t| t.as_array_mut()) {
+        if active {
+            list.retain(|t| {
+                matches!(
+                    t.get("phase").and_then(|p| p.as_str()),
+                    Some("transferring") | Some("verifying")
+                )
+            });
+        } else if terminal {
+            list.retain(|t| {
+                matches!(
+                    t.get("phase").and_then(|p| p.as_str()),
+                    Some("completed") | Some("failed")
+                )
+            });
+        }
+        if let Some(dir) = direction.as_deref() {
+            let dir_lower = dir.to_ascii_lowercase();
+            let want_in = dir_lower == "in" || dir_lower == "inbound";
+            let want_out = dir_lower == "out" || dir_lower == "outbound";
+            list.retain(|t| {
+                let got = t.get("direction").and_then(|d| d.as_str()).unwrap_or("");
+                (want_in && got == "inbound") || (want_out && got == "outbound")
+            });
+        }
+        if let Some(ref target_id) = id {
+            list.retain(|t| {
+                t.get("transfer_id").and_then(|i| i.as_str()) == Some(target_id.as_str())
+            });
+        }
+    }
+
+    // §162a: recompute the counts from the filtered list so the printed
+    // header matches what legacy reported for the same view.
+    if active || terminal || direction.is_some() || id.is_some() {
+        let listed = v
+            .get("transfers")
+            .and_then(|t| t.as_array())
+            .map(|l| l.len())
+            .unwrap_or(0);
+        let listed_active = v
+            .get("transfers")
+            .and_then(|t| t.as_array())
+            .map(|l| {
+                l.iter()
+                    .filter(|t| {
+                        matches!(
+                            t.get("phase").and_then(|p| p.as_str()),
+                            Some("transferring") | Some("verifying")
+                        )
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        v["active_count"] = serde_json::json!(listed_active);
+        v["terminal_count"] = serde_json::json!(listed.saturating_sub(listed_active));
+        v["total_count"] = serde_json::json!(listed);
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
 
-    if id.is_some() {
-        let tid = v.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
-        let filename = v.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
-        let dir = v.get("direction").and_then(|s| s.as_str()).unwrap_or("?");
-        let peer = v.get("peer").and_then(|s| s.as_str()).unwrap_or("?");
-        let total = v.get("total").and_then(|s| s.as_u64()).unwrap_or(0);
-        let transferred = v.get("transferred").and_then(|s| s.as_u64()).unwrap_or(0);
-        let speed = v.get("speed_bps").and_then(|s| s.as_u64()).unwrap_or(0);
-        let phase = v.get("phase").and_then(|s| s.as_str()).unwrap_or("?");
-        let started_ms = v.get("started_ms").and_then(|s| s.as_u64()).unwrap_or(0);
-        let error = v.get("error").and_then(|s| s.as_str());
+    if let Some(ref target_id) = id {
+        let Some(t) = v.get("transfers").and_then(|t| t.as_array()).and_then(|l| {
+            l.iter()
+                .find(|t| t.get("transfer_id").and_then(|i| i.as_str()) == Some(target_id.as_str()))
+        }) else {
+            anyhow::bail!("transfer not found: {target_id}");
+        };
+        let tid = t.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+        let filename = t.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+        let dir = t.get("direction").and_then(|s| s.as_str()).unwrap_or("?");
+        let peer = t.get("peer").and_then(|s| s.as_str()).unwrap_or("?");
+        let total = t.get("total").and_then(|s| s.as_u64()).unwrap_or(0);
+        let transferred = t.get("transferred").and_then(|s| s.as_u64()).unwrap_or(0);
+        let speed = t.get("speed_bps").and_then(|s| s.as_u64()).unwrap_or(0);
+        let phase = t.get("phase").and_then(|s| s.as_str()).unwrap_or("?");
+        let started_ms = t.get("started_ms").and_then(|s| s.as_u64()).unwrap_or(0);
+        let error = t.get("error").and_then(|s| s.as_str());
         let pct = if total > 0 {
             (transferred as f64 / total as f64) * 100.0
         } else {
@@ -1186,7 +1323,11 @@ pub(crate) async fn do_transfers(
         .get("terminal_count")
         .and_then(|s| s.as_u64())
         .unwrap_or(0);
-    let total_count = v.get("total_count").and_then(|s| s.as_u64()).unwrap_or(0);
+    // §162a: the v1 resource carries active+terminal only; total is their sum.
+    let total_count = v
+        .get("total_count")
+        .and_then(|s| s.as_u64())
+        .unwrap_or(active_count + terminal_count);
 
     println!("Transfers: {total_count} total ({active_count} active, {terminal_count} terminal)");
 
@@ -1262,15 +1403,16 @@ pub(crate) async fn do_file_offers(
 ) -> Result<()> {
     let mut query_params = Vec::new();
     if let Some(ref target_id) = id {
-        query_params.push(format!("id={target_id}"));
+        query_params.push(format!("id={}", url_encode(target_id)));
     }
     if let Some(ref target_peer) = peer {
-        query_params.push(format!("peer={target_peer}"));
+        query_params.push(format!("peer={}", url_encode(target_peer)));
     }
+    // §162b: v1 offers resource — same id/peer query filters as legacy.
     let path = if query_params.is_empty() {
-        "/api/file/offers".to_string()
+        "/api/v1/offers".to_string()
     } else {
-        format!("/api/file/offers?{}", query_params.join("&"))
+        format!("/api/v1/offers?{}", query_params.join("&"))
     };
     let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
         .await
@@ -1280,14 +1422,12 @@ pub(crate) async fn do_file_offers(
                  start one with `tetherly --data-dir <dir> run` first"
             )
         })?;
-    if code == 404 {
-        if let Some(ref target_id) = id {
-            anyhow::bail!("file offer not found: {target_id}");
-        } else {
-            anyhow::bail!("endpoint returned 404: {}", String::from_utf8_lossy(&resp));
-        }
-    }
     if code != 200 {
+        if code == 404 {
+            if let Some(ref target_id) = id {
+                anyhow::bail!("file offer not found: {target_id}");
+            }
+        }
         anyhow::bail!(
             "query file offers failed (HTTP {code}): {}",
             String::from_utf8_lossy(&resp)
@@ -1300,13 +1440,22 @@ pub(crate) async fn do_file_offers(
         return Ok(());
     }
 
-    if id.is_some() {
-        let tid = v.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
-        let filename = v.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
-        let source = v.get("source").and_then(|s| s.as_str()).unwrap_or("?");
-        let total_bytes = v.get("total_bytes").and_then(|s| s.as_u64()).unwrap_or(0);
-        let resume_from = v.get("resume_from").and_then(|s| s.as_u64()).unwrap_or(0);
-        let ts = v.get("timestamp_ms").and_then(|s| s.as_u64()).unwrap_or(0);
+    // §162b: the v1 resource is a list; the single-id view reads the first
+    // (and only) entry — an empty list means the id matched nothing.
+    if let Some(ref target_id) = id {
+        let Some(o) = v
+            .get("offers")
+            .and_then(|o| o.as_array())
+            .and_then(|l| l.first())
+        else {
+            anyhow::bail!("file offer not found: {target_id}");
+        };
+        let tid = o.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+        let filename = o.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+        let source = o.get("source").and_then(|s| s.as_str()).unwrap_or("?");
+        let total_bytes = o.get("total_bytes").and_then(|s| s.as_u64()).unwrap_or(0);
+        let resume_from = o.get("resume_from").and_then(|s| s.as_u64()).unwrap_or(0);
+        let ts = o.get("timestamp_ms").and_then(|s| s.as_u64()).unwrap_or(0);
 
         println!("File Offer {tid}:");
         println!("  File:        {filename}");
@@ -1370,7 +1519,8 @@ pub(crate) async fn do_file_accept(
         "peer": peer,
     });
     let body = serde_json::to_vec(&body_json)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/accept", &body)
+    // §162b: v1 offers resource — the accept action folds single + batch.
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/offers/accept", &body)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1441,7 +1591,8 @@ pub(crate) async fn do_file_reject(
         "peer": peer,
     });
     let body = serde_json::to_vec(&body_json)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/reject", &body)
+    // §162b: v1 offers resource — the reject action folds single + batch.
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/offers/reject", &body)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1542,15 +1693,21 @@ pub(crate) async fn do_file_auto_accept(
             }
         }
         let body = serde_json::to_vec(&serde_json::Value::Object(body_map))?;
-        let (code, resp) =
-            tetherly_node::loopback_post(ui_port, "/api/file/auto-accept/policy", &body)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+        // §162b: v1 policy resource — PATCH /policy/auto-accept.
+        let (code, resp) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/policy/auto-accept",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+            )
+        })?;
         if code != 200 {
             anyhow::bail!(
                 "configure auto-accept policy failed (HTTP {code}): {}",
@@ -1562,12 +1719,10 @@ pub(crate) async fn do_file_auto_accept(
         if json {
             println!("{}", serde_json::to_string_pretty(&v)?);
         } else {
-            let pol = &v["policy"];
+            // §162b: the policy resource is flat (no nested `policy` object).
+            let pol = &v;
             let enabled = pol["enabled"].as_bool().unwrap_or(false);
-            let count = v
-                .get("cumulative_auto_accepted_count")
-                .and_then(|c| c.as_u64())
-                .unwrap_or(0);
+            let count = pol["auto_accepted_count"].as_u64().unwrap_or(0);
             let grps = pol["allowed_groups"]
                 .as_array()
                 .map(|a| {
@@ -1610,7 +1765,8 @@ pub(crate) async fn do_file_auto_accept(
         return Ok(());
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/file/auto-accept/policy")
+    // §162b: v1 policy resource — GET /policy/auto-accept.
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/policy/auto-accept")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1629,12 +1785,10 @@ pub(crate) async fn do_file_auto_accept(
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
-        let pol = &v["policy"];
+        // §162b: the policy resource is flat (no nested `policy` object).
+        let pol = &v;
         let enabled = pol["enabled"].as_bool().unwrap_or(false);
-        let count = v
-            .get("cumulative_auto_accepted_count")
-            .and_then(|c| c.as_u64())
-            .unwrap_or(0);
+        let count = pol["auto_accepted_count"].as_u64().unwrap_or(0);
         let grps = pol["allowed_groups"]
             .as_array()
             .map(|a| {

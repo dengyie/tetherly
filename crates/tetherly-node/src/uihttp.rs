@@ -2516,6 +2516,169 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// §162b: file-domain v1 resources — offers/decisions, outbox, storage,
+    /// resume, auto-accept policy, inbox content — served and gated.
+    #[tokio::test]
+    async fn v1_file_domains_serve_and_gate() {
+        let (node, dir) = temp_test_node("v1_file_domains");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("daemon token");
+        let auth = format!("Authorization: Bearer {token}");
+
+        // Offers resource is empty on a fresh node.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/offers", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["count"], 0, "{body}");
+        assert_eq!(body["offers"], serde_json::json!([]), "{body}");
+
+        // Outbox resource is empty; status filter parses, garbage is 400.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/outbox", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["total"], 0, "{body}");
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/outbox?status=done", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/outbox?status=bogus", Some(&auth)).await;
+        assert_eq!(code, 400, "{body}");
+        assert_eq!(body["error"]["code"], "bad_request", "{body}");
+
+        // Outbox purge on an empty ring still reports zero.
+        let (code, resp) = raw_request(port, "DELETE", "/api/v1/outbox", Some(&auth), b"").await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["cleared_count"], 0, "{body}");
+
+        // Storage + resume resources report the data dir (fresh node zeroes).
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/storage", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert!(!body["data_dir"].as_str().unwrap_or_default().is_empty());
+        assert_eq!(body["inbox_file_count"], 0, "{body}");
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/resume", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["count"], 0, "{body}");
+
+        // Storage clean: default body (absent) means orphaned-only.
+        let (code, resp) =
+            raw_request(port, "POST", "/api/v1/storage/clean", Some(&auth), b"").await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["deleted_files_count"], 0, "{body}");
+
+        // Auto-accept policy: default readback, strict patch, then a real
+        // patch toggles the master switch and sets a size cap.
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/policy/auto-accept", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["enabled"], false, "{body}");
+        assert_eq!(body["auto_accepted_count"], 0, "{body}");
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/policy/auto-accept",
+            Some(&auth),
+            br#"{"bogus":1}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/policy/auto-accept",
+            Some(&auth),
+            br#"{"enabled":true,"max_file_size":1024}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["enabled"], true, "{body}");
+        assert_eq!(body["max_file_size"], 1024, "{body}");
+        // JSON null lifts the cap (the key stays, value becomes null).
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/policy/auto-accept",
+            Some(&auth),
+            br#"{"max_file_size":null}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert!(body["max_file_size"].is_null(), "{body}");
+
+        // Decision without id/all/peer is 400; unknown id is 404.
+        let (code, resp) =
+            raw_request(port, "POST", "/api/v1/offers/accept", Some(&auth), b"{}").await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/offers/accept",
+            Some(&auth),
+            br#"{"id":"nope"}"#,
+        )
+        .await;
+        assert_eq!(code, 404, "{}", String::from_utf8_lossy(&resp));
+
+        // Inbox content: a real file serves bytes with mime; missing is 404;
+        // traversal is rejected.
+        let inbox_dir = dir.join("inbox");
+        std::fs::create_dir_all(&inbox_dir).unwrap();
+        std::fs::write(inbox_dir.join("doc.txt"), b"hello bytes").unwrap();
+        let (code, body) = raw_request(
+            port,
+            "GET",
+            "/api/v1/inbox/doc.txt/content",
+            Some(&auth),
+            b"",
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert_eq!(body, b"hello bytes");
+        let (code, _) = raw_request(
+            port,
+            "GET",
+            "/api/v1/inbox/nope.txt/content",
+            Some(&auth),
+            b"",
+        )
+        .await;
+        assert_eq!(code, 404);
+        let (code, _) = raw_request(
+            port,
+            "GET",
+            "/api/v1/inbox/..%2Fetc%2Fpasswd/content",
+            Some(&auth),
+            b"",
+        )
+        .await;
+        assert!(code == 400 || code == 404, "got {code}");
+
+        // Client token keeps Read-tier GETs working; writes stay gated.
+        let client = crate::apitoken::read_client(&dir).expect("client token");
+        let client_auth = format!("Authorization: Bearer {client}");
+        let (_, code, _) = raw_with_head(port, "GET", "/api/v1/offers", Some(&client_auth)).await;
+        assert_eq!(code, 200);
+        let (code, _) = raw_request(
+            port,
+            "POST",
+            "/api/v1/offers/accept",
+            Some(&client_auth),
+            br#"{"all":true}"#,
+        )
+        .await;
+        assert_eq!(code, 200);
+        let (code, _) =
+            raw_request(port, "DELETE", "/api/v1/outbox", Some(&client_auth), b"").await;
+        assert_eq!(code, 200);
+
+        // Unknown method on a new resource is 405 with the Allow set.
+        let (code, resp) = raw_request(port, "POST", "/api/v1/storage", Some(&auth), b"").await;
+        assert_eq!(code, 405, "{}", String::from_utf8_lossy(&resp));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// ADR-139 M4 switch: `/` serves the new SPA entry, `/assets/*` the
     /// embedded bundle, `/legacy/` the old single-file console — all over
     /// real HTTP against the live listener.
@@ -2889,12 +3052,13 @@ mod tests {
         // POST /inbox/{name} is not allowed.
         let (code, _) = v1_call(port, "POST", "/api/v1/inbox/x.txt", &auth, "").await;
         assert_eq!(code, 405);
-        // Open a missing file -> 404; a real one -> 204 (MemoryOpener records).
+        // Open a missing file -> 404; a real one -> the §162a open report
+        // (200 + name/path; MemoryOpener records).
         let (code, _) = v1_call(port, "POST", "/api/v1/inbox/nope.txt/open", &auth, "").await;
         assert_eq!(code, 404);
         let inbox_file2 = inbox_dir.join("v1-open-test.txt");
         std::fs::write(&inbox_file2, b"open me").unwrap();
-        let (code, _) = v1_call(
+        let (code, body) = v1_call(
             port,
             "POST",
             "/api/v1/inbox/v1-open-test.txt/open",
@@ -2902,7 +3066,51 @@ mod tests {
             "",
         )
         .await;
-        assert_eq!(code, 204);
+        assert_eq!(code, 200);
+        let open_rep: tetherly_api::InboxOpenReport = serde_json::from_value(body).unwrap();
+        assert_eq!(open_rep.name.as_deref(), Some("v1-open-test.txt"));
+        assert!(!open_rep.path.is_empty());
+        // §162a: name-less POST /inbox reveals the directory (name null).
+        let (code, body) = v1_call(port, "POST", "/api/v1/inbox", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let dir_rep: tetherly_api::InboxOpenReport = serde_json::from_value(body).unwrap();
+        assert_eq!(dir_rep.name, None);
+        // §162a: GET /inbox search/limit and DELETE /inbox?before gating.
+        let (code, body) = v1_call(port, "GET", "/api/v1/inbox?search=open", &auth, "").await;
+        assert_eq!(code, 200, "{body}");
+        let i: tetherly_api::Inbox = serde_json::from_value(body).unwrap();
+        assert_eq!(i.count, 1);
+        assert_eq!(i.files[0].name, "v1-open-test.txt");
+        let (code, body) = v1_call(port, "GET", "/api/v1/inbox?search=zzz", &auth, "").await;
+        assert_eq!(code, 200);
+        let i: tetherly_api::Inbox = serde_json::from_value(body).unwrap();
+        assert_eq!(i.count, 0);
+        let (code, body) = v1_call(port, "GET", "/api/v1/inbox?limit=nonsense", &auth, "").await;
+        assert_eq!(code, 400);
+        assert_eq!(body["error"]["code"], "bad_request");
+        let (code, body) =
+            v1_call(port, "DELETE", "/api/v1/inbox?before=nonsense", &auth, "").await;
+        assert_eq!(code, 400);
+        assert_eq!(body["error"]["code"], "bad_request");
+        // DELETE ?before=past cutoff keeps files modified at/after it (the
+        // legacy cutoff deletes only files older than the timestamp).
+        let past = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_sub(3600);
+        let (code, body) = v1_call(
+            port,
+            "DELETE",
+            &format!("/api/v1/inbox?before={past}"),
+            &auth,
+            "",
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        let i: tetherly_api::Inbox = serde_json::from_value(body).unwrap();
+        assert_eq!(i.count, 1);
+        assert!(inbox_file2.exists());
 
         // Diagnostics: legacy hits are counted per caller; v1 calls are not.
         let _ = raw_request(port, "GET", "/api/health", Some("User-Agent: curl/8"), b"").await;

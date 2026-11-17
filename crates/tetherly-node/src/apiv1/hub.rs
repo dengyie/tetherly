@@ -196,7 +196,7 @@ async fn resolve(hub: &EventHub, node: &Node, keys: Vec<Key>, known: &mut HashMa
                     });
                 }
                 Topic::Inbox => hub.publish(&Event::InboxChanged {
-                    inbox: model::inbox(node),
+                    inbox: model::inbox(node, None, None),
                 }),
                 Topic::Layout => hub.publish(&Event::LayoutChanged {
                     layout: model::layout(node),

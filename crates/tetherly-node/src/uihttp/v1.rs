@@ -91,6 +91,21 @@ fn inbox_open_action(path: &str) -> Option<String> {
     (action == "open" && !name.is_empty()).then(|| super::util::percent_decode(name))
 }
 
+/// §162b: `/api/v1/outbox/{id}/resend` -> id (percent-decoded, single segment).
+fn outbox_resend_action(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/v1/outbox/")?;
+    let (id, action) = rest.split_once('/')?;
+    (action == "resend" && !id.is_empty()).then(|| super::util::percent_decode(id))
+}
+
+/// §162b: `/api/v1/inbox/{name}/content` -> name (percent-decoded) — the raw
+/// file-bytes download route (legacy `/api/file/inbox/download`).
+fn inbox_content_item(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/v1/inbox/")?;
+    let (name, action) = rest.split_once('/')?;
+    (action == "content" && !name.is_empty()).then(|| super::util::percent_decode(name))
+}
+
 /// Methods each known v1 path answers; drives 404 vs 405.
 fn allowed(path: &str) -> Option<&'static [&'static str]> {
     match path {
@@ -108,7 +123,8 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/link" => Some(&["GET"]),
         "/api/v1/link/heartbeat" => Some(&["GET", "PATCH"]),
         "/api/v1/transfers" => Some(&["GET", "DELETE"]),
-        "/api/v1/inbox" => Some(&["GET", "DELETE"]),
+        "/api/v1/inbox" => Some(&["GET", "DELETE", "POST"]),
+        p if inbox_content_item(p).is_some() => Some(&["GET"]),
         "/api/v1/settings" => Some(&["GET", "PATCH"]),
         "/api/v1/pairing/pin" => Some(&["GET", "DELETE"]),
         "/api/v1/pairing/pin/rotate" | "/api/v1/input/release" => Some(&["POST"]),
@@ -141,6 +157,17 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/notify/copies" | "/api/v1/notify/insertions" => Some(&["POST"]),
         "/api/v1/replies" | "/api/v1/replies/take" => Some(&["POST"]),
         "/api/v1/messages" => Some(&["GET", "POST", "DELETE"]),
+        // §162b: file domain — offers/decisions, outbox, storage, resume,
+        // auto-accept policy (transfers/inbox gate above).
+        "/api/v1/offers" => Some(&["GET"]),
+        "/api/v1/offers/accept" | "/api/v1/offers/reject" => Some(&["POST"]),
+        "/api/v1/transfers/multi" | "/api/v1/transfers/batch" => Some(&["POST"]),
+        "/api/v1/outbox" => Some(&["GET", "DELETE"]),
+        p if outbox_resend_action(p).is_some() => Some(&["POST"]),
+        "/api/v1/storage" => Some(&["GET"]),
+        "/api/v1/storage/clean" => Some(&["POST"]),
+        "/api/v1/resume" => Some(&["GET"]),
+        "/api/v1/policy/auto-accept" => Some(&["GET", "PATCH"]),
         p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
         p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -266,7 +293,24 @@ pub(super) async fn route(
         }
         ("GET", "/api/v1/input") => Ok(json(200, &crate::apiv1::model::input(node).await)),
         ("GET", "/api/v1/transfers") => Ok(json(200, &crate::apiv1::model::transfers(node))),
-        ("GET", "/api/v1/inbox") => Ok(json(200, &crate::apiv1::model::inbox(node))),
+        ("GET", "/api/v1/inbox") => {
+            // §162a: optional `search`/`limit` mirror the legacy inbox list
+            // query (substring match, capped listing).
+            let search = profile_filter(query, "search");
+            let limit = match profile_filter(query, "limit") {
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(n) => Some(n),
+                    Err(_) => {
+                        return error(ErrorCode::BadRequest, format!("invalid limit value: {raw}"))
+                    }
+                },
+                None => None,
+            };
+            Ok(json(
+                200,
+                &crate::apiv1::model::inbox(node, search.as_deref(), limit),
+            ))
+        }
         ("GET", "/api/v1/layout") => Ok(json(200, &crate::apiv1::model::layout(node))),
         ("GET", "/api/v1/settings") => Ok(json(200, &crate::apiv1::model::settings(node))),
         ("GET", "/api/v1/link") => Ok(json(200, &crate::apiv1::model::link_quality(node))),
@@ -328,10 +372,115 @@ pub(super) async fn route(
             node.clear_terminal_transfers();
             Ok(json(200, &crate::apiv1::model::transfers(node)))
         }
-        ("DELETE", "/api/v1/inbox") => match node.clear_inbox(None) {
-            Ok(_) => Ok(json(200, &crate::apiv1::model::inbox(node))),
-            Err(e) => Err(core_error(e)),
-        },
+        ("DELETE", "/api/v1/inbox") => {
+            // §162a: optional `before=<unix secs>` mirrors the legacy
+            // inbox/clear cutoff — files modified at/after the cutoff stay.
+            let before = match profile_filter(query, "before") {
+                Some(raw) => match raw.parse::<u64>() {
+                    Ok(secs) => Some(secs),
+                    Err(_) => {
+                        return error(
+                            ErrorCode::BadRequest,
+                            format!("invalid before value: {raw}"),
+                        )
+                    }
+                },
+                None => None,
+            };
+            match node.clear_inbox(before) {
+                Ok(_) => Ok(json(200, &crate::apiv1::model::inbox(node, None, None))),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("POST", "/api/v1/inbox") => {
+            // §162a: name-less open — reveal the inbox directory itself (the
+            // named-file variant lives at POST /inbox/{name}/open).
+            open_inbox_dir(node).await
+        }
+        ("GET", "/api/v1/offers") => {
+            // §162b: pending offers resource with the legacy id/peer filters.
+            let id = profile_filter(query, "id");
+            let peer = profile_filter(query, "peer");
+            match crate::apiv1::model::file_offers(node, id.as_deref(), peer.as_deref()) {
+                Ok(rep) => Ok(json(200, &rep)),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("POST", "/api/v1/offers/accept") => post_file_decision(node, query, body, true).await,
+        ("POST", "/api/v1/offers/reject") => post_file_decision(node, query, body, false).await,
+        ("POST", "/api/v1/transfers/multi") => post_file_send_multi(node, body).await,
+        ("POST", "/api/v1/transfers/batch") => post_file_send_batch(node, body).await,
+        ("POST", "/api/v1/transfers") => post_file_send(node, body).await,
+        ("GET", "/api/v1/outbox") => {
+            // §162b: outbox resource with the legacy peer/status/limit query.
+            let peer = profile_filter(query, "peer");
+            let status = match profile_filter(query, "status") {
+                Some(raw) => match raw.parse::<crate::runtime::OutboxStatus>() {
+                    Ok(st) => Some(st),
+                    Err(e) => {
+                        return error(ErrorCode::BadRequest, e);
+                    }
+                },
+                None => None,
+            };
+            let limit = match profile_filter(query, "limit") {
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(n) => Some(n),
+                    Err(_) => {
+                        return error(ErrorCode::BadRequest, format!("invalid limit value: {raw}"))
+                    }
+                },
+                None => None,
+            };
+            match crate::apiv1::model::outbox(node, peer.as_deref(), status, limit) {
+                Ok(rep) => Ok(json(200, &rep)),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("DELETE", "/api/v1/outbox") => {
+            // §162b: purge outbox records, optionally scoped to peer/status.
+            let peer = profile_filter(query, "peer");
+            let status = match profile_filter(query, "status") {
+                Some(raw) => match raw.parse::<crate::runtime::OutboxStatus>() {
+                    Ok(st) => Some(st),
+                    Err(e) => {
+                        return error(ErrorCode::BadRequest, e);
+                    }
+                },
+                None => None,
+            };
+            match node.clear_outbox(peer.as_deref(), status) {
+                Ok(rep) => Ok(json(200, &crate::apiv1::model::outbox_clear(rep))),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("POST", p) if outbox_resend_action(p).is_some() => {
+            post_outbox_resend(node, &outbox_resend_action(p).unwrap_or_default()).await
+        }
+        ("GET", "/api/v1/storage") => Ok(json(200, &crate::apiv1::model::storage(node))),
+        ("POST", "/api/v1/storage/clean") => {
+            // §162b: `orphaned_only` defaults to true (legacy parity); an
+            // explicit false also sweeps in-flight partials.
+            let orphaned_only = if body.iter().all(u8::is_ascii_whitespace) {
+                true
+            } else {
+                match serde_json::from_slice::<tetherly_api::StorageCleanBody>(body) {
+                    Ok(d) => d.orphaned_only.unwrap_or(true),
+                    Err(e) => {
+                        return error(ErrorCode::BadRequest, format!("invalid body: {e}"));
+                    }
+                }
+            };
+            Ok(json(
+                200,
+                &crate::apiv1::model::storage_clean(node.clean_storage(orphaned_only)),
+            ))
+        }
+        ("GET", "/api/v1/resume") => Ok(json(200, &crate::apiv1::model::resume_markers(node))),
+        ("GET", "/api/v1/policy/auto-accept") => {
+            Ok(json(200, &crate::apiv1::model::auto_accept_policy(node)))
+        }
+        ("PATCH", "/api/v1/policy/auto-accept") => patch_auto_accept_policy(node, body),
         ("GET", "/api/v1/profiles") => Ok(json(
             200,
             &crate::apiv1::model::peer_profiles(
@@ -423,18 +572,24 @@ pub(super) async fn route(
             ("DELETE", Some((id, "block"))) => unblock_device(node, &id).await,
             _ => match (m, transfer_action(p)) {
                 ("POST", Some((id, "cancel"))) => cancel_transfer(node, id).await,
-                _ => match (m, inbox_open_action(p)) {
-                    ("POST", Some(name)) => open_inbox_file(node, &name, body).await,
-                    _ => match (m, inbox_item(p)) {
-                        ("DELETE", Some(name)) => delete_inbox_file(node, &name),
-                        _ => Ok(match allowed(path) {
-                            Some(methods) => error(
-                                ErrorCode::MethodNotAllowed,
-                                format!("{method} not allowed; use {}", methods.join(", ")),
-                            )
-                            .with_header("Allow", methods.join(", ")),
-                            None => error(ErrorCode::NotFound, format!("no such resource: {path}")),
-                        }),
+                _ => match (m, inbox_content_item(p)) {
+                    // §162b: raw file bytes (legacy inbox download route).
+                    ("GET", Some(name)) => get_inbox_content(node, &name),
+                    _ => match (m, inbox_open_action(p)) {
+                        ("POST", Some(name)) => open_inbox_file(node, &name, body).await,
+                        _ => match (m, inbox_item(p)) {
+                            ("DELETE", Some(name)) => delete_inbox_file(node, &name),
+                            _ => Ok(match allowed(path) {
+                                Some(methods) => error(
+                                    ErrorCode::MethodNotAllowed,
+                                    format!("{method} not allowed; use {}", methods.join(", ")),
+                                )
+                                .with_header("Allow", methods.join(", ")),
+                                None => {
+                                    error(ErrorCode::NotFound, format!("no such resource: {path}"))
+                                }
+                            }),
+                        },
                     },
                 },
             },
@@ -482,10 +637,13 @@ async fn cancel_transfer(node: &Node, id: &str) -> Handled {
 /// inbox resource.
 fn delete_inbox_file(node: &Node, name: &str) -> Handled {
     node.delete_inbox_file(name).map_err(core_error)?;
-    Ok(json(200, &crate::apiv1::model::inbox(node)))
+    Ok(json(200, &crate::apiv1::model::inbox(node, None, None)))
 }
 
-/// `POST /inbox/{name}/open`: reveals the file with the OS opener.
+/// `POST /inbox/{name}/open`: reveals the file with the OS opener. §162a
+/// returns the open report (name + on-disk path) instead of an empty 204 so
+/// the CLI's human/JSON printers keep the legacy detail level; both client
+/// transports tolerate a body where they used to see 204.
 async fn open_inbox_file(node: &Node, name: &str, body: &[u8]) -> Handled {
     // Name comes from the path; the body (optional) is parsed for strictness
     // parity with other v1 POSTs but carries nothing today.
@@ -507,15 +665,343 @@ async fn open_inbox_file(node: &Node, name: &str, body: &[u8]) -> Handled {
     }
     let opener = node.opener();
     let (name, node) = (name.to_string(), node.clone_handle());
-    tokio::task::spawn_blocking(move || node.open_inbox_file(Some(&name), opener.as_ref()))
+    let rep =
+        tokio::task::spawn_blocking(move || node.open_inbox_file(Some(&name), opener.as_ref()))
+            .await
+            .map_err(|_| error(ErrorCode::Internal, "open task failed"))?
+            .map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::InboxOpenReport {
+            name: rep.name,
+            path: rep.path,
+        },
+    ))
+}
+
+/// `POST /inbox` (no name): reveals the inbox directory itself. §162a keeps
+/// the CLI's `inbox open` (name omitted) on the v1 surface; the report's
+/// `name` is null to mirror the directory branch of the legacy report.
+async fn open_inbox_dir(node: &Node) -> Handled {
+    let opener = node.opener();
+    let node = node.clone_handle();
+    let rep = tokio::task::spawn_blocking(move || node.open_inbox_file(None, opener.as_ref()))
         .await
         .map_err(|_| error(ErrorCode::Internal, "open task failed"))?
         .map_err(core_error)?;
-    Ok(no_content())
+    Ok(json(
+        200,
+        &tetherly_api::InboxOpenReport {
+            name: rep.name,
+            path: rep.path,
+        },
+    ))
+}
+
+// ---- §162b: file-domain handlers (offers / send / outbox / storage) ----
+
+/// `POST /offers/accept` | `POST /offers/reject`: one offer by `id`, or every
+/// pending offer from `peer` with `all` (legacy decision semantics; the
+/// v1 report folds both shapes).
+async fn post_file_decision(
+    node: &Node,
+    query: Option<&str>,
+    body: &[u8],
+    accept: bool,
+) -> Handled {
+    let req: tetherly_api::FileDecisionRequest = parse_body(body)?;
+    let peer = req.peer.clone().or_else(|| profile_filter(query, "peer"));
+    let id = req.id.clone().or_else(|| profile_filter(query, "id"));
+    let all = req.all.unwrap_or(false);
+    if all || (id.is_none() && peer.is_some()) {
+        let rep = if accept {
+            node.batch_accept_files(peer.as_deref()).await
+        } else {
+            node.batch_reject_files(peer.as_deref()).await
+        }
+        .map_err(core_error)?;
+        Ok(json(200, &crate::apiv1::model::file_decision_batch(rep)))
+    } else if let Some(id) = id {
+        let rep = if accept {
+            node.user_accept_file_reported(&id).await
+        } else {
+            node.user_reject_file_reported(&id).await
+        }
+        .map_err(core_error)?;
+        Ok(json(
+            200,
+            &crate::apiv1::model::file_decision_single(accept, rep),
+        ))
+    } else {
+        Err(error(
+            ErrorCode::BadRequest,
+            "missing required 'id', 'all', or 'peer' parameter",
+        ))
+    }
+}
+
+/// Resolve the single-peer send target: explicit peer must be connected;
+/// empty falls to the only live peer (legacy ambiguity preserved).
+fn resolve_send_target(
+    node: &Node,
+    peer: Option<&str>,
+) -> Result<tetherly_core::DeviceId, UiResponse> {
+    let peers = node.live_peers();
+    match peer.filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let id = node
+                .resolve_peer(raw)
+                .map_err(|e| error(ErrorCode::BadRequest, format!("bad peer id: {e}")))?;
+            if peers.iter().any(|p| p.device_id == id) {
+                Ok(id)
+            } else {
+                Err(error(ErrorCode::BadRequest, "peer is not connected"))
+            }
+        }
+        None => match peers.len() {
+            0 => Err(error(ErrorCode::Conflict, "no connected peer")),
+            1 => Ok(peers[0].device_id.clone()),
+            _ => Err(error(
+                ErrorCode::BadRequest,
+                "multiple peers connected; pass peer (tdev_…)",
+            )),
+        },
+    }
+}
+
+/// Decode inline `data_base64` (path OR bytes must be present).
+fn decode_send_data(
+    path: &Option<String>,
+    data_base64: &Option<String>,
+) -> Result<SendSource, UiResponse> {
+    if let Some(b64) = data_base64 {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|_| error(ErrorCode::BadRequest, "invalid base64"))?;
+        if bytes.len() as u64 > tetherly_core::FILE_MAX {
+            return Err(error(
+                ErrorCode::BadRequest,
+                "file exceeds FILE_MAX (64 GiB)",
+            ));
+        }
+        return Ok(SendSource::Bytes(bytes));
+    }
+    let Some(path_str) = path else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "either path or data_base64 must be provided",
+        ));
+    };
+    let p = std::path::PathBuf::from(path_str);
+    if !p.is_file() {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "file not found or not a regular file",
+        ));
+    }
+    let meta = std::fs::metadata(&p).map_err(|e| {
+        error(
+            ErrorCode::BadRequest,
+            format!("cannot read file metadata: {e}"),
+        )
+    })?;
+    if meta.len() > tetherly_core::FILE_MAX {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "file exceeds FILE_MAX (64 GiB)",
+        ));
+    }
+    Ok(SendSource::Path(p))
+}
+
+enum SendSource {
+    Path(std::path::PathBuf),
+    Bytes(Vec<u8>),
+}
+
+/// `POST /transfers`: one file to one peer (legacy `/api/file/send`).
+async fn post_file_send(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::FileSendRequest = parse_body(body)?;
+    let target = resolve_send_target(node, req.peer.as_deref())?;
+    let name = req.name.clone();
+    match decode_send_data(&req.path, &req.data_base64)? {
+        SendSource::Path(p) => {
+            let id = node
+                .offer_and_send_file(&target, &p, name.as_deref())
+                .await
+                .map_err(core_error)?;
+            let fname = name.unwrap_or_else(|| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file.bin")
+                    .to_string()
+            });
+            let safe = tetherly_core::sanitize_file_name(&fname)
+                .map_err(|e| error(ErrorCode::BadRequest, format!("invalid file name: {e}")))?;
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            Ok(json(
+                200,
+                &tetherly_api::FileSendReport {
+                    transfer_id: id,
+                    name: safe,
+                    size,
+                    peer: target.as_str().to_string(),
+                    sha256: None,
+                },
+            ))
+        }
+        SendSource::Bytes(bytes) => {
+            let digest = tetherly_core::hex_sha256(&bytes);
+            let size = bytes.len() as u64;
+            let safe_name =
+                tetherly_core::sanitize_file_name(name.as_deref().unwrap_or("upload.bin"))
+                    .map_err(|e| error(ErrorCode::BadRequest, format!("invalid file name: {e}")))?;
+            let id = node
+                .offer_and_send_bytes(&target, &safe_name, &bytes, false)
+                .await
+                .map_err(core_error)?;
+            Ok(json(
+                200,
+                &tetherly_api::FileSendReport {
+                    transfer_id: id,
+                    name: safe_name,
+                    size,
+                    peer: target.as_str().to_string(),
+                    sha256: Some(digest),
+                },
+            ))
+        }
+    }
+}
+
+/// `POST /transfers/multi`: one file fanned out to a selector (legacy
+/// `/api/file/send-multi`; selector axes fold exactly one target set).
+async fn post_file_send_multi(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::FileSendMultiRequest = parse_body(body)?;
+    let selector = crate::store::TargetSelector::from_query(
+        req.peer.as_deref(),
+        req.tag.as_deref(),
+        req.group.as_deref(),
+        req.device_type.as_deref(),
+        req.all.unwrap_or(false),
+    )
+    .map_err(|e| error(ErrorCode::BadRequest, e))?;
+    let name = req.name.clone();
+    let rep = match decode_send_data(&req.path, &req.data_base64)? {
+        SendSource::Path(p) => node
+            .offer_and_send_file_multi(&selector, &p, name.as_deref())
+            .await
+            .map_err(core_error)?,
+        SendSource::Bytes(bytes) => {
+            let fname = name.as_deref().unwrap_or("uploaded_file");
+            node.offer_and_send_bytes_multi(&selector, fname, &bytes)
+                .await
+                .map_err(core_error)?
+        }
+    };
+    Ok(json(200, &crate::apiv1::model::file_dispatch(rep)))
+}
+
+/// `POST /transfers/batch`: many files to one peer (legacy
+/// `/api/file/send-batch`).
+async fn post_file_send_batch(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::FileBatchRequest = parse_body(body)?;
+    let target = resolve_send_target(node, req.peer.as_deref())?;
+    let mut all_items: Vec<crate::runtime::BatchSendItem> = req
+        .items
+        .into_iter()
+        .map(|i| crate::runtime::BatchSendItem {
+            path: i.path,
+            name: i.name,
+            data_base64: i.data_base64,
+        })
+        .collect();
+    for p in req.paths {
+        all_items.push(crate::runtime::BatchSendItem {
+            path: Some(p),
+            name: None,
+            data_base64: None,
+        });
+    }
+    if all_items.is_empty() {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "no files specified in paths or items",
+        ));
+    }
+    let rep = node
+        .send_batch_items(&target, all_items)
+        .await
+        .map_err(core_error)?;
+    Ok(json(200, &crate::apiv1::model::file_batch(rep)))
+}
+
+/// `POST /outbox/{id}/resend`: re-offer a sent file from the outbox ring.
+async fn post_outbox_resend(node: &Node, id: &str) -> Handled {
+    let rep = node.resend_outbox_file(id).await.map_err(core_error)?;
+    Ok(json(200, &crate::apiv1::model::outbox_resend(rep)))
+}
+
+/// `PATCH /policy/auto-accept`: partial policy update; omitted fields stay
+/// untouched, JSON `null` on `max_file_size` lifts the size cap.
+fn patch_auto_accept_policy(node: &Node, body: &[u8]) -> Handled {
+    let patch: tetherly_api::AutoAcceptPolicyPatch = parse_body(body)?;
+    if patch.enabled.is_none()
+        && patch.allowed_groups.is_none()
+        && patch.allowed_tags.is_none()
+        && patch.allowed_types.is_none()
+        && matches!(patch.max_file_size, tetherly_api::Patch::Leave)
+    {
+        return Err(error(ErrorCode::BadRequest, "patch sets no field"));
+    }
+    let mut policy = node.auto_accept_policy();
+    if let Some(en) = patch.enabled {
+        policy.enabled = en;
+    }
+    if let Some(groups) = patch.allowed_groups {
+        policy.allowed_groups = groups;
+    }
+    if let Some(tags) = patch.allowed_tags {
+        policy.allowed_tags = tags;
+    }
+    if let Some(types) = patch.allowed_types {
+        let mut dtypes = Vec::new();
+        for t in types {
+            match t.parse::<crate::store::DeviceType>() {
+                Ok(dt) => dtypes.push(dt),
+                Err(e) => {
+                    return Err(error(
+                        ErrorCode::BadRequest,
+                        format!("invalid device type '{t}': {e}"),
+                    ))
+                }
+            }
+        }
+        policy.allowed_types = dtypes;
+    }
+    match patch.max_file_size {
+        tetherly_api::Patch::Set(sz) => policy.max_file_size = Some(sz),
+        tetherly_api::Patch::Clear => policy.max_file_size = None,
+        tetherly_api::Patch::Leave => {}
+    }
+    node.set_auto_accept_policy(policy).map_err(core_error)?;
+    Ok(json(200, &crate::apiv1::model::auto_accept_policy(node)))
+}
+
+/// `GET /inbox/{name}/content`: the raw file bytes with the sniffed mime
+/// type (§162b, legacy `/api/file/inbox/download` route shape).
+fn get_inbox_content(node: &Node, name: &str) -> Handled {
+    match node.read_inbox_file(name) {
+        Ok((clean_name, mime, bytes)) => Ok(UiResponse::new(200, mime, bytes).with_header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{clean_name}\""),
+        )),
+        Err(e) => Err(core_error(e)),
+    }
 }
 
 /// `PATCH /link/heartbeat`: dynamic keepalive interval/deadline (§152).
-/// Partial patch; omitted fields stay untouched.
 fn patch_heartbeat(node: &Node, body: &[u8]) -> Handled {
     let patch: HeartbeatPatch = parse_body(body)?;
     if patch.is_empty() {

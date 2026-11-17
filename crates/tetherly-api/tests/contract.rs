@@ -584,6 +584,33 @@ mod commands {
     }
 
     #[test]
+    fn inbox_open_report_names_the_file_or_the_directory() {
+        // §162a: POST /inbox/{name}/open answers the open report — a named
+        // file or the directory reveal (name null), both with the on-disk
+        // path so CLI/JSON printers keep the legacy detail level.
+        let file = InboxOpenReport {
+            name: Some("a.txt".into()),
+            path: "/data/inbox/a.txt".into(),
+        };
+        let v = serde_json::to_value(&file).unwrap();
+        assert_eq!(v["name"], "a.txt");
+        assert_eq!(v["path"], "/data/inbox/a.txt");
+        let back: InboxOpenReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back, file);
+
+        let dir = InboxOpenReport {
+            name: None,
+            path: "/data/inbox".into(),
+        };
+        let v = serde_json::to_value(&dir).unwrap();
+        // Null name serializes (the resource is the directory reveal).
+        assert!(v.get("name").is_some());
+        let back: InboxOpenReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back, dir);
+        assert!(serde_json::from_value::<InboxOpenReport>(json!({"path": 1})).is_err());
+    }
+
+    #[test]
     fn traffic_telemetry_round_trip_and_reset_semantics() {
         // §153: traffic/protocol telemetry mirrors the legacy /api/metrics
         // report field-for-field; a PATCH reset folds into the same GET
@@ -1185,5 +1212,236 @@ mod commands {
         let back_x: MessageClearReport =
             serde_json::from_value(serde_json::to_value(&clr).unwrap()).unwrap();
         assert_eq!(back_x, clr);
+    }
+
+    #[test]
+    fn file_domain_reports_round_trip() {
+        // §162b: file-domain resources mirror the legacy /api/file reports
+        // field-for-field; CLI JSON printers depend on the exact shapes.
+
+        // Offers resource with one pending offer.
+        let offer = FileOffer {
+            transfer_id: "t1".into(),
+            filename: "a.bin".into(),
+            total_bytes: 128,
+            resume_from: 0,
+            source: "peer-a".into(),
+            peer: "peer-a".into(),
+            peer_alias: None,
+            size: 128,
+            sha256: "abc".into(),
+            timestamp_ms: 1000,
+            offered_ms: 1000,
+        };
+        let offers = FileOffers {
+            count: 1,
+            auto_accept_trusted: false,
+            offers: vec![offer],
+        };
+        let v = serde_json::to_value(&offers).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["offers"][0]["filename"], "a.bin");
+        let back: FileOffers = serde_json::from_value(v).unwrap();
+        assert_eq!(back, offers);
+
+        // Decision request is strict; the folded report covers single+batch.
+        let q: FileDecisionRequest = serde_json::from_value(json!({"id": "t1"})).unwrap();
+        assert_eq!(q.id.as_deref(), Some("t1"));
+        assert!(serde_json::from_value::<FileDecisionRequest>(json!({"z": 1})).is_err());
+        let rep = FileDecisionReport {
+            accepted: Some(true),
+            action: Some("accepted".into()),
+            transfer_id: Some("t1".into()),
+            peer: Some("peer-a".into()),
+            filename: Some("a.bin".into()),
+            total_bytes: Some(128),
+            accepted_count: 1,
+            rejected_count: 0,
+            total_evaluated: 1,
+            decisions: Vec::new(),
+        };
+        let back_r: FileDecisionReport =
+            serde_json::from_value(serde_json::to_value(&rep).unwrap()).unwrap();
+        assert_eq!(back_r, rep);
+
+        // Send report + dispatch report (selector carries the label form).
+        let send = FileSendReport {
+            transfer_id: "t2".into(),
+            name: "b.txt".into(),
+            size: 64,
+            peer: "peer-b".into(),
+            sha256: None,
+        };
+        // Optional sha256 serializes as null when absent.
+        assert!(serde_json::to_value(&send).unwrap()["sha256"].is_null());
+        let disp = FileDispatchReport {
+            selector: "tag:lab".into(),
+            filename: "b.txt".into(),
+            size: 64,
+            sha256: "def".into(),
+            target_count: 2,
+            success_count: 1,
+            skipped_offline_count: 1,
+            failed_count: 0,
+            dispatches: Vec::new(),
+        };
+        let back_d: FileDispatchReport =
+            serde_json::from_value(serde_json::to_value(&disp).unwrap()).unwrap();
+        assert_eq!(back_d, disp);
+
+        // Batch report with one per-file item.
+        let batch = FileBatchReport {
+            batch_id: "b1".into(),
+            peer: "peer-b".into(),
+            peer_alias: None,
+            total_files: 1,
+            successful_files: 1,
+            failed_files: 0,
+            total_bytes: 64,
+            items: vec![FileBatchItem {
+                transfer_id: Some("t3".into()),
+                name: "c.txt".into(),
+                size: 64,
+                sha256: None,
+                status: "queued".into(),
+                error: None,
+            }],
+        };
+        let back_b: FileBatchReport =
+            serde_json::from_value(serde_json::to_value(&batch).unwrap()).unwrap();
+        assert_eq!(back_b, batch);
+    }
+
+    #[test]
+    fn outbox_storage_resume_reports_round_trip() {
+        // Outbox entry: status is the plain as_str form; optional extras
+        // vanish when absent.
+        let entry = OutboxEntryDto {
+            id: "o1".into(),
+            transfer_id: "t1".into(),
+            peer: "peer-a".into(),
+            peer_alias: Some("Desk".into()),
+            filename: "a.bin".into(),
+            size: 128,
+            sha256: "abc".into(),
+            source_path: None,
+            status: "completed".into(),
+            error: None,
+            started_ms: 1000,
+            completed_ms: Some(2000),
+            speed_bps: 512,
+        };
+        // Optional extras serialize as null when absent.
+        assert!(serde_json::to_value(&entry).unwrap()["error"].is_null());
+        assert!(serde_json::to_value(&entry).unwrap()["source_path"].is_null());
+        let ring = Outbox {
+            total: 1,
+            returned: 1,
+            entries: vec![entry],
+        };
+        let back: Outbox = serde_json::from_value(serde_json::to_value(&ring).unwrap()).unwrap();
+        assert_eq!(back, ring);
+
+        // Clear/resend reports.
+        let clr = OutboxClearReport {
+            cleared_count: 3,
+            target_peer: Some("peer-a".into()),
+            target_status: Some("failed".into()),
+        };
+        let back_c: OutboxClearReport =
+            serde_json::from_value(serde_json::to_value(&clr).unwrap()).unwrap();
+        assert_eq!(back_c, clr);
+        let rs = OutboxResendReport {
+            original_id: "o1".into(),
+            new_transfer_id: "t9".into(),
+        };
+        let back_r: OutboxResendReport =
+            serde_json::from_value(serde_json::to_value(&rs).unwrap()).unwrap();
+        assert_eq!(back_r, rs);
+
+        // Storage snapshot + clean report.
+        let st = Storage {
+            data_dir: "/data".into(),
+            inbox_dir: "/data/inbox".into(),
+            inbox_total_bytes: 128,
+            inbox_file_count: 1,
+            partial_bytes: 0,
+            partial_count: 0,
+            orphaned_partial_count: 0,
+            orphaned_partial_bytes: 0,
+            meta_bytes: 64,
+            resume_markers_count: 0,
+        };
+        let back_s: Storage = serde_json::from_value(serde_json::to_value(&st).unwrap()).unwrap();
+        assert_eq!(back_s, st);
+        let cl = StorageCleanReport {
+            freed_bytes: 128,
+            deleted_files_count: 2,
+            cleared_resume_entries: 1,
+        };
+        let back_l: StorageCleanReport =
+            serde_json::from_value(serde_json::to_value(&cl).unwrap()).unwrap();
+        assert_eq!(back_l, cl);
+
+        // Resume marker: progress is a float, optional alias vanishes.
+        let mk = ResumeMarker {
+            transfer_id: "t1".into(),
+            source: "peer-a".into(),
+            source_alias: None,
+            total_bytes: 1024,
+            offset_bytes: 512,
+            progress_percent: 50.0,
+            chunk_aligned: true,
+            part_file_exists: true,
+            part_file_bytes: 512,
+        };
+        let v = serde_json::to_value(&mk).unwrap();
+        assert_eq!(v["progress_percent"], 50.0);
+        assert!(v["source_alias"].is_null());
+        let back_m: ResumeMarker = serde_json::from_value(v).unwrap();
+        assert_eq!(back_m, mk);
+        let markers = ResumeMarkers {
+            count: 1,
+            total_partial_bytes: 512,
+            markers: vec![mk],
+        };
+        let back_ms: ResumeMarkers =
+            serde_json::from_value(serde_json::to_value(&markers).unwrap()).unwrap();
+        assert_eq!(back_ms, markers);
+    }
+
+    #[test]
+    fn auto_accept_policy_patch_is_tri_state() {
+        // §162b: the policy GET resource is flat; the PATCH body is
+        // tri-state — absent leaves, JSON null clears, a value sets.
+        let pol = AutoAcceptPolicyDto {
+            enabled: true,
+            allowed_groups: vec!["lab".into()],
+            allowed_tags: Vec::new(),
+            allowed_types: vec!["image/png".into()],
+            max_file_size: Some(1024),
+            auto_accepted_count: 7,
+        };
+        let v = serde_json::to_value(&pol).unwrap();
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["max_file_size"], 1024);
+        assert_eq!(v["auto_accepted_count"], 7);
+        let back: AutoAcceptPolicyDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back, pol);
+
+        // Sparse patch: absent fields stay untouched.
+        let p: AutoAcceptPolicyPatch = serde_json::from_value(json!({"enabled": true})).unwrap();
+        assert_eq!(p.enabled, Some(true));
+        assert!(matches!(p.max_file_size, Patch::Leave));
+        // A JSON null clears the cap.
+        let p: AutoAcceptPolicyPatch =
+            serde_json::from_value(json!({"max_file_size": null})).unwrap();
+        assert!(matches!(p.max_file_size, Patch::Clear));
+        // Unknown fields rejected.
+        assert!(serde_json::from_value::<AutoAcceptPolicyPatch>(json!({"z": 1})).is_err());
+        // Clean body (sparse).
+        let b: StorageCleanBody = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(b.orphaned_only, None);
+        assert!(serde_json::from_value::<StorageCleanBody>(json!({"z": 1})).is_err());
     }
 }

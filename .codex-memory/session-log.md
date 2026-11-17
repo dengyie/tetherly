@@ -1448,3 +1448,11 @@
 - CLI ×16：cmd_notify 12 + cmd_messages 4；banner config 写改 PATCH（loopback_request 显式 token）、读改嵌套形状；message clear 改 DELETE；watch SSE 不动（M6 范围）。
 - 坑：send_message_to_peer("") 的 peer 解析先于空文本校验，无 peer 时 404（PeerNotFound）而非 400——测试按真实语义断言。
 - 门禁：fmt --all / clippy 0 错；契约 30 / bin 16 / lib 357 全绿。全量交 CI。
+
+## §162 M5 第十一批 (2026-11-18) — 文件域迁移 v1（inbox/offers/transfers/outbox/storage/resume/policy）
+- 契约 ×26：§162a InboxOpenReport（open 204→200 升级）+ §162b 文件域 25 DTO（FileOffer/Decision（单+批双形态折叠）/Send/Dispatch/Batch/Outbox/ResumeMarker/Storage/AutoAcceptPolicy…）；Patch<T> 三态复用（Deserialize-only，PATCH 体不 derive Serialize）；契约测试 +3（34）+ bindings 再生。
+- v1 ×14：inbox GET/DELETE/POST + content 裸字节 + open；offers GET + accept/reject（id 单条 / peer+all 批量折叠）；transfers 单发（path|data_base64，FILE_MAX 前置，0 peer→409）/multi/batch；outbox GET/DELETE（status FromStr 别名表，未知→400）+ resend；storage GET/clean（orphaned_only 缺省 true）；resume GET；policy GET/PATCH（空 patch→400，null→Clear）。
+- CLI ×24（cmd_files 全域）：transfers/inbox/offers/send 三态/outbox/storage/resume/auto-accept；clear 类用前后快照差值算计数；send 走 loopback_post_with_deadlines 300s（daemon 全文件哈希慢）；send-multi body 键 `"type"`→`"device_type"` 修正；打印机改读平铺 policy（legacy 嵌套 policy 折掉）。
+- 资源语义取舍：GET /transfers 返回全量，id/active/terminal/direction 过滤留 CLI 客户端侧；GET /inbox search/limit 服务端（count 镜像 legacy=过滤后截断前）。
+- 坑：Option 字段序列化是显式 null 而非键缺失（无 skip_serializing_if）——测试断言按 null 判；OutboxStatus 无 Display 用 as_str()；FileDecisionRequest 空 {} 是 400（缺 id/all/peer）非 404。
+- 测试：集成 v1_file_domains_serve_and_gate（空资源/status 别名/policy 三态/决策 400+404/inbox 内容往返+穿越拒绝/client token 门禁/405）；门禁 fmt/clippy --all-targets 绿；契约 34 / uihttp 78 / apiv1 28 全绿。全量交 CI。

@@ -1068,6 +1068,434 @@ pub struct InboxOpenRequest {
     pub name: String,
 }
 
+/// §162a: `POST /inbox/{name}/open` report — the revealed file (or the inbox
+/// directory when `name` is null) and where it lives on disk.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InboxOpenReport {
+    #[cfg_attr(test, ts(optional))]
+    pub name: Option<String>,
+    pub path: String,
+}
+
+// ---- §162b: file domain (offers / send / outbox / storage / resume) ----
+
+/// One pending incoming file offer (§4.2 `GET /offers` item). Field names
+/// mirror the legacy `/api/file/offers` DTO so CLI printers need no reshaping.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileOffer {
+    pub transfer_id: String,
+    pub filename: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub resume_from: u64,
+    pub source: String,
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size: u64,
+    pub sha256: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub offered_ms: u64,
+}
+
+/// The pending-offers resource: count, the auto-accept master state and the
+/// offer list (optionally filtered by `id`/`peer` query).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileOffers {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+    pub auto_accept_trusted: bool,
+    pub offers: Vec<FileOffer>,
+}
+
+/// `POST /offers/accept` | `POST /offers/reject` body: one offer by id, or
+/// every pending offer from `peer` with `all`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct FileDecisionRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub all: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+}
+
+/// One accept/reject outcome (single decision inside the batch report).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileDecision {
+    pub accepted: bool,
+    pub action: String,
+    pub transfer_id: String,
+    pub peer: String,
+    pub filename: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub resume_from: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// The decision report: single decision when `id` was given, batch counts +
+/// per-offer outcomes when `all`/`peer` was given. Both shapes fold here —
+/// `decisions` stays empty on the single path.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileDecisionReport {
+    #[cfg_attr(test, ts(optional))]
+    pub accepted: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub action: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub transfer_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub filename: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub total_bytes: Option<u64>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub accepted_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rejected_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_evaluated: u64,
+    pub decisions: Vec<FileDecision>,
+}
+
+/// One target outcome of a multi-peer file dispatch (`PeerFileSendItem`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileDispatchItem {
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub transfer_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub outbox_id: Option<String>,
+    pub success: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub error: Option<String>,
+}
+
+/// `POST /transfers` report for a single-peer send: the content-addressed
+/// transfer id plus the resolved target (legacy `/api/file/send` shape).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileSendReport {
+    pub transfer_id: String,
+    pub name: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size: u64,
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub sha256: Option<String>,
+}
+
+/// `POST /transfers/multi` report: one file fanned out to a selector
+/// (legacy `/api/file/send-multi` shape, same counts as messages dispatch).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileDispatchReport {
+    pub selector: String,
+    pub filename: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size: u64,
+    pub sha256: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub success_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub skipped_offline_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub failed_count: u64,
+    pub dispatches: Vec<FileDispatchItem>,
+}
+
+/// One per-file outcome inside a batch send.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileBatchItem {
+    #[cfg_attr(test, ts(optional))]
+    pub transfer_id: Option<String>,
+    pub name: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size: u64,
+    #[cfg_attr(test, ts(optional))]
+    pub sha256: Option<String>,
+    pub status: String,
+    #[cfg_attr(test, ts(optional))]
+    pub error: Option<String>,
+}
+
+/// `POST /transfers/batch` report: many files to one peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileBatchReport {
+    pub batch_id: String,
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_files: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub successful_files: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub failed_files: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_bytes: u64,
+    pub items: Vec<FileBatchItem>,
+}
+
+/// One sent-file record in the outbox ring (`OutboxEntry`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct OutboxEntryDto {
+    pub id: String,
+    pub transfer_id: String,
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    pub filename: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size: u64,
+    pub sha256: String,
+    #[cfg_attr(test, ts(optional))]
+    pub source_path: Option<String>,
+    /// `pending | sent | failed | cancelled` (lowercase).
+    pub status: String,
+    #[cfg_attr(test, ts(optional))]
+    pub error: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_ms: u64,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub completed_ms: Option<u64>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub speed_bps: u64,
+}
+
+/// The outbox resource: ring total plus the queried (filtered/capped) page.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Outbox {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub returned: u64,
+    pub entries: Vec<OutboxEntryDto>,
+}
+
+/// `DELETE /outbox` report: how many records the purge dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct OutboxClearReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cleared_count: u64,
+    #[cfg_attr(test, ts(optional))]
+    pub target_peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub target_status: Option<String>,
+}
+
+/// `POST /outbox/{id}/resend` report: the re-offered transfer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct OutboxResendReport {
+    pub original_id: String,
+    pub new_transfer_id: String,
+}
+
+/// One resumable transfer marker (memory entry or disk sidecar).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ResumeMarker {
+    pub transfer_id: String,
+    pub source: String,
+    #[cfg_attr(test, ts(optional))]
+    pub source_alias: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub offset_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub progress_percent: f64,
+    pub chunk_aligned: bool,
+    pub part_file_exists: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub part_file_bytes: u64,
+}
+
+/// The resume-markers resource: every resumable inbound transfer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ResumeMarkers {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_partial_bytes: u64,
+    pub markers: Vec<ResumeMarker>,
+}
+
+/// The storage resource: data/inbox directories and disk consumption.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Storage {
+    pub data_dir: String,
+    pub inbox_dir: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub inbox_total_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub inbox_file_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub partial_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub partial_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub orphaned_partial_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub orphaned_partial_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub meta_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub resume_markers_count: u64,
+}
+
+/// `POST /storage/clean` report: freed space and what got deleted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StorageCleanReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub freed_bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub deleted_files_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cleared_resume_entries: u64,
+}
+
+/// `POST /storage/clean` body: `orphaned_only` defaults to true when absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct StorageCleanBody {
+    #[cfg_attr(test, ts(optional))]
+    pub orphaned_only: Option<bool>,
+}
+
+/// `POST /transfers` body: one file to one peer — a `path` on the daemon
+/// filesystem or inline `data_base64` (legacy `/api/file/send` shape).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct FileSendRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub data_base64: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub name: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+}
+
+/// `POST /transfers/multi` body: one file fanned out to a target selector
+/// (`peer`/`tag`/`group`/`type`/`all` — exactly one axis, legacy parity).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct FileSendMultiRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub data_base64: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub name: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub tag: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub group: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub device_type: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub all: Option<bool>,
+}
+
+/// One file inside `POST /transfers/batch`: a daemon `path` or inline bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct FileBatchEntry {
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub name: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub data_base64: Option<String>,
+}
+
+/// `POST /transfers/batch` body: many files to one peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct FileBatchRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub items: Vec<FileBatchEntry>,
+}
+
+/// The auto-accept policy resource: master toggle plus scoped allow-lists
+/// (mirrors the runtime `AutoAcceptPolicy` field-for-field).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AutoAcceptPolicyDto {
+    pub enabled: bool,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    pub allowed_types: Vec<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_file_size: Option<u64>,
+    /// Session count of offers accepted automatically (legacy report extra).
+    #[cfg_attr(test, ts(type = "number"))]
+    pub auto_accepted_count: u64,
+}
+
+/// `PATCH /policy/auto-accept` body: policy fields plus the master toggle;
+/// omitted fields stay untouched (`Patch` distinguishes JSON `null` from
+/// absent — see the profiles-domain `Patch<T>` notes).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct AutoAcceptPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    /// JSON number sets the cap; JSON `null` lifts it; absent leaves it.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    #[serde(default)]
+    pub max_file_size: Patch<u64>,
+}
+
 // ---- §156a: profiles domain ----
 
 /// One peer metadata profile (mirrors the runtime `PeerProfile` field-for-field
@@ -2094,6 +2522,32 @@ mod bindings {
             decl::<SettingsTransfer>(&cfg),
             decl::<SettingsPatch>(&cfg),
             decl::<InboxOpenRequest>(&cfg),
+            decl::<InboxOpenReport>(&cfg),
+            decl::<FileOffer>(&cfg),
+            decl::<FileOffers>(&cfg),
+            decl::<FileDecisionRequest>(&cfg),
+            decl::<FileDecision>(&cfg),
+            decl::<FileDecisionReport>(&cfg),
+            decl::<FileDispatchItem>(&cfg),
+            decl::<FileSendReport>(&cfg),
+            decl::<FileDispatchReport>(&cfg),
+            decl::<FileBatchItem>(&cfg),
+            decl::<FileBatchReport>(&cfg),
+            decl::<OutboxEntryDto>(&cfg),
+            decl::<Outbox>(&cfg),
+            decl::<OutboxClearReport>(&cfg),
+            decl::<OutboxResendReport>(&cfg),
+            decl::<ResumeMarker>(&cfg),
+            decl::<ResumeMarkers>(&cfg),
+            decl::<Storage>(&cfg),
+            decl::<StorageCleanReport>(&cfg),
+            decl::<AutoAcceptPolicyDto>(&cfg),
+            decl::<AutoAcceptPolicyPatch>(&cfg),
+            decl::<StorageCleanBody>(&cfg),
+            decl::<FileSendRequest>(&cfg),
+            decl::<FileSendMultiRequest>(&cfg),
+            decl::<FileBatchEntry>(&cfg),
+            decl::<FileBatchRequest>(&cfg),
             decl::<PeerProfileDto>(&cfg),
             decl::<PeerProfiles>(&cfg),
             decl::<PeerProfilePatch>(&cfg),

@@ -178,3 +178,31 @@
 | `POST /api/message/send-multi` | `POST /messages` | 并入同一端点；report 同上；`ok` 折掉 |
 | `GET /api/message/history` | `GET /messages` | `ok` 折掉；query peer/limit/unread_only/mark_read 同形（body 变体仍吃） |
 | `POST /api/message/clear` | `DELETE /messages?peer=` | 动词修正（DELETE）；peer 上 query；`ok` 折掉，留 target/cleared_count/message |
+
+## 已迁移第十一批（§162，文件域：inbox/offers/transfers/outbox/storage/resume/policy）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `GET /api/transfers` | `GET /transfers` | 返回全量资源；id/active/terminal/direction 过滤移 CLI 客户端侧（数组上 retain 重算计数） |
+| `POST /api/transfers/cancel` | `POST /transfers/{id}/cancel` | id 上路径；`ok` 折掉 |
+| `POST /api/transfers/clear` | `DELETE /transfers` | 动词修正（DELETE）；cleared_count 由 CLI 前后快照差值算 |
+| `GET /api/file/inbox` | `GET /inbox` | `ok` 折掉；search/limit 服务端过滤（count 镜像 legacy：过滤后截断前） |
+| `GET /api/file/inbox/download` | `GET /inbox/{name}/content` | 裸字节（非 JSON envelope）+ sniffed mime + Content-Disposition |
+| `DELETE /api/file/inbox` | `DELETE /inbox?before=` | before 截止语义保留：早于 cutoff 的删，其余保留 |
+| `DELETE /api/file/inbox/{name}` | `DELETE /inbox/{name}` | name percent-encoded；deleted/freed 由 CLI 快照差值算 |
+| `POST /api/file/inbox/open` | `POST /inbox` | 目录 reveal（无 name）；**204→200** 带 InboxOpenReport |
+| `POST /api/file/inbox/{name}/open` | `POST /inbox/{name}/open` | 204→200 带 report（name=Some） |
+| `GET /api/file/offers` | `GET /offers` | `ok` 折掉，count 折自数组；id/peer 过滤同形（id 过滤留 CLI 侧） |
+| `POST /api/file/accept` | `POST /offers/accept` | id 单条 / peer+all 批量双形态折叠进 FileDecisionReport；未知 id→404 |
+| `POST /api/file/reject` | `POST /offers/reject` | 同上 |
+| `POST /api/file/send` | `POST /transfers` | path 或 data_base64 二选一；FILE_MAX 64GiB 前置；0 连接 peer→409、显式 peer 未连接→404 |
+| `POST /api/file/send-multi` | `POST /transfers/multi` | TargetSelector 群发（tag/group/device_type/all）；selector 折 as_label 字符串 |
+| `POST /api/file/send-batch` | `POST /transfers/batch` | paths+items 混合；per-file status 保留 |
+| `GET /api/file/outbox` | `GET /outbox` | status 解析用别名表（done/sending/…），未知→400 |
+| `POST /api/file/outbox/clear` | `DELETE /outbox?peer=&status=` | 动词修正（DELETE）；过滤条件上 query |
+| `POST /api/file/outbox/resend` | `POST /outbox/{id}/resend` | id 上路径；留 original_id/new_transfer_id |
+| `GET /api/file/storage` | `GET /storage` | `ok` 折掉；快照字段同形 |
+| `POST /api/file/storage/clean` | `POST /storage/clean` | orphaned_only 缺省 true（legacy 对齐）；空体=缺省 |
+| `GET /api/file/resume` | `GET /resume` | `ok` 折掉；progress_percent f64；source_alias null 显式 |
+| `GET /api/file/policy/auto-accept` | `GET /policy/auto-accept` | 平铺资源（legacy 嵌套 policy 折掉）；cumulative_auto_accepted_count→auto_accepted_count（会话计数） |
+| `POST /api/file/policy/auto-accept` | `PATCH /policy/auto-accept` | PATCH 语义修正；三态 patch（absent=不动 / null=清 / 值=设）；空 patch→400 |

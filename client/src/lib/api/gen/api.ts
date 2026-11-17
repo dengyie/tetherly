@@ -174,6 +174,70 @@ tray_owner?: TrayOwner, };
 
 export type InboxOpenRequest = { name: string, };
 
+export type InboxOpenReport = { name?: string, path: string, };
+
+export type FileOffer = { transfer_id: string, filename: string, total_bytes: number, resume_from: number, source: string, peer: string, peer_alias?: string, size: number, sha256: string, timestamp_ms: number, offered_ms: number, };
+
+export type FileOffers = { count: number, auto_accept_trusted: boolean, offers: Array<FileOffer>, };
+
+export type FileDecisionRequest = { id?: string, all?: boolean, peer?: string, };
+
+export type FileDecision = { accepted: boolean, action: string, transfer_id: string, peer: string, filename: string, total_bytes: number, resume_from: number, timestamp_ms: number, };
+
+export type FileDecisionReport = { accepted?: boolean, action?: string, transfer_id?: string, peer?: string, filename?: string, total_bytes?: number, accepted_count: number, rejected_count: number, total_evaluated: number, decisions: Array<FileDecision>, };
+
+export type FileDispatchItem = { peer: string, peer_alias?: string, transfer_id?: string, outbox_id?: string, success: boolean, error?: string, };
+
+export type FileSendReport = { transfer_id: string, name: string, size: number, peer: string, sha256?: string, };
+
+export type FileDispatchReport = { selector: string, filename: string, size: number, sha256: string, target_count: number, success_count: number, skipped_offline_count: number, failed_count: number, dispatches: Array<FileDispatchItem>, };
+
+export type FileBatchItem = { transfer_id?: string, name: string, size: number, sha256?: string, status: string, error?: string, };
+
+export type FileBatchReport = { batch_id: string, peer: string, peer_alias?: string, total_files: number, successful_files: number, failed_files: number, total_bytes: number, items: Array<FileBatchItem>, };
+
+export type OutboxEntryDto = { id: string, transfer_id: string, peer: string, peer_alias?: string, filename: string, size: number, sha256: string, source_path?: string, 
+/**
+ * `pending | sent | failed | cancelled` (lowercase).
+ */
+status: string, error?: string, started_ms: number, completed_ms?: number, speed_bps: number, };
+
+export type Outbox = { total: number, returned: number, entries: Array<OutboxEntryDto>, };
+
+export type OutboxClearReport = { cleared_count: number, target_peer?: string, target_status?: string, };
+
+export type OutboxResendReport = { original_id: string, new_transfer_id: string, };
+
+export type ResumeMarker = { transfer_id: string, source: string, source_alias?: string, total_bytes: number, offset_bytes: number, progress_percent: number, chunk_aligned: boolean, part_file_exists: boolean, part_file_bytes: number, };
+
+export type ResumeMarkers = { count: number, total_partial_bytes: number, markers: Array<ResumeMarker>, };
+
+export type Storage = { data_dir: string, inbox_dir: string, inbox_total_bytes: number, inbox_file_count: number, partial_bytes: number, partial_count: number, orphaned_partial_count: number, orphaned_partial_bytes: number, meta_bytes: number, resume_markers_count: number, };
+
+export type StorageCleanReport = { freed_bytes: number, deleted_files_count: number, cleared_resume_entries: number, };
+
+export type AutoAcceptPolicyDto = { enabled: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, allowed_types: Array<string>, max_file_size?: number, 
+/**
+ * Session count of offers accepted automatically (legacy report extra).
+ */
+auto_accepted_count: number, };
+
+export type AutoAcceptPolicyPatch = { enabled?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, 
+/**
+ * JSON number sets the cap; JSON `null` lifts it; absent leaves it.
+ */
+max_file_size: number | null, };
+
+export type StorageCleanBody = { orphaned_only?: boolean, };
+
+export type FileSendRequest = { path?: string, data_base64?: string, name?: string, peer?: string, };
+
+export type FileSendMultiRequest = { path?: string, data_base64?: string, name?: string, peer?: string, tag?: string, group?: string, device_type?: string, all?: boolean, };
+
+export type FileBatchEntry = { path?: string, name?: string, data_base64?: string, };
+
+export type FileBatchRequest = { peer?: string, paths: Array<string>, items: Array<FileBatchEntry>, };
+
 export type PeerProfileDto = { device_id: string, device_type: string, tags: Array<string>, group: string | null, notes: string | null, updated_ms: number, };
 
 export type PeerProfiles = { total: number, profiles: Array<PeerProfileDto>, };
