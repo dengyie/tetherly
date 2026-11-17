@@ -3521,8 +3521,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         .await
         .expect("metrics query succeeds");
     assert_eq!(code_m, 200);
-    let rep: tetherly_node::TrafficReport = serde_json::from_slice(&body_m).unwrap();
-    assert!(rep.ok);
+    let rep: tetherly_node::TrafficTelemetry = serde_json::from_slice(&body_m).unwrap();
     // Baseline: sessions were established during pair_phone_desktop()
     assert!(rep.sessions_established >= 1);
     assert_eq!(rep.handshakes_failed, 0);
@@ -3532,7 +3531,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         .await
         .expect("traffic query succeeds");
     assert_eq!(code_t, 200);
-    let rep_t: tetherly_node::TrafficReport = serde_json::from_slice(&body_t).unwrap();
+    let rep_t: tetherly_node::TrafficTelemetry = serde_json::from_slice(&body_t).unwrap();
     assert_eq!(rep.total_tx_bytes, rep_t.total_tx_bytes);
 
     // 2. Connect to SSE event stream
@@ -3568,7 +3567,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         .await
         .expect("metrics query 2 succeeds");
     assert_eq!(code_m2, 200);
-    let rep2: tetherly_node::TrafficReport = serde_json::from_slice(&body_m2).unwrap();
+    let rep2: tetherly_node::TrafficTelemetry = serde_json::from_slice(&body_m2).unwrap();
     assert!(rep2.messages.pings_sent >= 1);
     assert!(rep2.messages.notifies_sent >= 1);
     assert!(rep2.control.tx_bytes > 0);
@@ -3609,7 +3608,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         .await
         .expect("metrics query 3 succeeds");
     assert_eq!(code_m3, 200);
-    let rep3: tetherly_node::TrafficReport = serde_json::from_slice(&body_m3).unwrap();
+    let rep3: tetherly_node::TrafficTelemetry = serde_json::from_slice(&body_m3).unwrap();
     assert!(rep3.file.tx_bytes >= payload.len() as u64);
     assert!(rep3.messages.file_offers_sent >= 1);
 
@@ -3654,7 +3653,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         .await
         .expect("metrics query 4 succeeds");
     assert_eq!(code_m4, 200);
-    let rep4: tetherly_node::TrafficReport = serde_json::from_slice(&body_m4).unwrap();
+    let rep4: tetherly_node::TrafficTelemetry = serde_json::from_slice(&body_m4).unwrap();
     assert_eq!(rep4.total_tx_bytes, 0);
     assert_eq!(rep4.total_rx_bytes, 0);
     assert_eq!(rep4.control.tx_bytes, 0);
