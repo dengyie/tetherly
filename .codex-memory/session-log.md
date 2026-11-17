@@ -1428,3 +1428,7 @@
 - v1：GET /topology(/peers/policy)、PATCH policy/config、POST links/unlinks/sync、GET/POST/DELETE /routes（DELETE ?peer=）、GET /net、POST /net/refresh。
 - CLI：cmd_topology ×8（打印机双 zip + timestamp_ms 现算）+ cmd_peers ×5（反序列化换 tetherly_api:: 契约类型，node 内部结构 ok 折掉后不匹配）。
 - 门禁：fmt/clippy --all-targets 绿；契约 27/bin 16/lib 352 全绿。全量交 CI。
+
+## v0.2.62 发版 (2026-11-18) — §156a+§156b 上生产
+- §156a（profiles/caps 域 + Patch<T> 三态契约，run 44105392730 全绿）+ §156b（topology/routes/net 域 15 DTO + 13 端点 + CLI ×13，run 44117110707 全绿）合并发版。
+- bump Cargo.toml/package.json/tauri.conf.json 0.2.61→0.2.62；发版后 deploy.sh --target all 双端部署。
