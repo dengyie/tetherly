@@ -9489,3 +9489,12 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 4. **a05a490**：reset PATCH 经 `loopback_request` 显式传 `None` token 吃 401——v1 非 GET 路径一律要 token（`v1_required_tier` → Write 层）；同函数里 GET 能过是因为 `loopback_get` 内部自动附带 `api_token_for(port)`。修复：PATCH 传 `tetherly_node::api_token_for(host_ui).as_deref()`，与 CLI 侧同法。教训：**phase1 测试里裸 `loopback_request(..., None)` 对 v1 写路径天然 401，写 v1 断言时默认带 per-port token**。
 
 第 4 轮 macos/windows/android/deny 四作业绿，ubuntu 独红 `m3_2_peer_gone_returns_cursor`（phase3.rs:262 "cursor did not return home"，2.5s 宽限+5s 断言窗口被 runner 调度抖动吃掉）——§124 flake 家族（mac/windows 同测试同轮全绿、与本轮改动零路径交集），按隔离协议 `gh run rerun --failed` 重跑绿，run 44070194176 五作业全 success，§155 收口。
+
+## 156a. profiles/caps 域 v1 契约 + 端点 + CLI 迁移（cmd_profile ×5 + cmd_core caps ×3）
+
+接 §155。M5 后续轮：profiles 与 caps 两域整组迁 v1。核心难点是 PATCH 三态语义——serde 的 `Option<Option<T>>` 在 JSON 层塌缩（外层 `visit_none` 先于内层触发，`null` 与「键缺失」不可区分，/tmp/probe_dd 探针实测确认），故契约层引入 `Patch<T>` 三态枚举。
+
+- **契约扩展 ×7**（tetherly-api）：`Patch<T>{Leave/Set/Clear}`（手写 Deserialize：JSON null→Clear、其余→Set、字段缺省→Leave，字段级 `#[serde(default)]`）；`PeerProfileDto`/`PeerProfiles`/`PeerProfilePatch`（device_type/tags 用 Option、group/notes 用 Patch<String>，`is_empty()` 判零字段 PATCH）/`PeerProfileUpdated`；`CapsUpdate{enable,disable}`（deny_unknown_fields）；`LocalCaps`（镜像 legacy 局部 caps 报告，`ok` 折掉）；`PeerCaps`（legacy PeerCapsDto 的契约镜像）。契约测试 +2（25）：Patch 三态 + 未知字段拒绝 + is_empty；CapsUpdate 严格 + LocalCaps/PeerCaps 往返。bindings 再生（`TETHERLY_API_BLESS=1 cargo test -p tetherly-api bindings`，gen/api.ts +7 类型）。ts_rs 注意：dev-dep only，derive 须 `#[cfg_attr(test, derive(ts_rs::TS))]`；Patch 字段用 `ts(type = "string | null")`。
+- **v1 端点**：`GET /api/v1/profiles`（tag/group/type 过滤）、`GET/PATCH /api/v1/profiles/{id}`（PATCH 空补丁 400 "patch sets no field"；Patch→`Option<Option<String>>` 转换进 `update_peer_profile`）、`GET /api/v1/caps`、`PATCH /api/v1/caps`（CapsUpdate，空 400 "no capability changes specified"）、`GET /api/v1/devices/{id}/caps`（未知 peer 404）、`GET /api/v1/caps/peers`（全量 live peers 裸数组——legacy 无 peer 参数的 `/api/peers/caps` 信封 `{ok,count,peers}` 折为 `Vec<PeerCaps>`）。allowed() 相应扩 GET/PATCH。
+- **CLI 迁移 ×8**：cmd_profile 五命令（list/get/set/group set/group clear）——`profile set` 改稀疏 PATCH（仅携带用户给的键；`group` 清除用 JSON null→Patch::Clear）；cmd_core `caps` 三臂（enable/disable→PATCH /api/v1/caps + api_token_for；单 peer→GET /api/v1/devices/{id}/caps，打印机从 `rep["peers"]` 数组迭代改为单对象直读；both→GET /api/v1/caps + GET /api/v1/caps/peers，count 从数组长度取）。
+- **门禁**：fmt 绿；--all-targets clippy 0 错；契约 25 / bin 16（含 tag_v1_tests）/ lib 352 全绿。全量与冒烟交 CI。

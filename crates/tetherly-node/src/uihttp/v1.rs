@@ -12,8 +12,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
 use tetherly_api::{
-    BlockRequest, ConnectRequest, DevicePatch, Diagnostics, DialReport, DialRequest, ErrorBody,
-    ErrorCode, Event, Health, HeartbeatPatch, LinkProbeRequest, LogLevel, LogLevelRequest, LogTail,
+    BlockRequest, CapsUpdate, ConnectRequest, DevicePatch, Diagnostics, DialReport, DialRequest,
+    ErrorBody, ErrorCode, Event, Health, HeartbeatPatch, LinkProbeRequest, LogLevel,
+    LogLevelRequest, LogTail, Patch, PeerProfileDto, PeerProfilePatch, PeerProfileUpdated,
     PinGrant, SettingsPatch, SysHost, SysProcess, SysTelemetry, Topic, API_VERSION,
 };
 use tetherly_core::CoreError;
@@ -47,6 +48,12 @@ pub(super) fn error(code: ErrorCode, message: impl Into<String>) -> UiResponse {
 /// `/api/v1/devices/{id}` -> `id` (one non-empty segment).
 fn device_item(path: &str) -> Option<&str> {
     path.strip_prefix("/api/v1/devices/")
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+}
+
+/// `/api/v1/profiles/{id}` -> `id` (one non-empty segment).
+fn profile_item(path: &str) -> Option<&str> {
+    path.strip_prefix("/api/v1/profiles/")
         .filter(|id| !id.is_empty() && !id.contains('/'))
 }
 
@@ -101,6 +108,11 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/pairing/dial" => Some(&["POST"]),
         "/api/v1/diagnostics/log-level" => Some(&["PATCH"]),
         "/api/v1/diagnostics/metrics" => Some(&["GET", "PATCH"]),
+        "/api/v1/profiles" => Some(&["GET"]),
+        "/api/v1/caps" => Some(&["GET", "PATCH"]),
+        "/api/v1/caps/peers" => Some(&["GET"]),
+        p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
+        p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
         p => match device_action(p) {
             Some((_, "connect"))
@@ -260,6 +272,27 @@ pub(super) async fn route(
             Ok(_) => Ok(json(200, &crate::apiv1::model::inbox(node))),
             Err(e) => Err(core_error(e)),
         },
+        ("GET", "/api/v1/profiles") => Ok(json(
+            200,
+            &crate::apiv1::model::peer_profiles(
+                node,
+                profile_filter(query, "tag"),
+                profile_filter(query, "group"),
+                profile_filter(query, "type"),
+            ),
+        )),
+        ("GET", p) if profile_item(p).is_some() => {
+            profile_json(node, profile_item(p).unwrap_or_default())
+        }
+        ("PATCH", p) if profile_item(p).is_some() => {
+            patch_profile(node, profile_item(p).unwrap_or_default(), body)
+        }
+        ("GET", "/api/v1/caps") => Ok(json(200, &crate::apiv1::model::local_caps(node))),
+        ("PATCH", "/api/v1/caps") => patch_caps(node, body).await,
+        ("GET", "/api/v1/caps/peers") => Ok(json(200, &crate::apiv1::model::peer_caps_all(node))),
+        ("GET", p) if matches!(device_action(p), Some((_, "caps"))) => {
+            peer_caps_json(node, device_action(p).map(|(id, _)| id).unwrap_or_default())
+        }
         ("GET", p) if device_item(p).is_some() => {
             Ok(device_json(node, device_item(p).unwrap_or_default()))
         }
@@ -548,6 +581,123 @@ async fn dial_peer(node: &Node, body: &[u8]) -> Handled {
             addr: resolved.to_string(),
         },
     ))
+}
+
+/// `GET /profiles/{id}` — one peer's profile; 404 with the legacy wording
+/// when the target cannot be resolved.
+fn profile_json(node: &Node, target: &str) -> Handled {
+    match node.resolve_peer(target.trim()) {
+        Ok(id) => Ok(json(200, &profile_of(node, &id))),
+        Err(CoreError::PeerNotFound(e)) => {
+            Err(error(ErrorCode::NotFound, format!("peer not found: {e}")))
+        }
+        Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
+    }
+}
+
+/// One parsed query-param value from the profiles filter set.
+fn profile_filter(query: Option<&str>, key: &str) -> Option<String> {
+    query
+        .map(super::parse_query_map)
+        .unwrap_or_default()
+        .get(key)
+        .cloned()
+}
+
+/// `Patch<T>` -> the runtime's `Option<Option<String>>` update shape:
+/// `Leave` -> `None` (untouched), `Set` -> `Some(Some)`, `Clear` -> `Some(None)`.
+fn patch_owned(p: &Patch<String>) -> Option<Option<String>> {
+    match p {
+        Patch::Leave => None,
+        Patch::Set(s) => Some(Some(s.clone())),
+        Patch::Clear => Some(None),
+    }
+}
+
+fn profile_of(node: &Node, id: &tetherly_core::DeviceId) -> PeerProfileDto {
+    let p = node.peer_profile(id);
+    PeerProfileDto {
+        device_id: p.device_id,
+        device_type: p.device_type.as_str().to_string(),
+        tags: p.tags,
+        group: p.group,
+        notes: p.notes,
+        updated_ms: p.updated_ms,
+    }
+}
+
+/// `PATCH /profiles/{id}` — applies the three-state patch and returns the
+/// post-patch profile (§151 readback fold).
+fn patch_profile(node: &Node, target: &str, body: &[u8]) -> Handled {
+    let patch: PeerProfilePatch = parse_body(body)?;
+    if patch.is_empty() {
+        return Err(error(ErrorCode::BadRequest, "patch sets no field"));
+    }
+    let device_type = match patch.device_type.as_deref() {
+        Some(s) => Some(
+            s.parse::<crate::store::DeviceType>()
+                .map_err(|e| error(ErrorCode::BadRequest, e))?,
+        ),
+        None => None,
+    };
+    let group = patch_owned(&patch.group);
+    let notes = patch_owned(&patch.notes);
+    let rep = node
+        .update_peer_profile(target, device_type, patch.tags, group, notes)
+        .map_err(profile_error)?;
+    Ok(json(
+        200,
+        &PeerProfileUpdated {
+            device_id: rep.device_id,
+            profile: profile_dto_of(rep.profile),
+        },
+    ))
+}
+
+fn profile_dto_of(p: crate::store::PeerProfile) -> PeerProfileDto {
+    PeerProfileDto {
+        device_id: p.device_id,
+        device_type: p.device_type.as_str().to_string(),
+        tags: p.tags,
+        group: p.group,
+        notes: p.notes,
+        updated_ms: p.updated_ms,
+    }
+}
+
+fn profile_error(e: CoreError) -> UiResponse {
+    match e {
+        CoreError::PeerNotFound(_) => error(ErrorCode::NotFound, e.to_string()),
+        _ => error(ErrorCode::BadRequest, e.to_string()),
+    }
+}
+
+/// `PATCH /caps` — enable/disable local feature flags; empty patch is the
+/// legacy "no capability changes specified" 400.
+async fn patch_caps(node: &Node, body: &[u8]) -> Handled {
+    let patch: CapsUpdate = parse_body(body)?;
+    if patch.enable.is_empty() && patch.disable.is_empty() {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "no capability changes specified",
+        ));
+    }
+    node.update_local_caps(&patch.enable, &patch.disable)
+        .await
+        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    Ok(json(200, &crate::apiv1::model::local_caps(node)))
+}
+
+/// `GET /devices/{id}/caps` — one peer's capability profile; 404 mirrors the
+/// legacy resolve failure.
+fn peer_caps_json(node: &Node, target: &str) -> Handled {
+    match crate::apiv1::model::peer_caps(node, target) {
+        Ok(c) => Ok(json(200, &c)),
+        Err(CoreError::PeerNotFound(e)) => {
+            Err(error(ErrorCode::NotFound, format!("peer not found: {e}")))
+        }
+        Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
+    }
 }
 
 async fn log_tail(query: Option<&str>) -> Handled {

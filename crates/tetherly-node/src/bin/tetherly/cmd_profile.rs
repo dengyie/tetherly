@@ -117,7 +117,7 @@ pub(crate) async fn handle_profile_list(
     } else {
         format!("?{}", query_params.join("&"))
     };
-    let path = format!("/api/peers/profiles{qs}");
+    let path = format!("/api/v1/profiles{qs}");
     let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
         .await
         .map_err(|e| {
@@ -169,7 +169,7 @@ pub(crate) async fn handle_profile_list(
 }
 
 pub(crate) async fn handle_profile_get(peer: &str, json: bool, ui_port: u16) -> Result<()> {
-    let path = format!("/api/peers/profile?peer={peer}");
+    let path = format!("/api/v1/profiles/{peer}");
     let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
         .await
         .map_err(|e| {
@@ -221,21 +221,38 @@ pub(crate) async fn handle_profile_set(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let payload = serde_json::json!({
-        "peer": peer,
-        "device_type": device_type,
-        "group": group,
-        "notes": notes,
-    });
-    let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/profile", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    // §156a: PATCH /api/v1/profiles/{peer} — the path carries the target;
+    // absent JSON keys leave fields untouched (the old body always sent all
+    // four keys, so a None here became an explicit null → clear; keep that
+    // wire behavior: only send keys the user actually passed).
+    let mut patch = serde_json::Map::new();
+    if let Some(dt) = &device_type {
+        patch.insert("device_type".into(), serde_json::json!(dt));
+    }
+    if let Some(g) = &group {
+        patch.insert("group".into(), serde_json::json!(g));
+    }
+    if let Some(n) = &notes {
+        patch.insert("notes".into(), serde_json::json!(n));
+    }
+    if patch.is_empty() {
+        anyhow::bail!("nothing to update: pass --type, --group or --notes");
+    }
+    let bytes = serde_json::to_vec(&patch)?;
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "PATCH",
+        &format!("/api/v1/profiles/{peer}"),
+        Some(&bytes),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to update profile (HTTP {code}): {}",
@@ -247,9 +264,12 @@ pub(crate) async fn handle_profile_set(
     } else {
         let val: serde_json::Value =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-        let msg = val["message"].as_str().unwrap_or("profile updated");
         let dev = val["device_id"].as_str().unwrap_or(peer);
-        println!("Profile updated for {dev}: {msg}");
+        let prof = &val["profile"];
+        let g = prof["group"].as_str().unwrap_or("<none>");
+        let dt = prof["device_type"].as_str().unwrap_or("other");
+        let tags = prof["tags"].as_array().map(|a| a.len()).unwrap_or(0);
+        println!("Profile updated for {dev}: type={dt} group={g} tags={tags}");
     }
     Ok(())
 }
@@ -429,19 +449,24 @@ pub(crate) async fn handle_group_set(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let payload = serde_json::json!({
-        "peer": peer,
-        "group": group,
-    });
+    // §156a: PATCH /api/v1/profiles/{peer} {group} — the JSON value sets the
+    // group (three-state Patch: null clears, absent leaves).
+    let payload = serde_json::json!({ "group": group });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/group", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "PATCH",
+        &format!("/api/v1/profiles/{peer}"),
+        Some(&bytes),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to set group (HTTP {code}): {}",
@@ -460,19 +485,24 @@ pub(crate) async fn handle_group_set(
 }
 
 pub(crate) async fn handle_group_clear(peer: &str, json: bool, ui_port: u16) -> Result<()> {
-    let payload = serde_json::json!({
-        "peer": peer,
-        "group": serde_json::Value::Null,
-    });
+    // §156a: JSON null is the explicit clear (Patch::Clear) — the absent-key
+    // "leave untouched" state is never sent by the CLI.
+    let payload = serde_json::json!({ "group": serde_json::Value::Null });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/group", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "PATCH",
+        &format!("/api/v1/profiles/{peer}"),
+        Some(&bytes),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to clear group (HTTP {code}): {}",

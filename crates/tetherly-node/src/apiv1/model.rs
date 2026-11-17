@@ -9,12 +9,12 @@ use std::collections::BTreeMap;
 use tetherly_api::{
     Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, ChannelTraffic,
     Device, HandoffStatus, HeartbeatConfig, Inbox, InboxFile, Input, Layout, LayoutEdge,
-    LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, MessageDirection, Pairing, PeerCounts,
-    Ports, ProtocolMessages, Settings, SettingsGeneral, SettingsTransfer, Snapshot, System,
-    TrafficTelemetry, Transfer, TransferDirection, TransferPhase, TransferStats, Transfers,
-    API_VERSION,
+    LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, LocalCaps, MessageDirection, Pairing,
+    PeerCaps, PeerCounts, PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, Settings,
+    SettingsGeneral, SettingsTransfer, Snapshot, System, TrafficTelemetry, Transfer,
+    TransferDirection, TransferPhase, TransferStats, Transfers, API_VERSION,
 };
-use tetherly_core::{DisplayEdge, PathKind, TrustedPeer};
+use tetherly_core::{CoreError, DisplayEdge, PathKind, TrustedPeer};
 
 #[derive(Default)]
 struct Parts {
@@ -405,6 +405,90 @@ pub fn settings(node: &Node) -> Settings {
             auto_accept: a.enabled,
         },
     }
+}
+
+/// `GET /profiles` — the peer profile table with the already-parsed
+/// `tag`/`group`/`type` query filters (parsed at the HTTP layer).
+pub fn peer_profiles(
+    node: &Node,
+    tag: Option<String>,
+    group: Option<String>,
+    dev_type: Option<String>,
+) -> PeerProfiles {
+    let dev_type = dev_type.and_then(|t| t.parse::<crate::store::DeviceType>().ok());
+    let r = node.peer_profiles(tag.as_deref(), group.as_deref(), dev_type);
+    PeerProfiles {
+        total: r.total,
+        profiles: r.profiles.into_iter().map(profile_dto).collect(),
+    }
+}
+
+fn profile_dto(p: crate::store::PeerProfile) -> PeerProfileDto {
+    PeerProfileDto {
+        device_id: p.device_id,
+        device_type: p.device_type.as_str().to_string(),
+        tags: p.tags,
+        group: p.group,
+        notes: p.notes,
+        updated_ms: p.updated_ms,
+    }
+}
+
+/// `GET /caps` — local node capability report (`ok` folded away).
+pub fn local_caps(node: &Node) -> LocalCaps {
+    let r = node.local_caps_report();
+    LocalCaps {
+        device_id: r.device_id,
+        caps: r.caps,
+        features: r.features,
+        file_port: r.file_port,
+        input_port: r.input_port,
+        screen_port: r.screen_port,
+    }
+}
+
+/// `GET /devices/{id}/caps` — one peer's capability profile (the legacy
+/// `/api/peers/caps?peer=` single-target slice; `ok`/`count` folded away).
+pub fn peer_caps(node: &Node, target: &str) -> Result<PeerCaps, CoreError> {
+    let r = node.peers_caps_report(Some(target))?;
+    r.peers
+        .into_iter()
+        .next()
+        .map(|p| PeerCaps {
+            device_id: p.device_id,
+            name: p.name,
+            alias: p.alias,
+            caps: p.caps,
+            features: p.features,
+            file_port: p.file_port,
+            input_port: p.input_port,
+            screen_port: p.screen_port,
+            online: p.online,
+        })
+        .ok_or_else(|| CoreError::PeerNotFound(target.to_string()))
+}
+
+/// `GET /caps/peers` — all live peers' capability profiles (the legacy
+/// untargeted `/api/peers/caps` slice, envelope folded to a bare array).
+pub fn peer_caps_all(node: &Node) -> Vec<PeerCaps> {
+    node.peers_caps_report(None)
+        .map(|r| {
+            r.peers
+                .into_iter()
+                .map(|p| PeerCaps {
+                    device_id: p.device_id,
+                    name: p.name,
+                    alias: p.alias,
+                    caps: p.caps,
+                    features: p.features,
+                    file_port: p.file_port,
+                    input_port: p.input_port,
+                    screen_port: p.screen_port,
+                    online: p.online,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The activity resource: notification candidates, pending replies, the

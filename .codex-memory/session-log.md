@@ -1416,3 +1416,9 @@
 - 门禁全绿；lib352/bin16/契约23；全量交 CI。M5：24 命令 + 8 条旧路由删除。
 - §155 CI 修复链（如实）：e15d041→21a768a→31a917f→d0fabcc→44f4bfb→a05a490 共 6 提交，4 轮红。①phase1 metrics/dial 旧调用漏扫（教训：删除前全仓扫含根 tests/）；②python 插入行未 fmt；③TrafficReport→TrafficTelemetry 反序列化 ×5——注意 tetherly_node::TrafficTelemetry 是 node 内部结构（字段私有无 Deserialize），测试要用 tetherly_api::TrafficTelemetry（根 Cargo.toml dev-deps 补 tetherly-api）；④reset PATCH 走 loopback_request 显式传 None token 吃 401——v1 非 GET 一律要 token（v1_required_tier→Write），须传 api_token_for(port)，与 CLI 同法；loopback_get 自动附带所以 GET 全过。第 4 轮 mac/win/android/deny 绿，ubuntu 独红 m3_2（§124 flake 家族，隔离重跑绿，run 44070194176 五作业 success）。§155 收口。
 - v0.2.61 发版（2026-11-17）：bump f7007da（Cargo.toml/Cargo.lock/client package.json+tauri.conf.json 同步 0.2.61），release 工作流 11 资产全绿，deploy.sh --target all 双端成功——Mac pid 71252、home-win 20976→19304（NTFS 原子热重启），版本门双端 0.2.61，受保护进程 SRBMiner/komari-agent/verge-mihomo 部署前后 3/3 完好，双端 live_peers=1。M5 §149-§155 战果上生产。
+
+## §156a (2026-11-17) — profiles/caps 域契约 + v1 端点 + CLI 迁移 ×8
+- 契约：Patch<T>{Leave/Set/Clear} 三态枚举——serde 双 Option 塌缩坑实测（外层 visit_none 先触发，JSON null 与键缺失不可区分，/tmp/probe_dd 探针验证）；PeerProfileDto/PeerProfiles/PeerProfilePatch/PeerProfileUpdated + CapsUpdate（deny_unknown_fields）+ LocalCaps/PeerCaps；契约 25；bindings 再生。
+- v1：GET /profiles、GET/PATCH /profiles/{id}、GET/PATCH /caps、GET /devices/{id}/caps、GET /caps/peers（全量 peers 裸数组）。
+- CLI：cmd_profile ×5（set 稀疏 PATCH、group clear 用 null→Clear）+ cmd_core caps ×3（PATCH 带 api_token_for；单 peer 打印机改单对象直读；both 臂 count 取数组长度）。
+- 门禁：fmt/clippy --all-targets 绿；契约 25/bin 16/lib 352 全绿。全量与冒烟交 CI。

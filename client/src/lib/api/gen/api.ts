@@ -174,6 +174,31 @@ tray_owner?: TrayOwner, };
 
 export type InboxOpenRequest = { name: string, };
 
+export type PeerProfileDto = { device_id: string, device_type: string, tags: Array<string>, group: string | null, notes: string | null, updated_ms: number, };
+
+export type PeerProfiles = { total: number, profiles: Array<PeerProfileDto>, };
+
+export type PeerProfilePatch = { device_type?: string, tags?: Array<string>, 
+/**
+ * JSON string sets the group; JSON `null` clears it; absent leaves it
+ * untouched (`Patch` distinguishes null from absent — a bare
+ * `Option<Option<T>>` collapses both to "untouched" because serde's
+ * outer `visit_none` fires before the inner type sees the null).
+ */
+group: string | null, 
+/**
+ * Same three-state semantics as `group`.
+ */
+notes: string | null, };
+
+export type PeerProfileUpdated = { device_id: string, profile: PeerProfileDto, };
+
+export type CapsUpdate = { enable: Array<string>, disable: Array<string>, };
+
+export type LocalCaps = { device_id: string, caps: Array<string>, features: Array<string>, file_port: number, input_port: number, screen_port: number, };
+
+export type PeerCaps = { device_id: string, name: string, alias: string | null, caps: Array<string>, features: Array<string>, file_port: number | null, input_port: number | null, screen_port: number | null, online: boolean, };
+
 export type MessageDirection = "inbound" | "outbound";
 
 export type HandoffStatus = "pending" | "opened" | "dismissed" | "rejected";

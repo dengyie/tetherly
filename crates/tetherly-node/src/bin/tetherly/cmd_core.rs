@@ -1412,10 +1412,15 @@ pub(crate) async fn handle_caps_cmd(
             "enable": enables,
             "disable": disables,
         });
-        let (code, resp) = tetherly_node::loopback_post(
+        // §156a: v1 caps PATCH — CapsUpdate body, Write-tier token required
+        // (no loopback_patch helper; loopback_request carries the token).
+        let bytes = serde_json::to_vec(&req_body).unwrap_or_default();
+        let (code, resp) = tetherly_node::loopback_request(
             ui_port,
-            "/api/caps",
-            serde_json::to_vec(&req_body).unwrap_or_default().as_slice(),
+            "PATCH",
+            "/api/v1/caps",
+            Some(&bytes),
+            tetherly_node::api_token_for(ui_port).as_deref(),
         )
         .await
         .map_err(|e| {
@@ -1458,7 +1463,10 @@ pub(crate) async fn handle_caps_cmd(
     }
 
     if let Some(ref target) = peer {
-        let path = format!("/api/peers/caps?peer={target}");
+        // §156a: v1 single-peer caps — the legacy PeersCapsReport{peers:[...]}
+        // envelope folds into one PeerCaps object (unknown peer → 404 error
+        // body instead of an empty array).
+        let path = format!("/api/v1/devices/{target}/caps");
         let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
             .await
             .map_err(|e| {
@@ -1477,56 +1485,49 @@ pub(crate) async fn handle_caps_cmd(
             println!("{}", String::from_utf8_lossy(&resp));
             return Ok(());
         }
-        let rep: serde_json::Value =
+        let p: serde_json::Value =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-        println!("Peer Capabilities ({target}):");
-        if let Some(arr) = rep["peers"].as_array() {
-            if arr.is_empty() {
-                println!("  (peer not found)");
-            } else {
-                for p in arr {
-                    let dev = p["device_id"].as_str().unwrap_or("-");
-                    let name = p["name"].as_str().unwrap_or("-");
-                    let alias = p["alias"].as_str();
-                    let alias_str = match alias {
-                        Some(a) if !a.is_empty() && a != name => format!(" (alias: \"{a}\")"),
-                        _ => String::new(),
-                    };
-                    let online = p["online"].as_bool().unwrap_or(false);
-                    let online_str = if online { "ONLINE" } else { "OFFLINE" };
-                    let feats = p["features"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                        .unwrap_or_default();
-                    let fp = p["file_port"]
-                        .as_u64()
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "n/a".into());
-                    let ip = p["input_port"]
-                        .as_u64()
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "n/a".into());
-                    let sp = p["screen_port"]
-                        .as_u64()
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "n/a".into());
+        let dev = p["device_id"].as_str().unwrap_or("-");
+        let name = p["name"].as_str().unwrap_or("-");
+        let alias = p["alias"].as_str();
+        let alias_str = match alias {
+            Some(a) if !a.is_empty() && a != name => format!(" (alias: \"{a}\")"),
+            _ => String::new(),
+        };
+        let online = p["online"].as_bool().unwrap_or(false);
+        let online_str = if online { "ONLINE" } else { "OFFLINE" };
+        let feats = p["features"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let fp = p["file_port"]
+            .as_u64()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".into());
+        let ip = p["input_port"]
+            .as_u64()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".into());
+        let sp = p["screen_port"]
+            .as_u64()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".into());
 
-                    println!("  * [{online_str}] {name}{alias_str} · {dev}");
-                    println!("    Features: [{feats}]");
-                    println!("    Ports:    file: {fp}, input: {ip}, screen: {sp}");
-                }
-            }
-        }
+        println!("Peer Capabilities ({target}):");
+        println!("  * [{online_str}] {name}{alias_str} · {dev}");
+        println!("    Features: [{feats}]");
+        println!("    Ports:    file: {fp}, input: {ip}, screen: {sp}");
         return Ok(());
     }
 
-    // Both local and peers
-    let (code_local, resp_local) = tetherly_node::loopback_get(ui_port, "/api/caps")
+    // Both local and peers (§156a: v1 caps resources; the peers side is the
+    // legacy PeersCapsReport envelope folded to a bare PeerCaps array).
+    let (code_local, resp_local) = tetherly_node::loopback_get(ui_port, "/api/v1/caps")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1534,7 +1535,7 @@ pub(crate) async fn handle_caps_cmd(
                  start one with `tetherly --data-dir <dir> run` first"
             )
         })?;
-    let (code_peers, resp_peers) = tetherly_node::loopback_get(ui_port, "/api/peers/caps")
+    let (code_peers, resp_peers) = tetherly_node::loopback_get(ui_port, "/api/v1/caps/peers")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1593,46 +1594,45 @@ pub(crate) async fn handle_caps_cmd(
     println!("  Features:    [{local_feats}]");
     println!("  Ports:       file: {fp}, input: {ip}, screen: {sp}");
 
-    let count = peers_v["count"].as_u64().unwrap_or(0);
+    let peers_arr = peers_v.as_array().cloned().unwrap_or_default();
+    let count = peers_arr.len();
     println!("\nConnected Peers Capabilities ({count}):");
-    if let Some(arr) = peers_v["peers"].as_array() {
-        if arr.is_empty() {
-            println!("  (no live peers connected)");
-        } else {
-            for p in arr {
-                let dev = p["device_id"].as_str().unwrap_or("-");
-                let name = p["name"].as_str().unwrap_or("-");
-                let alias = p["alias"].as_str();
-                let alias_str = match alias {
-                    Some(a) if !a.is_empty() && a != name => format!(" (alias: \"{a}\")"),
-                    _ => String::new(),
-                };
-                let feats = p["features"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                let p_fp = p["file_port"]
-                    .as_u64()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "n/a".into());
-                let p_ip = p["input_port"]
-                    .as_u64()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "n/a".into());
-                let p_sp = p["screen_port"]
-                    .as_u64()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "n/a".into());
+    if peers_arr.is_empty() {
+        println!("  (no live peers connected)");
+    } else {
+        for p in &peers_arr {
+            let dev = p["device_id"].as_str().unwrap_or("-");
+            let name = p["name"].as_str().unwrap_or("-");
+            let alias = p["alias"].as_str();
+            let alias_str = match alias {
+                Some(a) if !a.is_empty() && a != name => format!(" (alias: \"{a}\")"),
+                _ => String::new(),
+            };
+            let feats = p["features"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let p_fp = p["file_port"]
+                .as_u64()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".into());
+            let p_ip = p["input_port"]
+                .as_u64()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".into());
+            let p_sp = p["screen_port"]
+                .as_u64()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".into());
 
-                println!("  * {name}{alias_str} · {dev}");
-                println!("    Features: [{feats}]");
-                println!("    Ports:    file: {p_fp}, input: {p_ip}, screen: {p_sp}");
-            }
+            println!("  * {name}{alias_str} · {dev}");
+            println!("    Features: [{feats}]");
+            println!("    Ports:    file: {p_fp}, input: {p_ip}, screen: {p_sp}");
         }
     }
     Ok(())

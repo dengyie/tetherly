@@ -4,7 +4,7 @@
 > 运行时命中按调用方分类见 `GET /api/v1/diagnostics` 的 `legacy_routes`（§129）。
 > Android 无 HTTP 层（JNI 直连），不受本表约束；旧控制台 `/legacy/` 整体随 M5 收敛删除。
 
-**静态调用点：239 个路由 / ~355 处调用。已迁 v1：6 路由 / 8 处（§142–§146 六命令）。**
+**静态调用点：239 个路由 / ~355 处调用。已迁 v1：§142–§146 六命令 + §149-§154 peers 域 + §156a profiles/caps 域（8 命令 / 8 旧路由）。**
 
 ## 已迁移（v1 对应端点）
 
@@ -53,7 +53,7 @@
 | `api/state/*` | 1 | ~2 | — | 待契约扩展 / 分批迁移 |
 | `api/recommendation/*` | 1 | ~2 | cmd_notify | 待契约扩展 / 分批迁移 |
 | `api/health/*` | 1 | ~2 | — | 待契约扩展 / 分批迁移 |
-| `api/caps/*` | 1 | ~2 | cmd_core | 待契约扩展 / 分批迁移 |
+| ~~`api/caps/*`~~ | — | — | — | §156a 已迁 v1（GET/PATCH /caps、/caps/peers、/devices/{id}/caps） |
 | `api/sys/*` | 1 | ~1 | — | 待契约扩展 / 分批迁移 |
 | `api/pin/*` | 1 | ~1 | — | 待契约扩展 / 分批迁移 |
 | `api/otp/*` | 1 | ~1 | cmd_notify | 待契约扩展 / 分批迁移 |
@@ -115,3 +115,16 @@
 - ~~`POST /api/dial`~~：§154 迁 v1、§155 删除旧别名（`POST /api/v1/pairing/dial`）。
 - `tray.rs` 内的 `tray_keepalive`/SSE 使用 v1，不在下线范围。
 - 判定来源：调用方 UA 分类（cli/curl/browser/android），删除每组别名前先查 diagnostics 快照确认零命中。
+
+## 已迁移第七批（§156a，profiles/caps 域 + Patch<T> 三态契约）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `GET /api/peers/profiles` | `GET /profiles`（tag/group/type 过滤） | PeerProfileDto 契约；`ok` 折掉 |
+| `GET /api/peers/profile` | `GET /profiles/{id}` | 单对象；未知 peer 404 |
+| `POST /api/peers/profile` | `PATCH /profiles/{id}` | PATCH 语义修正；三态：值→Set、null→Clear、缺省→Leave（`Patch<T>` 枚举解 serde 双 Option 塌缩）；空补丁 400 |
+| `POST /api/peers/group` | `PATCH /profiles/{id}` `{group}` | 同上单键 |
+| `POST /api/peers/group/clear` | `PATCH /profiles/{id}` `{group:null}` | null→Clear |
+| `GET/POST /api/caps` | `GET/PATCH /caps` | CapsUpdate{enable,disable} deny_unknown_fields；空 PATCH 400；LocalCaps 镜像 legacy 报告（`ok` 折掉） |
+| `GET /api/peers/caps?peer=` | `GET /devices/{id}/caps` | 单 PeerCaps 对象（信封折掉）；未知 peer 404（legacy 为空数组） |
+| `GET /api/peers/caps`（全量） | `GET /caps/peers` | `Vec<PeerCaps>` 裸数组；`ok`/`count` 折掉（count=数组长度） |

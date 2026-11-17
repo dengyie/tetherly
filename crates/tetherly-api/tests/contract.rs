@@ -657,4 +657,91 @@ mod commands {
         let back: DialReport = serde_json::from_value(v).unwrap();
         assert_eq!(back, rep);
     }
+
+    #[test]
+    fn profile_domain_round_trips_and_patch_semantics() {
+        // §156a: GET/PATCH /profiles — DTOs mirror the runtime PeerProfile;
+        // patch distinguish None (leave) / Some(None) (clear) / Some(Some).
+        let prof = PeerProfileDto {
+            device_id: "tdev_abc".into(),
+            device_type: "desktop".into(),
+            tags: vec!["lab".into()],
+            group: Some("office".into()),
+            notes: Some("main rig".into()),
+            updated_ms: 1234,
+        };
+        let v = serde_json::to_value(&prof).unwrap();
+        assert_eq!(v["group"], "office");
+        let back: PeerProfileDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back, prof);
+
+        let list = PeerProfiles {
+            total: 1,
+            profiles: vec![prof.clone()],
+        };
+        let back_list: PeerProfiles =
+            serde_json::from_value(serde_json::to_value(&list).unwrap()).unwrap();
+        assert_eq!(back_list, list);
+
+        let set_group: PeerProfilePatch =
+            serde_json::from_value(json!({"group": "office"})).unwrap();
+        assert_eq!(set_group.group, Patch::Set("office".into()));
+        let clear_group: PeerProfilePatch = serde_json::from_value(json!({"group": null})).unwrap();
+        assert_eq!(clear_group.group, Patch::Clear);
+        let leave_group: PeerProfilePatch = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(leave_group.group, Patch::Leave);
+        assert!(leave_group.is_empty());
+        assert!(!set_group.is_empty());
+        assert!(serde_json::from_value::<PeerProfilePatch>(json!({"peer": "x"})).is_err());
+        // Patch helpers
+        assert_eq!(set_group.group.set(), Some(&"office".to_string()));
+        assert!(clear_group.group.is_clear());
+
+        let updated = PeerProfileUpdated {
+            device_id: "tdev_abc".into(),
+            profile: prof,
+        };
+        let back_u: PeerProfileUpdated =
+            serde_json::from_value(serde_json::to_value(&updated).unwrap()).unwrap();
+        assert_eq!(back_u, updated);
+    }
+
+    #[test]
+    fn caps_domain_round_trips() {
+        // §156a: GET/PATCH /caps + GET /devices/{id}/caps — LocalCaps mirrors
+        // LocalCapsReport (ok folded), PeerCaps mirrors PeerCapsDto.
+        let upd: CapsUpdate =
+            serde_json::from_value(json!({"enable": ["file"], "disable": ["screen"]})).unwrap();
+        assert_eq!(upd.enable, vec!["file".to_string()]);
+        assert_eq!(upd.disable, vec!["screen".to_string()]);
+        assert!(serde_json::from_value::<CapsUpdate>(json!({"other": 1})).is_err());
+
+        let local = LocalCaps {
+            device_id: "tdev_me".into(),
+            caps: vec!["file".into()],
+            features: vec!["file".into()],
+            file_port: 45718,
+            input_port: 45719,
+            screen_port: 45720,
+        };
+        let v = serde_json::to_value(&local).unwrap();
+        assert_eq!(v["file_port"], 45718);
+        let back: LocalCaps = serde_json::from_value(v).unwrap();
+        assert_eq!(back, local);
+
+        let peer = PeerCaps {
+            device_id: "tdev_p".into(),
+            name: "DESKTOP".into(),
+            alias: None,
+            caps: vec![],
+            features: vec![],
+            file_port: None,
+            input_port: None,
+            screen_port: None,
+            online: true,
+        };
+        let back_p: PeerCaps =
+            serde_json::from_value(serde_json::to_value(&peer).unwrap()).unwrap();
+        assert_eq!(back_p, peer);
+    }
 }

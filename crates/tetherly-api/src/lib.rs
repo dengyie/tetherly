@@ -1068,6 +1068,153 @@ pub struct InboxOpenRequest {
     pub name: String,
 }
 
+// ---- §156a: profiles domain ----
+
+/// One peer metadata profile (mirrors the runtime `PeerProfile` field-for-field
+/// so the CLI printers need no reshaping).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PeerProfileDto {
+    pub device_id: String,
+    pub device_type: String,
+    pub tags: Vec<String>,
+    pub group: Option<String>,
+    pub notes: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub updated_ms: u64,
+}
+
+/// `GET /profiles` — the full profile table, optionally filtered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PeerProfiles {
+    pub total: usize,
+    pub profiles: Vec<PeerProfileDto>,
+}
+
+/// `PATCH /profiles/{id}` — the updatable profile fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct PeerProfilePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub device_type: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub tags: Option<Vec<String>>,
+    /// JSON string sets the group; JSON `null` clears it; absent leaves it
+    /// untouched (`Patch` distinguishes null from absent — a bare
+    /// `Option<Option<T>>` collapses both to "untouched" because serde's
+    /// outer `visit_none` fires before the inner type sees the null).
+    #[cfg_attr(test, ts(type = "string | null"))]
+    #[serde(default)]
+    pub group: Patch<String>,
+    /// Same three-state semantics as `group`.
+    #[cfg_attr(test, ts(type = "string | null"))]
+    #[serde(default)]
+    pub notes: Patch<String>,
+}
+
+impl PeerProfilePatch {
+    /// `true` when the patch sets no field.
+    pub fn is_empty(&self) -> bool {
+        self.device_type.is_none()
+            && self.tags.is_none()
+            && matches!(self.group, Patch::Leave)
+            && matches!(self.notes, Patch::Leave)
+    }
+}
+
+/// Three-state patch field: an absent key is `Leave` (untouched, via
+/// `#[serde(default)]`), a JSON `null` is `Clear`, a JSON value is `Set`.
+/// The custom `Deserialize` is required because serde's outer `Option`
+/// collapses an explicit null into the same `visit_none` path as absence.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Patch<T> {
+    #[default]
+    Leave,
+    Set(T),
+    Clear,
+}
+
+impl<T> Patch<T> {
+    /// The set value, if any.
+    pub fn set(&self) -> Option<&T> {
+        match self {
+            Patch::Set(v) => Some(v),
+            Patch::Leave | Patch::Clear => None,
+        }
+    }
+    /// `true` when this is an explicit JSON `null` (clear request).
+    pub fn is_clear(&self) -> bool {
+        matches!(self, Patch::Clear)
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Patch<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Null => Ok(Patch::Clear),
+            other => T::deserialize(other)
+                .map(Patch::Set)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+/// `PATCH /profiles/{id}` readback: the resolved device and its post-patch
+/// profile (§151 fold pattern — the legacy `ok`/`message` flags fold away).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PeerProfileUpdated {
+    pub device_id: String,
+    pub profile: PeerProfileDto,
+}
+
+/// `PATCH /caps` request — capability feature flags to enable/disable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct CapsUpdate {
+    #[serde(default)]
+    pub enable: Vec<String>,
+    #[serde(default)]
+    pub disable: Vec<String>,
+}
+
+/// `GET /caps` and `PATCH /caps` readback — local node capability report
+/// (mirrors the runtime `LocalCapsReport`; the legacy `ok` flag folds away).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LocalCaps {
+    pub device_id: String,
+    pub caps: Vec<String>,
+    pub features: Vec<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub file_port: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub input_port: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub screen_port: u16,
+}
+
+/// Capability profile for one peer (mirrors the runtime `PeerCapsDto`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PeerCaps {
+    pub device_id: String,
+    pub name: String,
+    pub alias: Option<String>,
+    pub caps: Vec<String>,
+    pub features: Vec<String>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub file_port: Option<u16>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub input_port: Option<u16>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub screen_port: Option<u16>,
+    pub online: bool,
+}
+
 // ---- M2e: activity feed ----
 
 /// Direction of a peer direct message relative to this node.
@@ -1223,6 +1370,13 @@ mod bindings {
             decl::<SettingsTransfer>(&cfg),
             decl::<SettingsPatch>(&cfg),
             decl::<InboxOpenRequest>(&cfg),
+            decl::<PeerProfileDto>(&cfg),
+            decl::<PeerProfiles>(&cfg),
+            decl::<PeerProfilePatch>(&cfg),
+            decl::<PeerProfileUpdated>(&cfg),
+            decl::<CapsUpdate>(&cfg),
+            decl::<LocalCaps>(&cfg),
+            decl::<PeerCaps>(&cfg),
             decl::<MessageDirection>(&cfg),
             decl::<HandoffStatus>(&cfg),
             decl::<ActivityCandidate>(&cfg),
