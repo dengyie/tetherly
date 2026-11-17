@@ -75,6 +75,7 @@ tetherly-net.workspace = true
 
 [dev-dependencies]
 tetherly-node.workspace = true
+tetherly-api.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 serde_json.workspace = true
 tracing-subscriber.workspace = true
