@@ -132,6 +132,15 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         // pre-classified Admin routes the tier table reserved).
         "/api/v1/discovery" => Some(&["GET", "POST"]),
         "/api/v1/system/restart" | "/api/v1/system/shutdown" => Some(&["POST"]),
+        // §161: notify / reply / OTP + peer message domains.
+        "/api/v1/notify" => Some(&["POST"]),
+        "/api/v1/notify/candidates" | "/api/v1/notify/replies" => Some(&["GET"]),
+        "/api/v1/notify/config" => Some(&["GET", "PATCH"]),
+        "/api/v1/notify/dismissals" => Some(&["POST"]),
+        "/api/v1/notify/otp" | "/api/v1/notify/open" | "/api/v1/notify/test" => Some(&["POST"]),
+        "/api/v1/notify/copies" | "/api/v1/notify/insertions" => Some(&["POST"]),
+        "/api/v1/replies" | "/api/v1/replies/take" => Some(&["POST"]),
+        "/api/v1/messages" => Some(&["GET", "POST", "DELETE"]),
         p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
         p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -373,6 +382,25 @@ pub(super) async fn route(
         }
         ("POST", "/api/v1/system/shutdown") => Ok(post_system_shutdown(node)),
         ("POST", "/api/v1/system/restart") => post_system_restart(node, body).await,
+        // §161: notify domain.
+        ("POST", "/api/v1/notify") => post_notify_send(node, body).await,
+        ("GET", "/api/v1/notify/candidates") => get_notify_candidates(node, query).await,
+        ("GET", "/api/v1/notify/replies") => Ok(get_notify_replies(node)),
+        ("GET", "/api/v1/notify/config") => Ok(get_notify_config(node)),
+        ("PATCH", "/api/v1/notify/config") => Ok(patch_notify_config(node, query, body)),
+        ("POST", "/api/v1/notify/dismissals") => post_notify_dismiss(node, query, body).await,
+        ("POST", "/api/v1/notify/otp") => Ok(post_notify_otp(node, body)),
+        ("POST", "/api/v1/notify/open") => Ok(post_notify_open(node, body)),
+        ("POST", "/api/v1/notify/test") => Ok(post_notify_test(node, query, body)),
+        ("POST", "/api/v1/notify/copies") => post_notify_copy(node, body).await,
+        ("POST", "/api/v1/notify/insertions") => Ok(post_notify_insert(node, body)),
+        // §161: reply domain.
+        ("POST", "/api/v1/replies") => post_notify_reply(node, body).await,
+        ("POST", "/api/v1/replies/take") => Ok(post_notify_reply_take(node, body)),
+        // §161: message domain.
+        ("GET", "/api/v1/messages") => get_message_history(node, query, body).await,
+        ("POST", "/api/v1/messages") => post_message_send(node, query, body).await,
+        ("DELETE", "/api/v1/messages") => post_message_clear(node, query, body).await,
         ("GET", p) if matches!(device_action(p), Some((_, "caps"))) => peer_caps_json(
             node,
             &device_action(p).map(|(id, _)| id).unwrap_or_default(),
@@ -993,6 +1021,554 @@ async fn post_system_restart(node: &Node, body: &[u8]) -> Handled {
         Err(e) if e.contains("already in progress") => Err(error(ErrorCode::Conflict, e)),
         Err(e) => Err(error(ErrorCode::Internal, e)),
     }
+}
+
+// ---- §161: notify / reply / message handlers ----
+
+/// `POST /notify` — push a desktop notification text to a peer (legacy
+/// `/api/notify`; single-peer ambiguity rules mirror the legacy handler).
+async fn post_notify_send(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::NotifySendRequest = parse_body(body)?;
+    let mut peers = node.live_peers();
+    peers.sort_by_key(|p| p.device_id.to_string());
+    let target = match req.peer.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let id = node.resolve_peer(raw).map_err(core_error)?;
+            if !peers.iter().any(|p| p.device_id == id) {
+                return Err(error(ErrorCode::BadRequest, "peer is not connected"));
+            }
+            id
+        }
+        None => match peers.len() {
+            0 => return Err(error(ErrorCode::Conflict, "no connected peer")),
+            1 => peers[0].device_id.clone(),
+            _ => {
+                return Err(error(
+                    ErrorCode::BadRequest,
+                    "multiple peers connected; pass peer (tdev_…)",
+                ))
+            }
+        },
+    };
+    let push = tetherly_core::NotifyPush {
+        uid: format!("local-{}", super::node_clock_ms()),
+        app_id: req.app_id.unwrap_or_else(|| "com.example.sms".into()),
+        app_name: "tetherly".into(),
+        title: req.title,
+        body: req.body,
+        ts: super::node_clock_ms(),
+        actions: vec!["copy".into()],
+    }
+    .truncate();
+    node.send_notify(&target, push).await.map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::NotifySendReport {
+            peer: target.to_string(),
+        },
+    ))
+}
+
+/// `GET /notify/candidates?peer=&app_id=&has_otp=` — active candidates.
+async fn get_notify_candidates(node: &Node, query: Option<&str>) -> Handled {
+    let params = query.map(super::parse_query_map).unwrap_or_default();
+    let peer = params.get("peer").map(String::as_str);
+    let app_id = params.get("app_id").map(String::as_str);
+    let has_otp = params.get("has_otp").and_then(|v| v.parse::<bool>().ok());
+    let list = node
+        .candidates_filtered(peer, app_id, has_otp)
+        .map_err(core_error)?;
+    let candidates: Vec<tetherly_api::NotifyCandidate> = list
+        .into_iter()
+        .map(|c| tetherly_api::NotifyCandidate {
+            id: c.id,
+            source: c.source,
+            app_id: c.app_id,
+            app_name: c.app_name,
+            uid: c.uid,
+            title: c.title,
+            has_otp: c.has_otp,
+            created_ms: c.created_ms,
+            expires_ms: c.expires_ms,
+            actions: c.actions,
+        })
+        .collect();
+    Ok(json(
+        200,
+        &tetherly_api::NotifyCandidates {
+            count: candidates.len() as u64,
+            candidates,
+        },
+    ))
+}
+
+/// `GET /notify/replies` — queued inbound replies (no text: no-content rule).
+fn get_notify_replies(node: &Node) -> UiResponse {
+    let replies: Vec<tetherly_api::NotifyReplyDto> = node
+        .reply_views()
+        .into_iter()
+        .map(|r| tetherly_api::NotifyReplyDto {
+            id: r.id,
+            source: r.source.to_string(),
+            app_id: r.app_id,
+            uid: r.uid,
+        })
+        .collect();
+    json(
+        200,
+        &tetherly_api::NotifyReplies {
+            count: replies.len() as u64,
+            replies,
+        },
+    )
+}
+
+/// `POST /notify/otp` — extract the OTP from one candidate.
+fn post_notify_otp(node: &Node, body: &[u8]) -> UiResponse {
+    let req: tetherly_api::NotifyIdRequest = match parse_body(body) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    match node.get_candidate_otp(&req.id) {
+        Ok(otp) => json(200, &tetherly_api::NotifyOtpReport { id: req.id, otp }),
+        Err(e) => core_error(e),
+    }
+}
+
+/// `POST /notify/copies` — copy a candidate's OTP to the clipboard.
+async fn post_notify_copy(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::NotifyIdRequest = parse_body(body)?;
+    node.copy_candidate(&req.id).await.map_err(core_error)?;
+    Ok(json(200, &tetherly_api::NotifyActionReport { ok: true }))
+}
+
+/// `POST /notify/insertions` — hand a candidate's OTP to the local input path.
+fn post_notify_insert(node: &Node, body: &[u8]) -> UiResponse {
+    let req: tetherly_api::NotifyIdRequest = match parse_body(body) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    match node.insert_candidate(&req.id) {
+        Ok(()) => json(200, &tetherly_api::NotifyActionReport { ok: true }),
+        Err(e) => core_error(e),
+    }
+}
+
+/// `POST /notify/dismissals` — dismiss by id, by filter, or all (legacy
+/// `/api/dismiss` single-id path folds into the filter call).
+async fn post_notify_dismiss(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let req: tetherly_api::NotifyDismissRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        let params = query.map(super::parse_query_map).unwrap_or_default();
+        tetherly_api::NotifyDismissRequest {
+            id: params.get("id").cloned(),
+            peer: params.get("peer").cloned(),
+            app_id: params.get("app_id").cloned(),
+            all: params.get("all").map(|v| v == "true" || v == "1"),
+        }
+    } else {
+        parse_body(body)?
+    };
+    let all = req.all.unwrap_or(false);
+    if all || req.peer.is_some() || req.app_id.is_some() {
+        let filter = crate::DismissFilter {
+            id: req.id,
+            peer: req.peer,
+            app_id: req.app_id,
+            all: Some(all),
+        };
+        let rep = node.dismiss_candidates(&filter).await.map_err(core_error)?;
+        return Ok(json(
+            200,
+            &tetherly_api::NotifyDismissReport {
+                id: None,
+                source: None,
+                app_id: None,
+                uid: None,
+                notified_remote: None,
+                count: Some(rep.count as u64),
+                ids: Some(rep.ids),
+                notified_remote_count: Some(rep.notified_remote_count as u64),
+            },
+        ));
+    }
+    let id = req.id.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+        error(
+            ErrorCode::BadRequest,
+            "dismiss target required: provide id, peer, app_id, or all: true",
+        )
+    })?;
+    let rep = node.dismiss_candidate_sync(&id).await.map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::NotifyDismissReport {
+            id: Some(rep.id),
+            source: Some(rep.source),
+            app_id: Some(rep.app_id),
+            uid: Some(rep.uid),
+            notified_remote: Some(rep.notified_remote),
+            count: None,
+            ids: None,
+            notified_remote_count: None,
+        },
+    ))
+}
+
+/// `POST /notify/open` — open the candidate's allowlisted app URL.
+fn post_notify_open(node: &Node, body: &[u8]) -> UiResponse {
+    let req: tetherly_api::NotifyIdRequest = match parse_body(body) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let opener = node.opener();
+    match node.open_candidate(&req.id, opener.as_ref()) {
+        Ok(url) => json(200, &tetherly_api::NotifyOpenReport { url }),
+        Err(e) => core_error(e),
+    }
+}
+
+/// `POST /replies` — deliver a quick reply to the peer owning the candidate.
+async fn post_notify_reply(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::NotifyReplySendRequest = parse_body(body)?;
+    node.reply_to_candidate(&req.id, &req.text)
+        .await
+        .map_err(core_error)?;
+    Ok(json(200, &tetherly_api::NotifyActionReport { ok: true }))
+}
+
+/// `POST /replies/take` — hand a queued reply to the local OS path exactly
+/// once; the text is released only here.
+fn post_notify_reply_take(node: &Node, body: &[u8]) -> UiResponse {
+    let req: tetherly_api::NotifyReplyTakeRequest = match parse_body(body) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    match node.take_reply(&req.id) {
+        Some((view, text)) => json(
+            200,
+            &tetherly_api::NotifyReplyTakeReport {
+                id: req.id,
+                uid: view.uid,
+                app_id: view.app_id,
+                text,
+            },
+        ),
+        None => error(ErrorCode::NotFound, "unknown reply"),
+    }
+}
+
+fn dnd_to_contract(d: crate::runtime::DndMode) -> tetherly_api::NotifyDndMode {
+    match d {
+        crate::runtime::DndMode::Off => tetherly_api::NotifyDndMode::Off,
+        crate::runtime::DndMode::Silent => tetherly_api::NotifyDndMode::Silent,
+        crate::runtime::DndMode::All => tetherly_api::NotifyDndMode::All,
+    }
+}
+
+fn dnd_from_contract(d: tetherly_api::NotifyDndMode) -> crate::runtime::DndMode {
+    match d {
+        tetherly_api::NotifyDndMode::Off => crate::runtime::DndMode::Off,
+        tetherly_api::NotifyDndMode::Silent => crate::runtime::DndMode::Silent,
+        tetherly_api::NotifyDndMode::All => crate::runtime::DndMode::All,
+    }
+}
+
+fn notify_config_json(cfg: crate::runtime::NotifyBannerConfig, totals: (u64, u64)) -> UiResponse {
+    json(
+        200,
+        &tetherly_api::NotifyConfigReportDto {
+            config: tetherly_api::NotifyConfigDto {
+                banners_enabled: cfg.banners_enabled,
+                dnd_mode: dnd_to_contract(cfg.dnd_mode),
+                sound_enabled: cfg.sound_enabled,
+                mask_otp: cfg.mask_otp,
+                allow_otp_in_dnd: cfg.allow_otp_in_dnd,
+            },
+            totals: tetherly_api::NotifyConfigTotals {
+                dispatched: totals.0,
+                suppressed: totals.1,
+            },
+        },
+    )
+}
+
+/// `GET /notify/config` — banner switches + dispatch/suppression totals.
+fn get_notify_config(node: &Node) -> UiResponse {
+    let rep = node.notify_config_report();
+    notify_config_json(rep.config, (rep.total_dispatched, rep.total_suppressed))
+}
+
+/// `PATCH /notify/config` — partial update (query params fold for
+/// compatibility with the legacy merge order: body wins).
+fn patch_notify_config(node: &Node, query: Option<&str>, body: &[u8]) -> UiResponse {
+    let mut cfg = node.notify_config();
+    if let Some(q) = query {
+        let map = super::parse_query_map(q);
+        if let Some(b) = map.get("banners").or_else(|| map.get("banners_enabled")) {
+            cfg.banners_enabled = b == "true" || b == "1";
+        }
+        if let Some(d) = map.get("dnd").or_else(|| map.get("dnd_mode")) {
+            cfg.dnd_mode = match d.as_str() {
+                "all" => crate::runtime::DndMode::All,
+                "silent" => crate::runtime::DndMode::Silent,
+                _ => crate::runtime::DndMode::Off,
+            };
+        }
+        if let Some(s) = map.get("sound").or_else(|| map.get("sound_enabled")) {
+            cfg.sound_enabled = s == "true" || s == "1";
+        }
+        if let Some(m) = map.get("mask_otp") {
+            cfg.mask_otp = m == "true" || m == "1";
+        }
+        if let Some(a) = map.get("allow_otp_in_dnd") {
+            cfg.allow_otp_in_dnd = a == "true" || a == "1";
+        }
+    }
+    if !body.iter().all(u8::is_ascii_whitespace) {
+        let patch: tetherly_api::NotifyConfigPatch = match parse_body(body) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        if let Some(b) = patch.banners_enabled {
+            cfg.banners_enabled = b;
+        }
+        if let Some(d) = patch.dnd_mode {
+            cfg.dnd_mode = dnd_from_contract(d);
+        }
+        if let Some(s) = patch.sound_enabled {
+            cfg.sound_enabled = s;
+        }
+        if let Some(m) = patch.mask_otp {
+            cfg.mask_otp = m;
+        }
+        if let Some(a) = patch.allow_otp_in_dnd {
+            cfg.allow_otp_in_dnd = a;
+        }
+    }
+    let rep = node.update_notify_config(cfg);
+    notify_config_json(rep.config, (rep.total_dispatched, rep.total_suppressed))
+}
+
+/// `POST /notify/test` — fire a test banner (query params merge into the
+/// body the legacy way).
+fn post_notify_test(node: &Node, query: Option<&str>, body: &[u8]) -> UiResponse {
+    let mut title: Option<String> = None;
+    let mut text: Option<String> = None;
+    if let Some(q) = query {
+        let map = super::parse_query_map(q);
+        title = map.get("title").cloned();
+        text = map.get("body").or_else(|| map.get("message")).cloned();
+    }
+    if !body.iter().all(u8::is_ascii_whitespace) {
+        match parse_body::<tetherly_api::NotifyTestRequestDto>(body) {
+            Ok(b) => {
+                title = b.title.or(title);
+                text = b.body.or(text);
+            }
+            Err(e) => return e,
+        }
+    }
+    match node.test_notification_banner(title.as_deref(), text.as_deref()) {
+        Ok(rep) => json(
+            200,
+            &tetherly_api::NotifyTestReportDto {
+                sent: rep.sent,
+                suppressed: rep.suppressed,
+                suppression_reason: rep.suppression_reason,
+                message: rep.message,
+                title: rep.title,
+            },
+        ),
+        Err(e) => core_error(e),
+    }
+}
+
+// ---- §161: message handlers ----
+
+/// `GET /messages?peer=&limit=&unread_only=&mark_read=` — filtered history.
+async fn get_message_history(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let mut peer: Option<String> = None;
+    let mut limit: Option<usize> = None;
+    let mut unread_only = false;
+    let mut mark_read = false;
+    if let Some(q) = query {
+        let map = super::parse_query_map(q);
+        peer = map
+            .get("peer")
+            .or_else(|| map.get("to"))
+            .or_else(|| map.get("target"))
+            .cloned();
+        limit = map.get("limit").and_then(|s| s.parse::<usize>().ok());
+        if let Some(u) = map.get("unread_only").or_else(|| map.get("unread")) {
+            unread_only = u == "true" || u == "1";
+        }
+        if let Some(m) = map.get("mark_read").or_else(|| map.get("read")) {
+            mark_read = m == "true" || m == "1";
+        }
+    }
+    if !body.iter().all(u8::is_ascii_whitespace) {
+        let q: tetherly_api::MessageQuery = parse_body(body)?;
+        if q.peer.is_some() {
+            peer = q.peer;
+        }
+        if let Some(l) = q.limit {
+            limit = Some(usize::try_from(l).unwrap_or(usize::MAX));
+        }
+        if let Some(u) = q.unread_only {
+            unread_only = u;
+        }
+        if let Some(m) = q.mark_read {
+            mark_read = m;
+        }
+    }
+    let rep = node
+        .message_history(peer.as_deref(), limit, unread_only, mark_read)
+        .map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::MessageHistory {
+            total: rep.total as u64,
+            returned: rep.returned as u64,
+            unread: rep.unread as u64,
+            messages: rep.messages.into_iter().map(message_entry).collect(),
+        },
+    ))
+}
+
+fn message_entry(m: crate::runtime::PeerMessage) -> tetherly_api::MessageEntry {
+    tetherly_api::MessageEntry {
+        id: m.id,
+        peer: m.peer,
+        direction: match m.direction {
+            crate::runtime::MessageDirection::Inbound => tetherly_api::MessageDirection::Inbound,
+            crate::runtime::MessageDirection::Outbound => tetherly_api::MessageDirection::Outbound,
+        },
+        text: m.text,
+        timestamp_ms: m.timestamp_ms,
+        read: m.read,
+    }
+}
+
+fn selector_from_parts(
+    peer: Option<String>,
+    tag: Option<String>,
+    group: Option<String>,
+    device_type: Option<String>,
+    all: bool,
+) -> Result<crate::TargetSelector, UiResponse> {
+    crate::TargetSelector::from_query(
+        peer.as_deref(),
+        tag.as_deref(),
+        group.as_deref(),
+        device_type.as_deref(),
+        all,
+    )
+    .map_err(|e| error(ErrorCode::BadRequest, e))
+}
+
+/// `POST /messages` — send a direct message; tag/group/device_type/all
+/// select multi-target dispatch (report shape changes accordingly).
+async fn post_message_send(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let mut req: tetherly_api::MessageSendRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        let params = query.map(super::parse_query_map).unwrap_or_default();
+        tetherly_api::MessageSendRequest {
+            peer: params.get("peer").cloned(),
+            tag: params.get("tag").cloned(),
+            group: params.get("group").cloned(),
+            device_type: params
+                .get("device_type")
+                .or_else(|| params.get("type"))
+                .cloned(),
+            all: params.get("all").map(|v| v == "true" || v == "1"),
+            text: params.get("text").cloned().unwrap_or_default(),
+        }
+    } else {
+        parse_body(body)?
+    };
+    if req.text.trim().is_empty() {
+        if let Some(q) = query {
+            let map = super::parse_query_map(q);
+            if let Some(t) = map.get("text") {
+                req.text = t.clone();
+            }
+        }
+    }
+    let is_multi = req.all.unwrap_or(false)
+        || req.tag.is_some()
+        || req.group.is_some()
+        || req.device_type.is_some();
+    if is_multi {
+        let selector = selector_from_parts(
+            req.peer,
+            req.tag,
+            req.group,
+            req.device_type,
+            req.all.unwrap_or(false),
+        )?;
+        let label = selector.as_label();
+        let rep = node
+            .send_message_multi(&selector, req.text.trim())
+            .await
+            .map_err(core_error)?;
+        return Ok(json(
+            200,
+            &tetherly_api::MessageDispatchReport {
+                selector: label,
+                target_count: rep.target_count as u64,
+                success_count: rep.success_count as u64,
+                skipped_offline_count: rep.skipped_offline_count as u64,
+                failed_count: rep.failed_count as u64,
+                dispatches: rep
+                    .dispatches
+                    .into_iter()
+                    .map(|d| tetherly_api::MessageDispatchItem {
+                        peer: d.peer,
+                        peer_alias: d.peer_alias,
+                        message_id: d.message_id,
+                        success: d.success,
+                        error: d.error,
+                    })
+                    .collect(),
+            },
+        ));
+    }
+    let rep = node
+        .send_message_to_peer(req.peer.as_deref().unwrap_or(""), req.text.trim())
+        .await
+        .map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::MessageSendReport {
+            message: message_entry(rep.message),
+        },
+    ))
+}
+
+/// `DELETE /messages` — clear all history, or just one peer's.
+async fn post_message_clear(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let mut peer: Option<String> = None;
+    if let Some(q) = query {
+        let map = super::parse_query_map(q);
+        peer = map
+            .get("peer")
+            .or_else(|| map.get("to"))
+            .or_else(|| map.get("target"))
+            .cloned();
+    }
+    if !body.iter().all(u8::is_ascii_whitespace) {
+        let req: tetherly_api::MessageClearRequest = parse_body(body)?;
+        if req.peer.is_some() {
+            peer = req.peer;
+        }
+    }
+    let rep = node.clear_messages(peer.as_deref()).map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::MessageClearReport {
+            target: rep.target,
+            cleared_count: rep.cleared_count as u64,
+            message: rep.message,
+        },
+    ))
 }
 
 // ---- §156b: routes / network handlers ----

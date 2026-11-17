@@ -19,7 +19,9 @@ pub(crate) async fn notify(
         "peer": peer,
     });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/notify", &bytes)
+    // §161: speaks v1 — POST /api/v1/notify (NotifySendRequest/Report
+    // contract, same single-peer ambiguity rules as legacy /api/notify).
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/notify", &bytes)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -48,7 +50,7 @@ pub(crate) async fn candidates(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let mut path = "/api/notify/candidates".to_string();
+    let mut path = "/api/v1/notify/candidates".to_string();
     let mut query = Vec::new();
     if let Some(ref p) = peer {
         query.push(format!("peer={p}"));
@@ -120,14 +122,16 @@ pub(crate) async fn otp(id: String, copy: bool, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "id": id });
     let bytes = serde_json::to_vec(&payload)?;
     if copy {
-        let (c_code, c_resp) = tetherly_node::loopback_post(ui_port, "/api/copy", &bytes)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+        // §161: v1 POST /notify/copies (NotifyIdRequest/ActionReport).
+        let (c_code, c_resp) =
+            tetherly_node::loopback_post(ui_port, "/api/v1/notify/copies", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+                    )
+                })?;
         if c_code != 200 {
             anyhow::bail!(
                 "copy OTP failed (HTTP {c_code}): {}",
@@ -135,7 +139,8 @@ pub(crate) async fn otp(id: String, copy: bool, ui_port: u16) -> Result<()> {
             );
         }
     }
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/otp/get", &bytes)
+    // §161: v1 POST /notify/otp (NotifyIdRequest/OtpReport).
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/notify/otp", &bytes)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -183,7 +188,9 @@ pub(crate) async fn dismiss(
         "all": if all { Some(true) } else { None },
     });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/notify/dismiss", &bytes)
+    // §161: v1 POST /notify/dismissals (NotifyDismissRequest; the folded
+    // report keeps both single and batch shapes the human printer reads).
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/notify/dismissals", &bytes)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -225,7 +232,8 @@ pub(crate) async fn dismiss(
 pub(crate) async fn reply(id: String, text: String, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "id": id, "text": text });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/reply", &bytes)
+    // §161: v1 POST /replies (NotifyReplySendRequest/ActionReport).
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/replies", &bytes)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -245,7 +253,8 @@ pub(crate) async fn reply(id: String, text: String, ui_port: u16) -> Result<()> 
 
 /// `tetherly replies` -- Replies arm of the top-level dispatch.
 pub(crate) async fn replies(json: bool, ui_port: u16) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/notify/replies")
+    // §161: v1 GET /notify/replies (NotifyReplies).
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/notify/replies")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -285,7 +294,9 @@ pub(crate) async fn replies(json: bool, ui_port: u16) -> Result<()> {
 pub(crate) async fn take_reply(id: String, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "id": id });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/reply/take", &bytes)
+    // §161: v1 POST /replies/take (NotifyReplyTakeRequest/Report — the
+    // one release point for the reply text).
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/replies/take", &bytes)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -343,9 +354,19 @@ pub(crate) async fn banner(action: BannerCmd) -> Result<()> {
                     payload.insert("allow_otp_in_dnd".into(), serde_json::Value::Bool(a));
                 }
                 let bytes = serde_json::to_vec(&payload)?;
-                tetherly_node::loopback_post(ui_port, "/api/notify/config", &bytes).await?
+                // §161: v1 PATCH /notify/config (NotifyConfigPatch →
+                // NotifyConfigReportDto).
+                tetherly_node::loopback_request(
+                    ui_port,
+                    "PATCH",
+                    "/api/v1/notify/config",
+                    Some(&bytes),
+                    tetherly_node::api_token_for(ui_port).as_deref(),
+                )
+                .await?
             } else {
-                tetherly_node::loopback_get(ui_port, "/api/notify/config").await?
+                // §161: v1 GET /notify/config (NotifyConfigReportDto).
+                tetherly_node::loopback_get(ui_port, "/api/v1/notify/config").await?
             };
 
             if code != 200 {
@@ -357,15 +378,38 @@ pub(crate) async fn banner(action: BannerCmd) -> Result<()> {
             if json {
                 println!("{}", String::from_utf8_lossy(&resp));
             } else {
-                let rep: tetherly_node::NotifyConfigReport = serde_json::from_slice(&resp)?;
+                let v: serde_json::Value = serde_json::from_slice(&resp)?;
+                let cfg = &v["config"];
+                let totals = &v["totals"];
                 println!("Desktop Notification Configuration:");
-                println!("  Banners Enabled:  {}", rep.config.banners_enabled);
-                println!("  DND Mode:         {:?}", rep.config.dnd_mode);
-                println!("  Sound Enabled:    {}", rep.config.sound_enabled);
-                println!("  Mask OTP Code:    {}", rep.config.mask_otp);
-                println!("  Allow OTP in DND: {}", rep.config.allow_otp_in_dnd);
-                println!("  Total Dispatched: {}", rep.total_dispatched);
-                println!("  Total Suppressed: {}", rep.total_suppressed);
+                println!(
+                    "  Banners Enabled:  {}",
+                    cfg["banners_enabled"].as_bool().unwrap_or(false)
+                );
+                println!(
+                    "  DND Mode:         {}",
+                    cfg["dnd_mode"].as_str().unwrap_or("off")
+                );
+                println!(
+                    "  Sound Enabled:    {}",
+                    cfg["sound_enabled"].as_bool().unwrap_or(false)
+                );
+                println!(
+                    "  Mask OTP Code:    {}",
+                    cfg["mask_otp"].as_bool().unwrap_or(false)
+                );
+                println!(
+                    "  Allow OTP in DND: {}",
+                    cfg["allow_otp_in_dnd"].as_bool().unwrap_or(false)
+                );
+                println!(
+                    "  Total Dispatched: {}",
+                    totals["dispatched"].as_u64().unwrap_or(0)
+                );
+                println!(
+                    "  Total Suppressed: {}",
+                    totals["suppressed"].as_u64().unwrap_or(0)
+                );
             }
         }
         BannerCmd::Test {
@@ -379,8 +423,9 @@ pub(crate) async fn banner(action: BannerCmd) -> Result<()> {
                 "body": body,
             });
             let bytes = serde_json::to_vec(&payload)?;
+            // §161: v1 POST /notify/test (NotifyTestRequestDto/ReportDto).
             let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/notify/test", &bytes).await?;
+                tetherly_node::loopback_post(ui_port, "/api/v1/notify/test", &bytes).await?;
             if code != 200 {
                 anyhow::bail!(
                     "notify test failed (HTTP {code}): {}",
@@ -390,8 +435,11 @@ pub(crate) async fn banner(action: BannerCmd) -> Result<()> {
             if json {
                 println!("{}", String::from_utf8_lossy(&resp));
             } else {
-                let rep: tetherly_node::NotifyTestReport = serde_json::from_slice(&resp)?;
-                println!("Test notification dispatched: '{}'", rep.title);
+                let v: serde_json::Value = serde_json::from_slice(&resp)?;
+                println!(
+                    "Test notification dispatched: '{}'",
+                    v["title"].as_str().unwrap_or("")
+                );
             }
         }
     }

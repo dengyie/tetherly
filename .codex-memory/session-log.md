@@ -1441,3 +1441,10 @@
 - §159 P2 批：unblock --json 404 软化；八处 map_err 收敛 core_error；TopologyUnlinkReport/TopologyConfigReport 补契约 DTO（+bindings）；SSE 写超时（4×PING，防卡死客户端绕过 lag 检测）；drag_controller/drag_target 毒锁恢复 into_inner；peer_caps_all 错误传播。
 - §160 M5 第九批：Discovery×3 + DaemonRestart/Shutdow×3 契约 DTO；GET/POST /api/v1/discovery + POST /api/v1/system/shutdown/restart（**V1_ADMIN_PATHS 首个现存 Admin 路由正式接线**）；CLI discover/stop/restart ×3 迁 v1（Admin 级显式 api_token_for）。
 - 门禁：契约 28 / bin 16 / lib 356 全绿；clippy --all-targets 0 错；集成测试 v1_discovery_reads_and_lifecycle_gates 一次过（403 forbidden 包络 + 401 fail-closed + 405）。全量交 CI。
+
+## §161 M5 第十批 (2026-11-18) — notify/reply/OTP + message 域迁移 v1
+- 契约 ×31：notify 域 21 + message 域 10；NotifyDismissReport 单条+批量双形态折叠；NotifyConfigReportDto 把 legacy 平铺计数折进嵌套 totals；MessageDispatchReport selector 折 as_label 字符串；契约测试 +2（30）+ bindings 再生。
+- v1 ×16：POST /notify（0 peer→409）、GET /notify/candidates|replies|config、PATCH /notify/config、POST /notify/dismissals|otp|copies|insertions|open|test、POST /replies(/take)、GET|POST|DELETE /messages（clear 用 DELETE?peer=——DELETE 无 body）。错误全走 core_error。
+- CLI ×16：cmd_notify 12 + cmd_messages 4；banner config 写改 PATCH（loopback_request 显式 token）、读改嵌套形状；message clear 改 DELETE；watch SSE 不动（M6 范围）。
+- 坑：send_message_to_peer("") 的 peer 解析先于空文本校验，无 peer 时 404（PeerNotFound）而非 400——测试按真实语义断言。
+- 门禁：fmt --all / clippy 0 错；契约 30 / bin 16 / lib 357 全绿。全量交 CI。

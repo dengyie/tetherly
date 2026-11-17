@@ -968,4 +968,222 @@ mod commands {
             serde_json::from_value(serde_json::to_value(&shut).unwrap()).unwrap();
         assert_eq!(back_s, shut);
     }
+
+    #[test]
+    fn notify_domain_round_trips() {
+        // Send request: sparse defaults parse; unknown fields rejected.
+        let req: NotifySendRequest =
+            serde_json::from_value(json!({"title": "t", "body": "b"})).unwrap();
+        assert_eq!(req.peer, None);
+        assert_eq!(req.app_id, None);
+        assert!(serde_json::from_value::<NotifySendRequest>(json!({"z": 1})).is_err());
+
+        let report = NotifySendReport {
+            peer: "tdev_a".into(),
+        };
+        let back: NotifySendReport =
+            serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+        assert_eq!(back, report);
+
+        let cand = NotifyCandidate {
+            id: "c1".into(),
+            source: "tdev_a".into(),
+            app_id: "com.example.sms".into(),
+            app_name: "Messages".into(),
+            uid: "uid-1".into(),
+            title: "code".into(),
+            has_otp: true,
+            created_ms: 1,
+            expires_ms: 2,
+            actions: vec!["copy".into()],
+        };
+        let list = NotifyCandidates {
+            count: 1,
+            candidates: vec![cand],
+        };
+        let v = serde_json::to_value(&list).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["candidates"][0]["has_otp"], true);
+        let back_l: NotifyCandidates = serde_json::from_value(v).unwrap();
+        assert_eq!(back_l, list);
+
+        let replies = NotifyReplies {
+            count: 1,
+            replies: vec![NotifyReplyDto {
+                id: "r1".into(),
+                source: "tdev_a".into(),
+                app_id: "com.example.sms".into(),
+                uid: "uid-1".into(),
+            }],
+        };
+        let back_r: NotifyReplies =
+            serde_json::from_value(serde_json::to_value(&replies).unwrap()).unwrap();
+        assert_eq!(back_r, replies);
+
+        let otp = NotifyOtpReport {
+            id: "c1".into(),
+            otp: "123456".into(),
+        };
+        let back_o: NotifyOtpReport =
+            serde_json::from_value(serde_json::to_value(&otp).unwrap()).unwrap();
+        assert_eq!(back_o, otp);
+
+        // Dismiss request: all-optional body parses empty; unknown rejected.
+        let d: NotifyDismissRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(d.id, None);
+        assert_eq!(d.all, None);
+        assert!(serde_json::from_value::<NotifyDismissRequest>(json!({"z": 1})).is_err());
+        // Dismiss report folds single + batch shapes.
+        let single: NotifyDismissReport = serde_json::from_value(
+            json!({"id": "c1", "source": "tdev_a", "notified_remote": true}),
+        )
+        .unwrap();
+        assert_eq!(single.id.as_deref(), Some("c1"));
+        assert_eq!(single.count, None);
+        let batch: NotifyDismissReport = serde_json::from_value(
+            json!({"count": 2, "ids": ["a", "b"], "notified_remote_count": 1}),
+        )
+        .unwrap();
+        assert_eq!(batch.count, Some(2));
+        assert_eq!(batch.ids.as_deref().map(<[String]>::len), Some(2));
+
+        let take_req: NotifyReplyTakeRequest = serde_json::from_value(json!({"id": "r1"})).unwrap();
+        assert_eq!(take_req.id, "r1");
+        let take = NotifyReplyTakeReport {
+            id: "r1".into(),
+            uid: "uid-1".into(),
+            app_id: "com.example.sms".into(),
+            text: "hi".into(),
+        };
+        let back_t: NotifyReplyTakeReport =
+            serde_json::from_value(serde_json::to_value(&take).unwrap()).unwrap();
+        assert_eq!(back_t, take);
+
+        // Config: GET report + PATCH subset; DND mode is snake_case.
+        let cfg = NotifyConfigReportDto {
+            config: NotifyConfigDto {
+                banners_enabled: true,
+                dnd_mode: NotifyDndMode::Silent,
+                sound_enabled: true,
+                mask_otp: true,
+                allow_otp_in_dnd: true,
+            },
+            totals: NotifyConfigTotals {
+                dispatched: 3,
+                suppressed: 1,
+            },
+        };
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(v["config"]["dnd_mode"], "silent");
+        assert_eq!(v["totals"]["dispatched"], 3);
+        let back_c: NotifyConfigReportDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_c, cfg);
+        let patch: NotifyConfigPatch = serde_json::from_value(json!({"dnd_mode": "all"})).unwrap();
+        assert_eq!(patch.dnd_mode, Some(NotifyDndMode::All));
+        assert_eq!(patch.banners_enabled, None);
+        assert!(serde_json::from_value::<NotifyConfigPatch>(json!({"z": 1})).is_err());
+
+        // Test request/report: sparse request, suppressed report keeps reason.
+        let tr: NotifyTestRequestDto = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(tr.title, None);
+        assert!(serde_json::from_value::<NotifyTestRequestDto>(json!({"z": 1})).is_err());
+        let rep = NotifyTestReportDto {
+            sent: false,
+            suppressed: true,
+            suppression_reason: Some("banners_disabled".into()),
+            message: "notification suppressed".into(),
+            title: "Tetherly 桌面通知测试".into(),
+        };
+        let back_p: NotifyTestReportDto =
+            serde_json::from_value(serde_json::to_value(&rep).unwrap()).unwrap();
+        assert_eq!(back_p, rep);
+        let plain = NotifyTestReportDto {
+            sent: true,
+            suppressed: false,
+            suppression_reason: None,
+            message: "dispatched".into(),
+            title: "t".into(),
+        };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("suppression_reason").is_none());
+        let back_q: NotifyTestReportDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_q, plain);
+    }
+
+    #[test]
+    fn message_domain_round_trips() {
+        let msg = MessageEntry {
+            id: "msg_1".into(),
+            peer: "tdev_a".into(),
+            direction: MessageDirection::Outbound,
+            text: "hello".into(),
+            timestamp_ms: 42,
+            read: true,
+        };
+        let send = MessageSendReport {
+            message: msg.clone(),
+        };
+        let v = serde_json::to_value(&send).unwrap();
+        assert_eq!(v["message"]["direction"], "outbound");
+        let back: MessageSendReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back, send);
+
+        // Send request: text required; selector fields optional; unknown
+        // fields rejected.
+        let req: MessageSendRequest = serde_json::from_value(json!({"text": "hi"})).unwrap();
+        assert_eq!(req.peer, None);
+        assert_eq!(req.all, None);
+        assert!(serde_json::from_value::<MessageSendRequest>(json!({})).is_err());
+        assert!(
+            serde_json::from_value::<MessageSendRequest>(json!({"text": "x", "z": 1})).is_err()
+        );
+
+        let multi = MessageDispatchReport {
+            selector: "tag:lab".into(),
+            target_count: 2,
+            success_count: 1,
+            skipped_offline_count: 1,
+            failed_count: 0,
+            dispatches: vec![MessageDispatchItem {
+                peer: "tdev_a".into(),
+                peer_alias: Some("laptop".into()),
+                message_id: Some("msg_1".into()),
+                success: true,
+                error: None,
+            }],
+        };
+        let v = serde_json::to_value(&multi).unwrap();
+        assert_eq!(v["target_count"], 2);
+        assert_eq!(v["dispatches"][0]["peer_alias"], "laptop");
+        let back_m: MessageDispatchReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back_m, multi);
+
+        // History query + report.
+        let q: MessageQuery = serde_json::from_value(json!({"limit": 5})).unwrap();
+        assert_eq!(q.limit, Some(5));
+        assert_eq!(q.unread_only, None);
+        assert!(serde_json::from_value::<MessageQuery>(json!({"z": 1})).is_err());
+        let hist = MessageHistory {
+            total: 1,
+            returned: 1,
+            unread: 0,
+            messages: vec![msg],
+        };
+        let back_h: MessageHistory =
+            serde_json::from_value(serde_json::to_value(&hist).unwrap()).unwrap();
+        assert_eq!(back_h, hist);
+
+        // Clear request (sparse) + report.
+        let cr: MessageClearRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(cr.peer, None);
+        assert!(serde_json::from_value::<MessageClearRequest>(json!({"z": 1})).is_err());
+        let clr = MessageClearReport {
+            target: "all".into(),
+            cleared_count: 4,
+            message: "cleared".into(),
+        };
+        let back_x: MessageClearReport =
+            serde_json::from_value(serde_json::to_value(&clr).unwrap()).unwrap();
+        assert_eq!(back_x, clr);
+    }
 }

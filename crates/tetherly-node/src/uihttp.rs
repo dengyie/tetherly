@@ -2397,6 +2397,125 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// §161: notify/message v1 resources — tier gates and error classes on
+    /// real HTTP (candidates read, config read, strict-body rejects, 405).
+    #[tokio::test]
+    async fn v1_notify_and_message_domains_serve_and_gate() {
+        let (node, dir) = temp_test_node("v1_notify_message");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("daemon token");
+        let auth = format!("Authorization: Bearer {token}");
+
+        // Empty candidates are a valid report (count folds from the array).
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/notify/candidates", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["count"], 0, "{body}");
+        assert_eq!(body["candidates"], serde_json::json!([]), "{body}");
+
+        // Replies list is equally empty (no text — the no-content rule).
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/notify/replies", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["replies"], serde_json::json!([]), "{body}");
+
+        // Config read: banner defaults + zeroed totals.
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/notify/config", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["config"]["banners_enabled"], true, "{body}");
+        assert_eq!(body["totals"]["dispatched"], 0, "{body}");
+
+        // Message history on a fresh node: empty, zeroed.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/messages", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["total"], 0, "{body}");
+        assert_eq!(body["messages"], serde_json::json!([]), "{body}");
+
+        // Strict bodies: unknown fields rejected with the typed envelope.
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/notify",
+            Some(&auth),
+            br#"{"title":"t","body":"b","z":1}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["error"]["code"], "bad_request", "{body}");
+
+        // Sending with no connected peer is a Conflict, not a 500.
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/notify",
+            Some(&auth),
+            br#"{"title":"t","body":"b"}"#,
+        )
+        .await;
+        assert_eq!(code, 409, "{}", String::from_utf8_lossy(&resp));
+
+        // Message send with no connected peer resolves first: the empty
+        // peer falls into the legacy "no connected peer" branch (404).
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/messages",
+            Some(&auth),
+            br#"{"text":"  "}"#,
+        )
+        .await;
+        assert_eq!(code, 404, "{}", String::from_utf8_lossy(&resp));
+
+        // OTP for an unknown candidate maps to 404 via core_error.
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/notify/otp",
+            Some(&auth),
+            br#"{"id":"nope"}"#,
+        )
+        .await;
+        assert_eq!(code, 404, "{}", String::from_utf8_lossy(&resp));
+
+        // Reply take for an unknown id maps to 404 (unknown reply).
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/replies/take",
+            Some(&auth),
+            br#"{"id":"nope"}"#,
+        )
+        .await;
+        assert_eq!(code, 404, "{}", String::from_utf8_lossy(&resp));
+
+        // Dismiss with no target at all is a BadRequest.
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/notify/dismissals",
+            Some(&auth),
+            b"{}",
+        )
+        .await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+
+        // Client token keeps Write-tier notify reads working.
+        let client = crate::apitoken::read_client(&dir).expect("client token");
+        let client_auth = format!("Authorization: Bearer {client}");
+        let (_, code, _) =
+            raw_with_head(port, "GET", "/api/v1/notify/candidates", Some(&client_auth)).await;
+        assert_eq!(code, 200);
+
+        // Unknown v1 method on a notify path is 405.
+        let (_, code, _) =
+            raw_with_head(port, "DELETE", "/api/v1/notify/config", Some(&auth)).await;
+        assert_eq!(code, 405);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// ADR-139 M4 switch: `/` serves the new SPA entry, `/assets/*` the
     /// embedded bundle, `/legacy/` the old single-file console — all over
     /// real HTTP against the live listener.

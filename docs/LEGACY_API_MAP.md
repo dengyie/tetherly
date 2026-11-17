@@ -155,3 +155,26 @@
 | `POST /api/discovery/rescan` | `POST /discovery` | rescan 动词折进 method；`ok` 折掉，message 保留 |
 | `POST /api/daemon/shutdown` | `POST /system/shutdown` | **Admin 级**（V1_ADMIN_PATHS 首个现存路由）；`ok`/`message` 折掉，留 `status:"shutting_down"` |
 | `POST /api/daemon/restart` | `POST /system/restart` | **Admin 级**；`ok:true`/`message` 折掉，留 action/old_pid/new_pid/timestamp_ms；替换路径 400 / 进行中 409 |
+
+## 已迁移第十批（§161，notify/reply/OTP + message 域）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `POST /api/notify` | `POST /notify` | `ok` 折掉，留 `peer`；0 连接 peer→409（Conflict 类）、多 peer 无名→400；app_id 缺省 com.example.sms 保留 |
+| `GET /api/notify/candidates` | `GET /notify/candidates` | `ok` 折掉，count 现算；query peer/app_id/has_otp 同形 |
+| `GET /api/notify/replies` | `GET /notify/replies` | `ok` 折掉，count 现算；no-content 规则保留（不回文本） |
+| `POST /api/otp/get` | `POST /notify/otp` | `ok` 折掉，留 `{id,otp}` |
+| `POST /api/copy` | `POST /notify/copies` | `ok:true` 折成 NotifyActionReport{ok} |
+| `POST /api/insert` | `POST /notify/insertions` | 同上 |
+| `POST /api/dismiss` | `POST /notify/dismissals` | 单条（id）与批量（peer/app_id/all）双形态折叠进一个 report（只填相关字段）；无目标 400 |
+| `POST /api/notify/dismiss` | `POST /notify/dismissals` | 同上（旧双端点并一）；query 变体仍吃 |
+| `POST /api/open` | `POST /notify/open` | `ok` 折掉，留 `url`；allowlist 拒绝→400（OpenRefused 类） |
+| `POST /api/reply` | `POST /replies` | `ok:true` 折成 NotifyActionReport |
+| `POST /api/reply/take` | `POST /replies/take` | `ok` 折掉，留 id/uid/app_id/text；unknown→404；文本唯一释放点不变 |
+| `GET /api/notify/config` | `GET /notify/config` | `ok` 折掉；平铺 total_dispatched/suppressed 折进嵌套 totals{dispatched,suppressed} |
+| `POST /api/notify/config` | `PATCH /notify/config` | PATCH 语义修正；body 稀疏 patch + query 兼容折叠（body 胜出）；响应同上 |
+| `POST /api/notify/test` | `POST /notify/test` | `ok` 折掉；sent/suppressed/suppression_reason/message/title 保留；query 折叠进 body |
+| `POST /api/message/send` | `POST /messages` | `ok` 折掉；单目标留 message（MessageEntry）；带 tag/group/type/all 时响应换 MessageDispatchReport（selector 折 as_label 字符串） |
+| `POST /api/message/send-multi` | `POST /messages` | 并入同一端点；report 同上；`ok` 折掉 |
+| `GET /api/message/history` | `GET /messages` | `ok` 折掉；query peer/limit/unread_only/mark_read 同形（body 变体仍吃） |
+| `POST /api/message/clear` | `DELETE /messages?peer=` | 动词修正（DELETE）；peer 上 query；`ok` 折掉，留 target/cleared_count/message |

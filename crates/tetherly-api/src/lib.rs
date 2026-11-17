@@ -1558,6 +1558,387 @@ pub struct DaemonShutdownReport {
     pub status: String,
 }
 
+// ---- §161: notify / reply / OTP domain ----
+
+/// `POST /notify` request: push a desktop notification text to a peer.
+/// Without `peer`, the single connected peer is used (legacy ambiguity rules).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct NotifySendRequest {
+    pub title: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+}
+
+/// `POST /notify` report: the peer the notification was delivered to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifySendReport {
+    pub peer: String,
+}
+
+/// One notification candidate (legacy `CandidateViewDto` shape).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyCandidate {
+    pub id: String,
+    pub source: String,
+    pub app_id: String,
+    pub app_name: String,
+    pub uid: String,
+    pub title: String,
+    pub has_otp: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub created_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub expires_ms: u64,
+    pub actions: Vec<String>,
+}
+
+/// `GET /notify/candidates` — active candidates (count from the array).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyCandidates {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+    pub candidates: Vec<NotifyCandidate>,
+}
+
+/// One queued inbound reply (no text — the no-content rule).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyReplyDto {
+    pub id: String,
+    pub source: String,
+    pub app_id: String,
+    pub uid: String,
+}
+
+/// `GET /notify/replies` — queued inbound replies (count from the array).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyReplies {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+    pub replies: Vec<NotifyReplyDto>,
+}
+
+/// `POST /notify/otp` report: the extracted OTP for a candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyOtpReport {
+    pub id: String,
+    pub otp: String,
+}
+
+/// Report for copy / insert / reply actions: the action completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyActionReport {
+    pub ok: bool,
+}
+
+/// `POST /notify/dismissals` request: dismiss by id, by filter, or all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct NotifyDismissRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub all: Option<bool>,
+}
+
+/// `POST /notify/dismissals` report: either the single-candidate shape or the
+/// batch shape, depending on the request (unlike legacy both fold into one
+/// struct; only the relevant fields are populated).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyDismissReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub notified_remote: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub notified_remote_count: Option<u64>,
+}
+
+/// `POST /notify/open` report: the URL (or scheme target) that was opened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyOpenReport {
+    pub url: String,
+}
+
+/// Request carrying just a candidate id (OTP get / copy / insert / reply
+/// take all share this shape).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct NotifyIdRequest {
+    pub id: String,
+}
+
+/// `POST /replies` request: the quick reply text typed for a candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct NotifyReplySendRequest {
+    pub id: String,
+    pub text: String,
+}
+
+/// `POST /notify/replies/take` request: hand a queued reply out exactly once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct NotifyReplyTakeRequest {
+    pub id: String,
+}
+
+/// `POST /notify/replies/take` report: the reply text (only release point).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyReplyTakeReport {
+    pub id: String,
+    pub uid: String,
+    pub app_id: String,
+    pub text: String,
+}
+
+/// Banner configuration (mirrors `NotifyBannerConfig`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyConfigDto {
+    pub banners_enabled: bool,
+    pub dnd_mode: NotifyDndMode,
+    pub sound_enabled: bool,
+    pub mask_otp: bool,
+    pub allow_otp_in_dnd: bool,
+}
+
+/// DND mode (mirrors the daemon's `DndMode`, snake_case on the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyDndMode {
+    Off,
+    Silent,
+    All,
+}
+
+/// `PATCH /notify/config` request: any subset of the banner switches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct NotifyConfigPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub banners_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnd_mode: Option<NotifyDndMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub sound_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub mask_otp: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub allow_otp_in_dnd: Option<bool>,
+}
+
+/// Banner dispatch/suppression counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyConfigTotals {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dispatched: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub suppressed: u64,
+}
+
+/// `GET /notify/config` / `PATCH /notify/config` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyConfigReportDto {
+    pub config: NotifyConfigDto,
+    pub totals: NotifyConfigTotals,
+}
+
+/// `POST /notify/test` request: optional title/body override.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct NotifyTestRequestDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// `POST /notify/test` report (legacy `ok` folded — always true on 200).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NotifyTestReportDto {
+    pub sent: bool,
+    pub suppressed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppression_reason: Option<String>,
+    pub message: String,
+    pub title: String,
+}
+
+// ---- §161: peer message domain ----
+
+/// One direct peer message (legacy `PeerMessage` shape; direction reuses
+/// the shared `MessageDirection` enum).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MessageEntry {
+    pub id: String,
+    pub peer: String,
+    pub direction: MessageDirection,
+    pub text: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+    pub read: bool,
+}
+
+/// `POST /messages` request: send a direct message. Multi-target dispatch
+/// (tag/group/device_type/all) reuses the same body; the response then
+/// becomes a `MessageDispatchReport` instead of a `MessageSendReport`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MessageSendRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Device form-factor selector (`desktop`/`laptop`/`phone`/`tablet`/
+    /// `server`/`cloud`/`other`), matching the daemon's `DeviceType`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub all: Option<bool>,
+    pub text: String,
+}
+
+/// `POST /messages` single-target report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MessageSendReport {
+    pub message: MessageEntry,
+}
+
+/// One per-target dispatch outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MessageDispatchItem {
+    pub peer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `POST /messages` multi-target report (legacy `selector` label folded into
+/// `selector` string form, e.g. `peer:tdev_…` / `tag:lab` / `all_online`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MessageDispatchReport {
+    pub selector: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub success_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub skipped_offline_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub failed_count: u64,
+    pub dispatches: Vec<MessageDispatchItem>,
+}
+
+/// `GET /messages` query parameters (all optional).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MessageQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub unread_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "boolean | null"))]
+    pub mark_read: Option<bool>,
+}
+
+/// `GET /messages` report: filtered history (counts from the array where the
+/// CLI needs them, but total/unread are engine-side state so they stay).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MessageHistory {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub returned: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub unread: u64,
+    pub messages: Vec<MessageEntry>,
+}
+
+/// `DELETE /messages` request: clear all, or just one peer's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MessageClearRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+}
+
+/// `DELETE /messages` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MessageClearReport {
+    pub target: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cleared_count: u64,
+    pub message: String,
+}
+
 // ---- M2e: activity feed ----
 
 /// Direction of a peer direct message relative to this node.
@@ -1747,6 +2128,37 @@ mod bindings {
             decl::<DaemonRestartRequest>(&cfg),
             decl::<DaemonRestartReport>(&cfg),
             decl::<DaemonShutdownReport>(&cfg),
+            decl::<NotifySendRequest>(&cfg),
+            decl::<NotifySendReport>(&cfg),
+            decl::<NotifyCandidate>(&cfg),
+            decl::<NotifyCandidates>(&cfg),
+            decl::<NotifyReplyDto>(&cfg),
+            decl::<NotifyReplies>(&cfg),
+            decl::<NotifyOtpReport>(&cfg),
+            decl::<NotifyActionReport>(&cfg),
+            decl::<NotifyIdRequest>(&cfg),
+            decl::<NotifyReplySendRequest>(&cfg),
+            decl::<NotifyDismissRequest>(&cfg),
+            decl::<NotifyDismissReport>(&cfg),
+            decl::<NotifyOpenReport>(&cfg),
+            decl::<NotifyReplyTakeRequest>(&cfg),
+            decl::<NotifyReplyTakeReport>(&cfg),
+            decl::<NotifyDndMode>(&cfg),
+            decl::<NotifyConfigDto>(&cfg),
+            decl::<NotifyConfigPatch>(&cfg),
+            decl::<NotifyConfigTotals>(&cfg),
+            decl::<NotifyConfigReportDto>(&cfg),
+            decl::<NotifyTestRequestDto>(&cfg),
+            decl::<NotifyTestReportDto>(&cfg),
+            decl::<MessageEntry>(&cfg),
+            decl::<MessageSendRequest>(&cfg),
+            decl::<MessageSendReport>(&cfg),
+            decl::<MessageDispatchItem>(&cfg),
+            decl::<MessageDispatchReport>(&cfg),
+            decl::<MessageQuery>(&cfg),
+            decl::<MessageHistory>(&cfg),
+            decl::<MessageClearRequest>(&cfg),
+            decl::<MessageClearReport>(&cfg),
             decl::<MessageDirection>(&cfg),
             decl::<HandoffStatus>(&cfg),
             decl::<ActivityCandidate>(&cfg),

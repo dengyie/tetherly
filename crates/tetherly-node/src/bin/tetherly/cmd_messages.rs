@@ -188,7 +188,9 @@ pub(crate) async fn handle_message_send(
             "text": text,
         });
         let bytes = serde_json::to_vec(&payload)?;
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/message/send-multi", &bytes)
+        // §161: v1 POST /messages with selector fields — the response is
+        // the MessageDispatchReport (same field names the printer reads).
+        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/messages", &bytes)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -260,7 +262,8 @@ pub(crate) async fn handle_message_send(
         "text": text,
     });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/message/send", &bytes)
+    // §161: v1 POST /messages (MessageSendRequest/Report).
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/messages", &bytes)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -317,7 +320,8 @@ pub(crate) async fn handle_message_history(
     } else {
         format!("?{}", query_params.join("&"))
     };
-    let path = format!("/api/message/history{qs}");
+    // §161: v1 GET /messages (MessageQuery → MessageHistory).
+    let path = format!("/api/v1/messages{qs}");
     let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
         .await
         .map_err(|e| {
@@ -390,18 +394,24 @@ pub(crate) async fn handle_message_clear(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let payload = serde_json::json!({
-        "peer": peer,
-    });
-    let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/message/clear", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    // §161: v1 DELETE /messages?peer= (MessageClearReport; the peer moves
+    // to the query — DELETE has no body, so the legacy JSON envelope folds).
+    let (code, resp) = tetherly_node::loopback_delete(
+        ui_port,
+        &format!(
+            "/api/v1/messages{}",
+            peer.as_deref()
+                .map(|p| format!("?peer={p}"))
+                .unwrap_or_default()
+        ),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to clear messages (HTTP {code}): {}",

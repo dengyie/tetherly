@@ -297,6 +297,73 @@ export type DaemonRestartReport = { action: string, old_pid: number, new_pid: nu
 
 export type DaemonShutdownReport = { status: string, };
 
+export type NotifySendRequest = { title: string, body: string, app_id?: string | null, peer?: string | null, };
+
+export type NotifySendReport = { peer: string, };
+
+export type NotifyCandidate = { id: string, source: string, app_id: string, app_name: string, uid: string, title: string, has_otp: boolean, created_ms: number, expires_ms: number, actions: Array<string>, };
+
+export type NotifyCandidates = { count: number, candidates: Array<NotifyCandidate>, };
+
+export type NotifyReplyDto = { id: string, source: string, app_id: string, uid: string, };
+
+export type NotifyReplies = { count: number, replies: Array<NotifyReplyDto>, };
+
+export type NotifyOtpReport = { id: string, otp: string, };
+
+export type NotifyActionReport = { ok: boolean, };
+
+export type NotifyIdRequest = { id: string, };
+
+export type NotifyReplySendRequest = { id: string, text: string, };
+
+export type NotifyDismissRequest = { id?: string | null, peer?: string | null, app_id?: string | null, all?: boolean | null, };
+
+export type NotifyDismissReport = { id?: string | null, source?: string | null, app_id?: string | null, uid?: string | null, notified_remote?: boolean | null, count?: number | null, ids?: Array<string> | null, notified_remote_count?: number | null, };
+
+export type NotifyOpenReport = { url: string, };
+
+export type NotifyReplyTakeRequest = { id: string, };
+
+export type NotifyReplyTakeReport = { id: string, uid: string, app_id: string, text: string, };
+
+export type NotifyDndMode = "off" | "silent" | "all";
+
+export type NotifyConfigDto = { banners_enabled: boolean, dnd_mode: NotifyDndMode, sound_enabled: boolean, mask_otp: boolean, allow_otp_in_dnd: boolean, };
+
+export type NotifyConfigPatch = { banners_enabled?: boolean | null, dnd_mode?: NotifyDndMode | null, sound_enabled?: boolean | null, mask_otp?: boolean | null, allow_otp_in_dnd?: boolean | null, };
+
+export type NotifyConfigTotals = { dispatched: number, suppressed: number, };
+
+export type NotifyConfigReportDto = { config: NotifyConfigDto, totals: NotifyConfigTotals, };
+
+export type NotifyTestRequestDto = { title?: string | null, body?: string | null, };
+
+export type NotifyTestReportDto = { sent: boolean, suppressed: boolean, suppression_reason?: string | null, message: string, title: string, };
+
+export type MessageEntry = { id: string, peer: string, direction: MessageDirection, text: string, timestamp_ms: number, read: boolean, };
+
+export type MessageSendRequest = { peer?: string | null, tag?: string | null, group?: string | null, 
+/**
+ * Device form-factor selector (`desktop`/`laptop`/`phone`/`tablet`/
+ * `server`/`cloud`/`other`), matching the daemon's `DeviceType`.
+ */
+device_type?: string | null, all?: boolean | null, text: string, };
+
+export type MessageSendReport = { message: MessageEntry, };
+
+export type MessageDispatchItem = { peer: string, peer_alias?: string | null, message_id?: string | null, success: boolean, error?: string | null, };
+
+export type MessageDispatchReport = { selector: string, target_count: number, success_count: number, skipped_offline_count: number, failed_count: number, dispatches: Array<MessageDispatchItem>, };
+
+export type MessageQuery = { peer?: string | null, limit?: number | null, unread_only?: boolean | null, mark_read?: boolean | null, };
+
+export type MessageHistory = { total: number, returned: number, unread: number, messages: Array<MessageEntry>, };
+
+export type MessageClearRequest = { peer?: string | null, };
+
+export type MessageClearReport = { target: string, cleared_count: number, message: string, };
+
 export type MessageDirection = "inbound" | "outbound";
 
 export type HandoffStatus = "pending" | "opened" | "dismissed" | "rejected";
