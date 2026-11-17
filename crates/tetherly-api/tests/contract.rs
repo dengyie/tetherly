@@ -744,4 +744,171 @@ mod commands {
             serde_json::from_value(serde_json::to_value(&peer).unwrap()).unwrap();
         assert_eq!(back_p, peer);
     }
+
+    fn topology_fixture() -> Topology {
+        Topology {
+            display: DisplayRect {
+                width: 1920,
+                height: 1080,
+                scale_factor: 2.0,
+            },
+            neighbors: vec![TopologyEdgeNeighbor {
+                peer_id: "tdev_p".into(),
+                peer_edge: "right".into(),
+                offset: -64,
+            }],
+            neighbor_edges: vec!["left".into()],
+            config: CrossingConfig {
+                resistance_px: 24,
+                delay_ms: 350,
+                corner_lock_size_px: 16,
+                wrap_around: true,
+                redundancy_band_px: 12,
+                slow_dwell_ms: 600,
+                fast_push_delta_px: 40,
+                entry_return_grace_ms: 800,
+                remote_speed_percent: 70,
+            },
+            peer_count: 1,
+        }
+    }
+
+    #[test]
+    fn topology_domain_round_trips_and_requests_are_strict() {
+        // §156b: GET /topology + GET /topology/peers read shapes.
+        let t = topology_fixture();
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["display"]["width"], 1920);
+        assert_eq!(v["neighbors"][0]["peer_edge"], "right");
+        assert_eq!(v["neighbor_edges"][0], "left");
+        let back: Topology = serde_json::from_value(v).unwrap();
+        assert_eq!(back, t);
+
+        let peers = PeerTopologies {
+            count: 1,
+            peers: vec![PeerTopologyDto {
+                peer_id: "tdev_p".into(),
+                peer_alias: Some("DESKTOP".into()),
+                display: t.display,
+                config: t.config,
+                timestamp_ms: 1_700_000_000_000,
+                neighbors_count: 2,
+            }],
+        };
+        let back_p: PeerTopologies =
+            serde_json::from_value(serde_json::to_value(&peers).unwrap()).unwrap();
+        assert_eq!(back_p, peers);
+
+        // POST /topology/links — edge/peer required; unknown fields denied.
+        let req: TopologyLinkRequest =
+            serde_json::from_value(json!({"edge": "left", "peer": "DESKTOP", "offset": -64}))
+                .unwrap();
+        assert_eq!(req.peer_edge, None);
+        assert_eq!(req.offset, Some(-64));
+        assert!(serde_json::from_value::<TopologyLinkRequest>(json!({"edge": "left"})).is_err());
+        assert!(serde_json::from_value::<TopologyLinkRequest>(
+            json!({"edge": "left", "peer": "p", "x": 1})
+        )
+        .is_err());
+        let unlink: TopologyUnlinkRequest =
+            serde_json::from_value(json!({"edge": "bottom"})).unwrap();
+        assert_eq!(unlink.edge, "bottom");
+
+        // PATCH /topology/config — sparse: absent keys stay absent.
+        let empty: TopologyConfigPatch = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(empty, TopologyConfigPatch::default());
+        let partial: TopologyConfigPatch =
+            serde_json::from_value(json!({"resistance_px": 48, "wrap_around": false})).unwrap();
+        assert_eq!(partial.resistance_px, Some(48));
+        assert_eq!(partial.delay_ms, None);
+        assert!(serde_json::from_value::<TopologyConfigPatch>(json!({"nope": 1})).is_err());
+
+        // PATCH /topology/policy — sparse + clear_filters flag.
+        let pol: TopologyPolicyPatch = serde_json::from_value(json!({
+            "allowed_tags": ["desk"], "clear_filters": true
+        }))
+        .unwrap();
+        assert_eq!(pol.allowed_tags, Some(vec!["desk".to_string()]));
+        assert_eq!(pol.clear_filters, Some(true));
+        assert_eq!(pol.enabled, None);
+        assert!(serde_json::from_value::<TopologyPolicyPatch>(json!({"nope": 1})).is_err());
+
+        let rep = TopologySyncReport {
+            sync_requests_sent: 2,
+            broadcasts_sent: 1,
+        };
+        let back_r: TopologySyncReport =
+            serde_json::from_value(serde_json::to_value(&rep).unwrap()).unwrap();
+        assert_eq!(back_r, rep);
+    }
+
+    #[test]
+    fn routes_and_network_domain_round_trips() {
+        // §156b: GET /routes + GET /net + POST /routes + POST /net/refresh.
+        let routes = Routes {
+            count: 1,
+            routes: vec![RouteEntryDto {
+                device_id: "tdev_p".into(),
+                addr: "192.168.1.20:45000".into(),
+                alias: Some("desk".into()),
+                name: None,
+                online: true,
+                trusted: true,
+            }],
+        };
+        let v = serde_json::to_value(&routes).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["routes"][0]["addr"], "192.168.1.20:45000");
+        let back: Routes = serde_json::from_value(v).unwrap();
+        assert_eq!(back, routes);
+
+        let req: RouteSetRequest =
+            serde_json::from_value(json!({"peer": "DESKTOP", "addr": "192.168.1.20:45000"}))
+                .unwrap();
+        assert_eq!(req.peer, "DESKTOP");
+        assert!(serde_json::from_value::<RouteSetRequest>(json!({"peer": "p"})).is_err());
+        assert!(serde_json::from_value::<RouteSetRequest>(
+            json!({"peer": "p", "addr": "a", "z": 1})
+        )
+        .is_err());
+        let rep = RouteMutateReport {
+            device_id: "tdev_p".into(),
+            addr: Some("192.168.1.20:45000".into()),
+            action: "added".into(),
+        };
+        let back_r: RouteMutateReport =
+            serde_json::from_value(serde_json::to_value(&rep).unwrap()).unwrap();
+        assert_eq!(back_r, rep);
+
+        let net = Network {
+            interfaces: vec![IfaceReport {
+                iface: "en0".into(),
+                ip: "192.168.1.5".into(),
+                listen: true,
+                reason: None,
+            }],
+            overlay: OverlayStatus {
+                enabled: true,
+                present: true,
+                source: "sidecar".into(),
+                local_ips: vec!["10.144.144.2".into()],
+                peer_count: 1,
+                peers: vec!["tdev_p".into()],
+            },
+        };
+        let back_n: Network = serde_json::from_value(serde_json::to_value(&net).unwrap()).unwrap();
+        assert_eq!(back_n, net);
+
+        let refresh = NetworkRefreshReport {
+            ifaces_scanned: 6,
+            ifaces_listening: 2,
+            overlay_present: true,
+            overlay_source: "sidecar".into(),
+            overlay_local_ips: vec!["10.144.144.2".into()],
+            overlay_peers_count: 1,
+        };
+        let back_f: NetworkRefreshReport =
+            serde_json::from_value(serde_json::to_value(&refresh).unwrap()).unwrap();
+        assert_eq!(back_f, refresh);
+    }
 }

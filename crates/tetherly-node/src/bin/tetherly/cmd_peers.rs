@@ -207,7 +207,7 @@ pub(crate) async fn route(action: RouteCmd) -> Result<()> {
                 "addr": addr,
             });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/routes", &bytes)
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/routes", &bytes)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -225,7 +225,7 @@ pub(crate) async fn route(action: RouteCmd) -> Result<()> {
                 println!("{}", String::from_utf8_lossy(&resp));
                 return Ok(());
             }
-            let rep: tetherly_node::RouteMutateReport = serde_json::from_slice(&resp)?;
+            let rep: tetherly_api::RouteMutateReport = serde_json::from_slice(&resp)?;
             println!(
                 "Route {}: {} -> {}",
                 rep.action,
@@ -238,7 +238,8 @@ pub(crate) async fn route(action: RouteCmd) -> Result<()> {
             json,
             ui_port,
         } => {
-            let path = format!("/api/routes?peer={}", peer.trim());
+            // §156b: v1 route removal — DELETE /api/v1/routes?peer=….
+            let path = format!("/api/v1/routes?peer={}", peer.trim());
             let (code, resp) = tetherly_node::loopback_delete(ui_port, &path)
                 .await
                 .map_err(|e| {
@@ -257,7 +258,7 @@ pub(crate) async fn route(action: RouteCmd) -> Result<()> {
                 println!("{}", String::from_utf8_lossy(&resp));
                 return Ok(());
             }
-            let rep: tetherly_node::RouteMutateReport = serde_json::from_slice(&resp)?;
+            let rep: tetherly_api::RouteMutateReport = serde_json::from_slice(&resp)?;
             println!("Route {}: {}", rep.action, rep.device_id);
         }
     }
@@ -267,7 +268,7 @@ pub(crate) async fn route(action: RouteCmd) -> Result<()> {
 /// `tetherly net` -- Net arm of the top-level dispatch.
 pub(crate) async fn net(refresh: bool, interfaces: bool, json: bool, ui_port: u16) -> Result<()> {
     if refresh {
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/net/refresh", b"{}")
+        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/net/refresh", b"{}")
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -285,7 +286,7 @@ pub(crate) async fn net(refresh: bool, interfaces: bool, json: bool, ui_port: u1
             println!("{}", String::from_utf8_lossy(&resp));
             return Ok(());
         }
-        let rep: tetherly_node::NetworkRefreshReport =
+        let rep: tetherly_api::NetworkRefreshReport =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
         println!("Network & Overlay Rescanned:");
         println!(
@@ -306,7 +307,7 @@ pub(crate) async fn net(refresh: bool, interfaces: bool, json: bool, ui_port: u1
         return Ok(());
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/net")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/net")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -324,7 +325,9 @@ pub(crate) async fn net(refresh: bool, interfaces: bool, json: bool, ui_port: u1
         println!("{}", String::from_utf8_lossy(&resp));
         return Ok(());
     }
-    let rep: tetherly_node::NetworkReport =
+    // §156b: v1 network resource — contract Network mirrors the legacy
+    // report fields (ok folded away).
+    let rep: tetherly_api::Network =
         serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
 
     let ov = &rep.overlay;
@@ -1080,7 +1083,7 @@ pub(crate) async fn do_peer_ping(
 }
 
 pub(crate) async fn print_routes_list(ui_port: u16, json: bool) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/routes")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/routes")
         .await
         .map_err(|e| {
             anyhow::anyhow!(

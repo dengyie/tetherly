@@ -90,7 +90,9 @@ pub(crate) async fn topology(action: TopologyCmd) -> Result<()> {
 }
 
 pub(crate) async fn do_topology_show(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/topology/layout").await?;
+    // §156b: v1 topology resource — the legacy layout report's HashMap
+    // becomes parallel neighbors/neighbor_edges vectors, ok/message folded.
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/v1/topology").await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to get topology layout (HTTP {code}): {err_msg}");
@@ -124,20 +126,21 @@ pub(crate) async fn do_topology_show(ui_port: u16, json: bool) -> Result<()> {
     println!("    Wrap Around:     {}", if wrap { "yes" } else { "no" });
 
     println!("  Edge Neighbors:");
-    let neighbors = val["neighbors"].as_object();
+    let neighbor_edges = val["neighbor_edges"].as_array();
+    let neighbors = val["neighbors"].as_array();
     let mut count = 0;
-    for edge in &["left", "right", "top", "bottom"] {
-        if let Some(n) = neighbors
-            .and_then(|m| m.get(*edge))
-            .filter(|v| !v.is_null())
-        {
+    // §156b: v1 pairs `neighbors[i]` with `neighbor_edges[i]` (the legacy
+    // report keyed them by edge in a HashMap).
+    if let (Some(edges), Some(list)) = (neighbor_edges, neighbors) {
+        for (edge, n) in edges.iter().zip(list.iter()) {
             count += 1;
             let peer_id = n["peer_id"].as_str().unwrap_or("unknown");
             let peer_edge = n["peer_edge"].as_str().unwrap_or("unknown");
             let offset = n["offset"].as_i64().unwrap_or(0);
+            let edge_str = edge.as_str().unwrap_or("unknown");
             println!(
                 "    - {:<6} -> peer {} (enters {:?}, offset {:+}px)",
-                edge.to_uppercase(),
+                edge_str.to_uppercase(),
                 peer_id,
                 peer_edge,
                 offset
@@ -170,9 +173,12 @@ pub(crate) async fn do_topology_link(
     if let Some(off) = offset {
         req["offset"] = serde_json::json!(off);
     }
-    let (code, body) =
-        tetherly_node::loopback_post(ui_port, "/api/topology/link", &serde_json::to_vec(&req)?)
-            .await?;
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/v1/topology/links",
+        &serde_json::to_vec(&req)?,
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to link topology neighbor (HTTP {code}): {err_msg}");
@@ -195,9 +201,12 @@ pub(crate) async fn do_topology_link(
 
 pub(crate) async fn do_topology_unlink(ui_port: u16, edge: &str, json: bool) -> Result<()> {
     let req = serde_json::json!({ "edge": edge });
-    let (code, body) =
-        tetherly_node::loopback_post(ui_port, "/api/topology/unlink", &serde_json::to_vec(&req)?)
-            .await?;
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/v1/topology/unlinks",
+        &serde_json::to_vec(&req)?,
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to unlink topology neighbor (HTTP {code}): {err_msg}");
@@ -249,9 +258,14 @@ pub(crate) async fn do_topology_config(
         return do_topology_show(ui_port, json).await;
     }
 
-    let (code, body) =
-        tetherly_node::loopback_post(ui_port, "/api/topology/config", &serde_json::to_vec(&req)?)
-            .await?;
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "PATCH",
+        "/api/v1/topology/config",
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to update topology config (HTTP {code}): {err_msg}");
@@ -281,7 +295,7 @@ pub(crate) async fn do_topology_config(
 }
 
 pub(crate) async fn do_topology_peers(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/topology/peers").await?;
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/v1/topology/peers").await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query peer topologies (HTTP {code}): {err_msg}");
@@ -304,7 +318,14 @@ pub(crate) async fn do_topology_peers(ui_port: u16, json: bool) -> Result<()> {
             let w = display["width"].as_u64().unwrap_or(0);
             let h = display["height"].as_u64().unwrap_or(0);
             let s = display["scale_factor"].as_f64().unwrap_or(1.0);
-            let age_ms = p["age_ms"].as_u64().unwrap_or(0);
+            // §156b: v1 carries the raw advertisement timestamp; the legacy
+            // report precomputed `age_ms`.
+            let ts_ms = p["timestamp_ms"].as_u64().unwrap_or(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(ts_ms);
+            let age_ms = now_ms.saturating_sub(ts_ms);
             println!(
                 "  - {} ({}): {}x{} @ {:.2}x scale, updated {}s ago",
                 alias,
@@ -323,7 +344,8 @@ pub(crate) async fn do_topology_peers(ui_port: u16, json: bool) -> Result<()> {
 }
 
 pub(crate) async fn do_topology_sync(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_post(ui_port, "/api/topology/sync", b"{}").await?;
+    let (code, body) =
+        tetherly_node::loopback_post(ui_port, "/api/v1/topology/sync", b"{}").await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to dispatch topology sync (HTTP {code}): {err_msg}");
@@ -429,8 +451,14 @@ pub(crate) async fn do_topology_policy(
         }
 
         let body_bytes = serde_json::to_vec(&req)?;
-        let (code, body) =
-            tetherly_node::loopback_post(ui_port, "/api/topology/policy", &body_bytes).await?;
+        let (code, body) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/topology/policy",
+            Some(&body_bytes),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await?;
         if code != 200 {
             let err_msg = String::from_utf8_lossy(&body);
             anyhow::bail!("failed to update topology policy (HTTP {code}): {err_msg}");
@@ -442,7 +470,7 @@ pub(crate) async fn do_topology_policy(
         println!("Successfully updated topology governance policy.");
         print_topology_policy_json(&body)?;
     } else {
-        let (code, body) = tetherly_node::loopback_get(ui_port, "/api/topology/policy").await?;
+        let (code, body) = tetherly_node::loopback_get(ui_port, "/api/v1/topology/policy").await?;
         if code != 200 {
             let err_msg = String::from_utf8_lossy(&body);
             anyhow::bail!("failed to query topology policy (HTTP {code}): {err_msg}");

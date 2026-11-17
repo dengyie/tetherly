@@ -111,6 +111,16 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/profiles" => Some(&["GET"]),
         "/api/v1/caps" => Some(&["GET", "PATCH"]),
         "/api/v1/caps/peers" => Some(&["GET"]),
+        "/api/v1/topology" => Some(&["GET"]),
+        "/api/v1/topology/peers" => Some(&["GET"]),
+        "/api/v1/topology/policy" => Some(&["GET", "PATCH"]),
+        "/api/v1/topology/links" => Some(&["POST"]),
+        "/api/v1/topology/unlinks" => Some(&["POST"]),
+        "/api/v1/topology/sync" => Some(&["POST"]),
+        "/api/v1/topology/config" => Some(&["PATCH"]),
+        "/api/v1/routes" => Some(&["GET", "POST", "DELETE"]),
+        "/api/v1/net" => Some(&["GET"]),
+        "/api/v1/net/refresh" => Some(&["POST"]),
         p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
         p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -290,6 +300,28 @@ pub(super) async fn route(
         ("GET", "/api/v1/caps") => Ok(json(200, &crate::apiv1::model::local_caps(node))),
         ("PATCH", "/api/v1/caps") => patch_caps(node, body).await,
         ("GET", "/api/v1/caps/peers") => Ok(json(200, &crate::apiv1::model::peer_caps_all(node))),
+        // §156b: topology domain.
+        ("GET", "/api/v1/topology") => Ok(json(200, &crate::apiv1::model::topology(node))),
+        ("GET", "/api/v1/topology/peers") => {
+            Ok(json(200, &crate::apiv1::model::peer_topologies(node)))
+        }
+        ("GET", "/api/v1/topology/policy") => {
+            Ok(json(200, &crate::apiv1::model::topology_policy(node)))
+        }
+        ("PATCH", "/api/v1/topology/policy") => patch_topology_policy(node, body),
+        ("POST", "/api/v1/topology/links") => post_topology_link(node, body).await,
+        ("POST", "/api/v1/topology/unlinks") => post_topology_unlink(node, body).await,
+        ("POST", "/api/v1/topology/sync") => post_topology_sync(node).await,
+        ("PATCH", "/api/v1/topology/config") => patch_topology_config(node, body).await,
+        // §156b: routes / network domain.
+        ("GET", "/api/v1/routes") => Ok(json(200, &crate::apiv1::model::routes(node))),
+        ("POST", "/api/v1/routes") => post_route(node, body),
+        ("DELETE", "/api/v1/routes") => delete_route(node, query),
+        ("GET", "/api/v1/net") => Ok(json(200, &crate::apiv1::model::network(node))),
+        ("POST", "/api/v1/net/refresh") => {
+            let rep = node.refresh_network().await;
+            Ok(json(200, &crate::apiv1::model::network_refresh(rep)))
+        }
         ("GET", p) if matches!(device_action(p), Some((_, "caps"))) => {
             peer_caps_json(node, device_action(p).map(|(id, _)| id).unwrap_or_default())
         }
@@ -696,6 +728,227 @@ fn peer_caps_json(node: &Node, target: &str) -> Handled {
         Err(CoreError::PeerNotFound(e)) => {
             Err(error(ErrorCode::NotFound, format!("peer not found: {e}")))
         }
+        Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
+    }
+}
+
+// ---- §156b: topology handlers ----
+
+/// `POST /topology/links` — attach a peer to a local display edge. Edge names
+/// parse case-insensitively (same FromStr as the legacy body path).
+async fn post_topology_link(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::TopologyLinkRequest = parse_body(body)?;
+    let edge = req
+        .edge
+        .trim()
+        .to_ascii_lowercase()
+        .parse::<tetherly_core::DisplayEdge>()
+        .map_err(|e| {
+            error(
+                ErrorCode::BadRequest,
+                format!("invalid edge '{}': {e}", req.edge),
+            )
+        })?;
+    let peer = req.peer.trim().to_string();
+    if peer.is_empty() {
+        return Err(error(ErrorCode::BadRequest, "missing 'peer' parameter"));
+    }
+    let peer_edge = req
+        .peer_edge
+        .as_deref()
+        .map(|s| {
+            s.trim()
+                .to_ascii_lowercase()
+                .parse::<tetherly_core::DisplayEdge>()
+                .map_err(|e| {
+                    error(
+                        ErrorCode::BadRequest,
+                        format!("invalid peer_edge '{s}': {e}"),
+                    )
+                })
+        })
+        .transpose()?;
+    let rep = node
+        .topology_link_neighbor(edge, &peer, peer_edge, req.offset)
+        .await
+        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    Ok(json(
+        200,
+        &tetherly_api::TopologyLinkReport {
+            edge: rep.edge.as_str().to_string(),
+            peer_id: rep.peer_id,
+            peer_edge: rep.peer_edge.as_str().to_string(),
+            offset: rep.offset,
+        },
+    ))
+}
+
+/// `POST /topology/unlinks` — detach a local display edge.
+async fn post_topology_unlink(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::TopologyUnlinkRequest = parse_body(body)?;
+    let edge = req
+        .edge
+        .trim()
+        .to_ascii_lowercase()
+        .parse::<tetherly_core::DisplayEdge>()
+        .map_err(|e| {
+            error(
+                ErrorCode::BadRequest,
+                format!("invalid edge '{}': {e}", req.edge),
+            )
+        })?;
+    let rep = node
+        .topology_unlink_neighbor(edge)
+        .await
+        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    Ok(json(200, &serde_json::json!({ "edge": rep.edge.as_str() })))
+}
+
+/// `POST /topology/sync` — dispatch sync requests + broadcast local state
+/// (legacy `ok`/`message`/duplicate `broadcast_count` folded).
+async fn post_topology_sync(node: &Node) -> Handled {
+    let sync_res = node.topology_request_sync().await;
+    let bc_res = node.topology_broadcast_state().await;
+    match (sync_res, bc_res) {
+        (Ok(sent), Ok(bc)) => Ok(json(
+            200,
+            &tetherly_api::TopologySyncReport {
+                sync_requests_sent: sent as u64,
+                broadcasts_sent: bc as u64,
+            },
+        )),
+        (Err(e), _) | (_, Err(e)) => Err(error(ErrorCode::BadRequest, e.to_string())),
+    }
+}
+
+/// `PATCH /topology/config` — sparse crossing-geometry update; every absent
+/// key keeps its current value (§4.2 sparse PATCH).
+async fn patch_topology_config(node: &Node, body: &[u8]) -> Handled {
+    let patch: tetherly_api::TopologyConfigPatch = parse_body(body)?;
+    let rep = node
+        .topology_update_config(
+            patch.resistance_px,
+            patch.delay_ms,
+            patch.corner_lock_size_px,
+            patch.wrap_around,
+            patch.width,
+            patch.height,
+            patch.scale_factor,
+            patch.redundancy_band_px,
+            patch.slow_dwell_ms,
+            patch.fast_push_delta_px,
+            patch.entry_return_grace_ms,
+            patch.remote_speed_percent,
+        )
+        .await
+        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    Ok(json(
+        200,
+        &serde_json::json!({
+            "display": {
+                "width": rep.display.width,
+                "height": rep.display.height,
+                "scale_factor": rep.display.scale_factor,
+            },
+            "config": crate::apiv1::model::crossing(rep.config),
+        }),
+    ))
+}
+
+/// `PATCH /topology/policy` — sparse governance-policy update; the legacy
+/// query-parameter variant is folded away (body-only, same as §4.2).
+fn patch_topology_policy(node: &Node, body: &[u8]) -> Handled {
+    let patch: tetherly_api::TopologyPolicyPatch = parse_body(body)?;
+    let mut policy = node.topology_policy();
+    if let Some(v) = patch.enabled {
+        policy.enabled = v;
+    }
+    if let Some(v) = patch.allow_inbound_control {
+        policy.allow_inbound_control = v;
+    }
+    if let Some(v) = patch.auto_link_paired_peers {
+        policy.auto_link_paired_peers = v;
+    }
+    if let Some(v) = patch.allowed_groups {
+        policy.allowed_groups = v;
+    }
+    if let Some(v) = patch.allowed_tags {
+        policy.allowed_tags = v;
+    }
+    if let Some(types) = patch.allowed_types {
+        let mut dtypes = Vec::new();
+        for t in &types {
+            match t.parse::<crate::store::DeviceType>() {
+                Ok(dt) => dtypes.push(dt),
+                Err(e) => {
+                    return Err(error(
+                        ErrorCode::BadRequest,
+                        format!("invalid device type '{t}': {e}"),
+                    ))
+                }
+            }
+        }
+        policy.allowed_types = dtypes;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    node.set_topology_policy(policy)
+        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    Ok(json(200, &crate::apiv1::model::topology_policy(node)))
+}
+
+// ---- §156b: routes / network handlers ----
+
+/// `POST /routes` — pin a peer to a physical socket address.
+fn post_route(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::RouteSetRequest = parse_body(body)?;
+    if req.peer.trim().is_empty() {
+        return Err(error(ErrorCode::BadRequest, "peer must be specified"));
+    }
+    if req.addr.trim().is_empty() {
+        return Err(error(ErrorCode::BadRequest, "addr must be specified"));
+    }
+    match node.add_route(&req.peer, &req.addr) {
+        Ok(rep) => Ok(json(
+            200,
+            &tetherly_api::RouteMutateReport {
+                device_id: rep.device_id,
+                addr: rep.addr,
+                action: rep.action,
+            },
+        )),
+        Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
+    }
+}
+
+/// `DELETE /routes?peer=` — unpin a peer's physical route; 404 mirrors the
+/// legacy resolve failure (§4.2 query style, body variant folded away).
+fn delete_route(node: &Node, query: Option<&str>) -> Handled {
+    let params = query.map(super::parse_query_map).unwrap_or_default();
+    let peer = params
+        .get("peer")
+        .or_else(|| params.get("device_id"))
+        .cloned()
+        .unwrap_or_default();
+    if peer.trim().is_empty() {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "peer must be specified via query",
+        ));
+    }
+    match node.remove_route(&peer) {
+        Ok(rep) => Ok(json(
+            200,
+            &tetherly_api::RouteMutateReport {
+                device_id: rep.device_id,
+                addr: rep.addr,
+                action: rep.action,
+            },
+        )),
+        Err(CoreError::PeerNotFound(msg)) => Err(error(ErrorCode::NotFound, msg)),
         Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
     }
 }

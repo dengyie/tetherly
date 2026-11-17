@@ -4,7 +4,7 @@
 > 运行时命中按调用方分类见 `GET /api/v1/diagnostics` 的 `legacy_routes`（§129）。
 > Android 无 HTTP 层（JNI 直连），不受本表约束；旧控制台 `/legacy/` 整体随 M5 收敛删除。
 
-**静态调用点：239 个路由 / ~355 处调用。已迁 v1：§142–§146 六命令 + §149-§154 peers 域 + §156a profiles/caps 域（8 命令 / 8 旧路由）。**
+**静态调用点：239 个路由 / ~355 处调用。已迁 v1：§142–§146 六命令 + §149-§154 peers 域 + §156a profiles/caps 域 + §156b topology/routes/net 域（累计 30+ 旧路由）。**
 
 ## 已迁移（v1 对应端点）
 
@@ -26,7 +26,7 @@
 | `api/screen/*` | 94 | ~165 | cmd_screen*（10 模块） | 待契约扩展 / 分批迁移 |
 | `api/file/*` | 21 | ~26 | cmd_files | 待契约扩展 / 分批迁移 |
 | `api/peers/*` | 18 | ~20 | cmd_peers（写操作） | 待契约扩展 / 分批迁移（§149-§152 已迁 8 条） |
-| `api/topology/*` | 7 | ~8 | cmd_topology | 待契约扩展 / 分批迁移 |
+| ~~`api/topology/*`~~ | — | — | — | §156b 已迁 v1（/topology、/topology/peers、/topology/policy、links/unlinks/sync/config） |
 | `api/input/*` | 7 | ~8 | cmd_input | 待契约扩展 / 分批迁移 |
 | `api/clip/*` | 7 | ~10 | cmd_clip | 待契约扩展 / 分批迁移 |
 | `api/action/*` | 6 | ~9 | cmd_action | 待契约扩展 / 分批迁移 |
@@ -45,11 +45,11 @@
 | `api/battery/*` | 2 | ~4 | cmd_power | 待契约扩展 / 分批迁移 |
 | `api/storage/*` | 2 | ~2 | cmd_power | 待契约扩展 / 分批迁移 |
 | `api/reply/*` | 2 | ~2 | cmd_notify | 待契约扩展 / 分批迁移 |
-| `api/net/*` | 2 | ~2 | cmd_peers | 待契约扩展 / 分批迁移 |
+| ~~`api/net/*`~~ | — | — | — | §156b 已迁 v1（GET /net、POST /net/refresh） |
 | `api/metrics/*` | 2 | ~2 | cmd_core（流量） | 待契约扩展 / 分批迁移 |
 | `api/discovery/*` | 2 | ~2 | cmd_core | 待契约扩展 / 分批迁移 |
 | `api/daemon/*` | 2 | ~2 | cmd_core | 待契约扩展 / 分批迁移 |
-| `api/routes/*` | 1 | ~3 | cmd_peers | 待契约扩展 / 分批迁移 |
+| ~~`api/routes/*`~~ | — | — | — | §156b 已迁 v1（GET/POST/DELETE /routes） |
 | `api/state/*` | 1 | ~2 | — | 待契约扩展 / 分批迁移 |
 | `api/recommendation/*` | 1 | ~2 | cmd_notify | 待契约扩展 / 分批迁移 |
 | `api/health/*` | 1 | ~2 | — | 待契约扩展 / 分批迁移 |
@@ -128,3 +128,21 @@
 | `GET/POST /api/caps` | `GET/PATCH /caps` | CapsUpdate{enable,disable} deny_unknown_fields；空 PATCH 400；LocalCaps 镜像 legacy 报告（`ok` 折掉） |
 | `GET /api/peers/caps?peer=` | `GET /devices/{id}/caps` | 单 PeerCaps 对象（信封折掉）；未知 peer 404（legacy 为空数组） |
 | `GET /api/peers/caps`（全量） | `GET /caps/peers` | `Vec<PeerCaps>` 裸数组；`ok`/`count` 折掉（count=数组长度） |
+
+## 已迁移第八批（§156b，topology/routes/net 域）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `GET /api/topology/layout` | `GET /topology` | `ok`/`message` 折掉；HashMap<edge,neighbor> 折成平行 `neighbors`+`neighbor_edges` 向量（排序确定） |
+| `GET /api/topology/peers` | `GET /topology/peers` | `ok`/`message` 折掉；per-peer 邻居 map 折为 `neighbors_count`；`age_ms`→`timestamp_ms`（CLI 现算） |
+| `POST /api/topology/link` | `POST /topology/links` | 动词名词化；body 同形（edge/peer/peer_edge/offset）；edge 大小写不敏感 |
+| `POST /api/topology/unlink` | `POST /topology/unlinks` | 同上；回读折为 `{edge}` |
+| `POST /api/topology/config` | `PATCH /topology/config` | PATCH 语义修正；12 稀疏键同形；query 别名（resistance/delay/scale…）折掉 |
+| `GET /api/topology/policy` | `GET /topology/policy` | `ok`/`message` 折掉；裸 policy 对象 |
+| `POST /api/topology/policy` | `PATCH /topology/policy` | PATCH 语义修正；body-only（legacy query 参数变体折掉）；clear_filters 保留 |
+| `POST /api/topology/sync` | `POST /topology/sync` | `ok`/`message`/重复 `broadcast_count` 折掉；留 `sync_requests_sent`+`broadcasts_sent` |
+| `GET /api/routes` | `GET /routes` | `ok` 折掉；RouteEntryDto 逐字段镜像 |
+| `POST /api/routes` | `POST /routes` | RouteSetRequest{peer,addr} deny_unknown_fields；device_id 别名折掉 |
+| `DELETE /api/routes?peer=` | `DELETE /routes?peer=` | 同语义；404 镜像 resolve 失败；body 变体折掉 |
+| `GET /api/net` | `GET /net` | `ok` 折掉；Network{interfaces,overlay} 镜像 |
+| `POST /api/net/refresh` | `POST /net/refresh` | `ok`/`action`/`timestamp_ms` 折掉 |

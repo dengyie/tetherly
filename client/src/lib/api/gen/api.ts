@@ -199,6 +199,88 @@ export type LocalCaps = { device_id: string, caps: Array<string>, features: Arra
 
 export type PeerCaps = { device_id: string, name: string, alias: string | null, caps: Array<string>, features: Array<string>, file_port: number | null, input_port: number | null, screen_port: number | null, online: boolean, };
 
+export type TopologyEdgeNeighbor = { peer_id: string, 
+/**
+ * Edge on the peer's display the local edge connects to: `left | right | top | bottom`.
+ */
+peer_edge: string, offset: number, };
+
+export type Topology = { display: DisplayRect, 
+/**
+ * Keyed by local edge name (`left | right | top | bottom`).
+ */
+neighbors: Array<TopologyEdgeNeighbor>, 
+/**
+ * Local edge the neighbor entry sits on.
+ */
+neighbor_edges: string, config: CrossingConfig, peer_count: number, };
+
+export type PeerTopologyDto = { peer_id: string, peer_alias: string | null, display: DisplayRect, config: CrossingConfig, timestamp_ms: number, 
+/**
+ * Number of edges the peer has linked (count of its neighbors).
+ */
+neighbors_count: number, };
+
+export type PeerTopologies = { count: number, peers: Array<PeerTopologyDto>, };
+
+export type TopologyLinkRequest = { 
+/**
+ * Local edge: `left | right | top | bottom`.
+ */
+edge: string, 
+/**
+ * Peer target (id, name, or alias).
+ */
+peer: string, 
+/**
+ * Peer's edge that faces us; defaults to the geometric opposite.
+ */
+peer_edge?: string | null, offset?: number | null, };
+
+export type TopologyLinkReport = { 
+/**
+ * Local edge affected.
+ */
+edge: string, peer_id: string, peer_edge: string, offset: number, };
+
+export type TopologyUnlinkRequest = { edge: string, };
+
+export type TopologyConfigPatch = { resistance_px?: number | null, delay_ms?: number | null, corner_lock_size_px?: number | null, wrap_around?: boolean | null, redundancy_band_px?: number | null, slow_dwell_ms?: number | null, fast_push_delta_px?: number | null, entry_return_grace_ms?: number | null, remote_speed_percent?: number | null, width?: number | null, height?: number | null, scale_factor?: number | null, };
+
+export type TopologyPolicy = { enabled: boolean, allow_inbound_control: boolean, auto_link_paired_peers: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, allowed_types: Array<string>, };
+
+export type TopologyPolicyPatch = { enabled?: boolean | null, allow_inbound_control?: boolean | null, auto_link_paired_peers?: boolean | null, allowed_groups?: Array<string> | null, allowed_tags?: Array<string> | null, allowed_types?: Array<string> | null, 
+/**
+ * When true, clears the allowed_groups/tags/types filter lists.
+ */
+clear_filters?: boolean | null, };
+
+export type TopologySyncReport = { sync_requests_sent: number, broadcasts_sent: number, };
+
+export type RouteEntryDto = { device_id: string, addr: string, alias: string | null, name: string | null, online: boolean, trusted: boolean, };
+
+export type Routes = { count: number, routes: Array<RouteEntryDto>, };
+
+export type RouteSetRequest = { 
+/**
+ * Peer target (id, name, or alias).
+ */
+peer: string, addr: string, };
+
+export type RouteMutateReport = { device_id: string, addr: string | null, 
+/**
+ * `added | removed`.
+ */
+action: string, };
+
+export type IfaceReport = { iface: string, ip: string, listen: boolean, reason: string | null, };
+
+export type OverlayStatus = { enabled: boolean, present: boolean, source: string, local_ips: Array<string>, peer_count: number, peers: Array<string>, };
+
+export type Network = { interfaces: Array<IfaceReport>, overlay: OverlayStatus, };
+
+export type NetworkRefreshReport = { ifaces_scanned: number, ifaces_listening: number, overlay_present: boolean, overlay_source: string, overlay_local_ips: Array<string>, overlay_peers_count: number, };
+
 export type MessageDirection = "inbound" | "outbound";
 
 export type HandoffStatus = "pending" | "opened" | "dismissed" | "rejected";

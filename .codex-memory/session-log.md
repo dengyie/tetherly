@@ -1422,3 +1422,9 @@
 - v1：GET /profiles、GET/PATCH /profiles/{id}、GET/PATCH /caps、GET /devices/{id}/caps、GET /caps/peers（全量 peers 裸数组）。
 - CLI：cmd_profile ×5（set 稀疏 PATCH、group clear 用 null→Clear）+ cmd_core caps ×3（PATCH 带 api_token_for；单 peer 打印机改单对象直读；both 臂 count 取数组长度）。
 - 门禁：fmt/clippy --all-targets 绿；契约 25/bin 16/lib 352 全绿。全量与冒烟交 CI。
+
+## §156b (2026-11-17) — topology/routes/net 域契约 + v1 端点 ×13 + CLI 迁移 ×13
+- 契约 ×15（Topology×11 + Routes/Net×8 组）：HashMap→平行向量、枚举折小写字符串；Option<f32> 不能 derive Eq（E0277 坑）；契约 27 绿 + bindings 再生。
+- v1：GET /topology(/peers/policy)、PATCH policy/config、POST links/unlinks/sync、GET/POST/DELETE /routes（DELETE ?peer=）、GET /net、POST /net/refresh。
+- CLI：cmd_topology ×8（打印机双 zip + timestamp_ms 现算）+ cmd_peers ×5（反序列化换 tetherly_api:: 契约类型，node 内部结构 ok 折掉后不匹配）。
+- 门禁：fmt/clippy --all-targets 绿；契约 27/bin 16/lib 352 全绿。全量交 CI。

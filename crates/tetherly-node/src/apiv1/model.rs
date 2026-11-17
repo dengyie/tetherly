@@ -304,6 +304,165 @@ pub fn layout(node: &Node) -> Layout {
     }
 }
 
+// ---- §156b: topology / routes / network domains ----
+
+/// Shared converter: runtime `EdgeCrossingConfig` -> contract `CrossingConfig`.
+pub fn crossing(r: tetherly_core::topology::EdgeCrossingConfig) -> tetherly_api::CrossingConfig {
+    tetherly_api::CrossingConfig {
+        resistance_px: r.resistance_px,
+        delay_ms: r.delay_ms,
+        corner_lock_size_px: r.corner_lock_size_px,
+        wrap_around: r.wrap_around,
+        redundancy_band_px: r.redundancy_band_px,
+        slow_dwell_ms: r.slow_dwell_ms,
+        fast_push_delta_px: r.fast_push_delta_px,
+        entry_return_grace_ms: r.entry_return_grace_ms,
+        remote_speed_percent: r.remote_speed_percent,
+    }
+}
+
+fn display_rect(r: tetherly_core::topology::DisplayRect) -> tetherly_api::DisplayRect {
+    tetherly_api::DisplayRect {
+        width: r.width,
+        height: r.height,
+        scale_factor: r.scale_factor,
+    }
+}
+
+fn display_rect_of(r: &tetherly_core::topology::DisplayRect) -> tetherly_api::DisplayRect {
+    display_rect(*r)
+}
+
+/// `GET /topology` — local spatial display topology (legacy
+/// `/api/topology/layout` slice; `ok`/`message` folded, the HashMap keyed by
+/// edge becomes parallel `neighbors` + `neighbor_edges` vectors).
+pub fn topology(node: &Node) -> tetherly_api::Topology {
+    let l = node.topology_layout();
+    // Sort by edge name so the wire shape is deterministic.
+    let mut entries: Vec<(DisplayEdge, &tetherly_core::topology::EdgeNeighbor)> =
+        l.neighbors.iter().map(|(e, n)| (*e, n)).collect();
+    entries.sort_by_key(|(e, _)| e.as_str());
+    let mut neighbors = Vec::new();
+    let mut neighbor_edges = Vec::new();
+    for (edge, n) in entries {
+        neighbor_edges.push(edge.as_str().to_string());
+        neighbors.push(tetherly_api::TopologyEdgeNeighbor {
+            peer_id: n.peer_id.clone(),
+            peer_edge: n.peer_edge.as_str().to_string(),
+            offset: n.offset,
+        });
+    }
+    tetherly_api::Topology {
+        display: display_rect_of(&l.display),
+        neighbors,
+        neighbor_edges,
+        config: crossing(l.config),
+        peer_count: l.peer_count as u64,
+    }
+}
+
+/// `GET /topology/peers` — all known peer display topologies (legacy
+/// `/api/topology/peers` slice; `ok`/`message` folded, per-peer neighbors
+/// count replaces the full map).
+pub fn peer_topologies(node: &Node) -> tetherly_api::PeerTopologies {
+    let r = node.topology_peers();
+    let peers: Vec<tetherly_api::PeerTopologyDto> = r
+        .peers
+        .into_iter()
+        .map(|p| tetherly_api::PeerTopologyDto {
+            peer_id: p.peer_id,
+            peer_alias: p.peer_alias,
+            display: display_rect_of(&p.display),
+            config: crossing(p.config),
+            timestamp_ms: p.timestamp_ms,
+            neighbors_count: p.neighbors.len() as u64,
+        })
+        .collect();
+    tetherly_api::PeerTopologies {
+        count: peers.len() as u64,
+        peers,
+    }
+}
+
+/// `GET /topology/policy` — governance policy readback.
+pub fn topology_policy(node: &Node) -> tetherly_api::TopologyPolicy {
+    let p = node.topology_policy();
+    tetherly_api::TopologyPolicy {
+        enabled: p.enabled,
+        allow_inbound_control: p.allow_inbound_control,
+        auto_link_paired_peers: p.auto_link_paired_peers,
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+/// `GET /routes` — cached physical addressing routes (legacy
+/// `/api/routes` slice; `ok` folded, count kept).
+pub fn routes(node: &Node) -> tetherly_api::Routes {
+    let r = node.routes_report();
+    tetherly_api::Routes {
+        count: r.count as u64,
+        routes: r
+            .routes
+            .into_iter()
+            .map(|e| tetherly_api::RouteEntryDto {
+                device_id: e.device_id,
+                addr: e.addr,
+                alias: e.alias,
+                name: e.name,
+                online: e.online,
+                trusted: e.trusted,
+            })
+            .collect(),
+    }
+}
+
+/// `GET /net` — network interfaces and overlay status (legacy `/api/net`
+/// slice; `ok` folded away).
+pub fn network(node: &Node) -> tetherly_api::Network {
+    let r = node.network_report_dto();
+    tetherly_api::Network {
+        interfaces: r
+            .interfaces
+            .into_iter()
+            .map(|i| tetherly_api::IfaceReport {
+                iface: i.iface,
+                ip: i.ip,
+                listen: i.listen,
+                reason: i.reason,
+            })
+            .collect(),
+        overlay: tetherly_api::OverlayStatus {
+            enabled: r.overlay.enabled,
+            present: r.overlay.present,
+            source: r.overlay.source,
+            local_ips: r.overlay.local_ips,
+            peer_count: r.overlay.peer_count as u64,
+            peers: r.overlay.peers,
+        },
+    }
+}
+
+/// `POST /net/refresh` — rescan + overlay probe (legacy `ok`/`action`/
+/// `timestamp_ms` folded).
+pub fn network_refresh(
+    rep: crate::runtime::NetworkRefreshReport,
+) -> tetherly_api::NetworkRefreshReport {
+    tetherly_api::NetworkRefreshReport {
+        ifaces_scanned: rep.ifaces_scanned as u64,
+        ifaces_listening: rep.ifaces_listening as u64,
+        overlay_present: rep.overlay_present,
+        overlay_source: rep.overlay_source,
+        overlay_local_ips: rep.overlay_local_ips,
+        overlay_peers_count: rep.overlay_peers_count as u64,
+    }
+}
+
 /// §152: the link resource — quality snapshot + heartbeat config, field
 /// names mirrored from the runtime report (CLI printers unchanged).
 pub fn link_quality(node: &Node) -> LinkQuality {

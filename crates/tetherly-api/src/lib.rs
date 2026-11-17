@@ -1215,6 +1215,263 @@ pub struct PeerCaps {
     pub online: bool,
 }
 
+// ---- §156b: topology domain ----
+
+/// One edge neighbor of the spatial display topology (mirrors the core
+/// `EdgeNeighbor`; edge enums folded to lowercase strings per §4.2 style).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TopologyEdgeNeighbor {
+    pub peer_id: String,
+    /// Edge on the peer's display the local edge connects to: `left | right | top | bottom`.
+    pub peer_edge: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub offset: i32,
+}
+
+/// The topology resource (§4.2 `GET /topology`): local display rectangle,
+/// one neighbor per configured edge, and the crossing config knobs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Topology {
+    pub display: DisplayRect,
+    /// Keyed by local edge name (`left | right | top | bottom`).
+    pub neighbors: Vec<TopologyEdgeNeighbor>,
+    /// Local edge the neighbor entry sits on.
+    #[cfg_attr(test, ts(type = "string"))]
+    pub neighbor_edges: Vec<String>,
+    pub config: CrossingConfig,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub peer_count: u64,
+}
+
+/// A peer's advertised display topology summary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PeerTopologyDto {
+    pub peer_id: String,
+    pub peer_alias: Option<String>,
+    pub display: DisplayRect,
+    pub config: CrossingConfig,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+    /// Number of edges the peer has linked (count of its neighbors).
+    #[cfg_attr(test, ts(type = "number"))]
+    pub neighbors_count: u64,
+}
+
+/// `GET /topology/peers` — all known peer display topologies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PeerTopologies {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+    pub peers: Vec<PeerTopologyDto>,
+}
+
+/// `POST /topology/links` request: attach a peer to a local display edge.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct TopologyLinkRequest {
+    /// Local edge: `left | right | top | bottom`.
+    pub edge: String,
+    /// Peer target (id, name, or alias).
+    pub peer: String,
+    /// Peer's edge that faces us; defaults to the geometric opposite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_edge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i32>,
+}
+
+/// Report returned when a link or unlink lands (§4.2 style).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TopologyLinkReport {
+    /// Local edge affected.
+    pub edge: String,
+    pub peer_id: String,
+    pub peer_edge: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub offset: i32,
+}
+
+/// `POST /topology/unlinks` request: detach a local display edge.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct TopologyUnlinkRequest {
+    pub edge: String,
+}
+
+/// `PATCH /topology/config` request: sparse crossing-geometry update.
+/// Absent keys keep their current values (§4.2 sparse PATCH semantics).
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct TopologyConfigPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resistance_px: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_lock_size_px: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap_around: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redundancy_band_px: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_dwell_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_push_delta_px: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_return_grace_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_speed_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_factor: Option<f32>,
+}
+
+/// Topology governance policy (mirrors the store's `TopologyPolicy`; device
+/// types folded to lowercase strings).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TopologyPolicy {
+    pub enabled: bool,
+    pub allow_inbound_control: bool,
+    pub auto_link_paired_peers: bool,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /topology/policy` request: sparse policy update.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct TopologyPolicyPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_inbound_control: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_link_paired_peers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_groups: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_types: Option<Vec<String>>,
+    /// When true, clears the allowed_groups/tags/types filter lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /topology/sync` report: sync requests and broadcasts dispatched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TopologySyncReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sync_requests_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub broadcasts_sent: u64,
+}
+
+// ---- §156b: routes / network domain ----
+
+/// One cached physical addressing route (mirrors the runtime `RouteEntryDto`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RouteEntryDto {
+    pub device_id: String,
+    pub addr: String,
+    pub alias: Option<String>,
+    pub name: Option<String>,
+    pub online: bool,
+    pub trusted: bool,
+}
+
+/// `GET /routes` — all cached physical addressing routes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Routes {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+    pub routes: Vec<RouteEntryDto>,
+}
+
+/// `POST /routes` request: pin a peer to a physical socket address.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct RouteSetRequest {
+    /// Peer target (id, name, or alias).
+    pub peer: String,
+    pub addr: String,
+}
+
+/// Report returned after a route add/remove (mirrors `RouteMutateReport`;
+/// `ok` folded away, `action` kept for the CLI printer).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RouteMutateReport {
+    pub device_id: String,
+    pub addr: Option<String>,
+    /// `added | removed`.
+    pub action: String,
+}
+
+/// One network interface probe row (mirrors the runtime `IfaceReportDto`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct IfaceReport {
+    pub iface: String,
+    pub ip: String,
+    pub listen: bool,
+    pub reason: Option<String>,
+}
+
+/// EasyTier overlay sidecar status (mirrors the runtime report).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct OverlayStatus {
+    pub enabled: bool,
+    pub present: bool,
+    pub source: String,
+    pub local_ips: Vec<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub peer_count: u64,
+    pub peers: Vec<String>,
+}
+
+/// `GET /net` — network interfaces and overlay status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Network {
+    pub interfaces: Vec<IfaceReport>,
+    pub overlay: OverlayStatus,
+}
+
+/// `POST /net/refresh` report — rescan + overlay probe results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NetworkRefreshReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub ifaces_scanned: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub ifaces_listening: u64,
+    pub overlay_present: bool,
+    pub overlay_source: String,
+    pub overlay_local_ips: Vec<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub overlay_peers_count: u64,
+}
+
 // ---- M2e: activity feed ----
 
 /// Direction of a peer direct message relative to this node.
@@ -1377,6 +1634,25 @@ mod bindings {
             decl::<CapsUpdate>(&cfg),
             decl::<LocalCaps>(&cfg),
             decl::<PeerCaps>(&cfg),
+            decl::<TopologyEdgeNeighbor>(&cfg),
+            decl::<Topology>(&cfg),
+            decl::<PeerTopologyDto>(&cfg),
+            decl::<PeerTopologies>(&cfg),
+            decl::<TopologyLinkRequest>(&cfg),
+            decl::<TopologyLinkReport>(&cfg),
+            decl::<TopologyUnlinkRequest>(&cfg),
+            decl::<TopologyConfigPatch>(&cfg),
+            decl::<TopologyPolicy>(&cfg),
+            decl::<TopologyPolicyPatch>(&cfg),
+            decl::<TopologySyncReport>(&cfg),
+            decl::<RouteEntryDto>(&cfg),
+            decl::<Routes>(&cfg),
+            decl::<RouteSetRequest>(&cfg),
+            decl::<RouteMutateReport>(&cfg),
+            decl::<IfaceReport>(&cfg),
+            decl::<OverlayStatus>(&cfg),
+            decl::<Network>(&cfg),
+            decl::<NetworkRefreshReport>(&cfg),
             decl::<MessageDirection>(&cfg),
             decl::<HandoffStatus>(&cfg),
             decl::<ActivityCandidate>(&cfg),
