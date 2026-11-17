@@ -1432,3 +1432,4 @@
 ## v0.2.62 发版 (2026-11-18) — §156a+§156b 上生产
 - §156a（profiles/caps 域 + Patch<T> 三态契约，run 44105392730 全绿）+ §156b（topology/routes/net 域 15 DTO + 13 端点 + CLI ×13，run 44117110707 全绿）合并发版。
 - bump Cargo.toml/package.json/tauri.conf.json 0.2.61→0.2.62；发版后 deploy.sh --target all 双端部署。
+- v0.2.62 双端部署完成 (2026-11-18)：tag 触发注意——release 工作流只认 push tags v*，bump 提交必须补打 tag（这次漏打后补 v0.2.62）。release run 44127719173 全绿 11 资产；deploy.sh --target all 成功——Mac pid 1148、home-win 19304→23648（NTFS 原子热重启），版本门双端 0.2.62，双端 live_peers=1，受保护进程 SRBMiner/komari-agent/verge-mihomo 部署前后 3/3 完好。§156a+§156b 上生产，待用户线上测试。
