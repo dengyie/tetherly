@@ -3619,7 +3619,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         "PATCH",
         "/api/v1/diagnostics/metrics",
         Some(b"{}"),
-        None,
+        tetherly_node::api_token_for(host_ui).as_deref(),
     )
     .await
     .expect("reset metrics succeeds");
