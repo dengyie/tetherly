@@ -3515,8 +3515,9 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     let host_ui = host.spawn_ui().await.expect("host UI spawns");
     let peer_id = peer.identity().device_id().clone();
 
-    // 1. Initial status check via GET /api/metrics and GET /api/traffic
-    let (code_m, body_m) = tetherly_node::loopback_get(host_ui, "/api/metrics")
+    // §155: metrics read via v1 GET /api/v1/diagnostics/metrics (the
+    // legacy /api/metrics and /api/traffic aliases are deleted).
+    let (code_m, body_m) = tetherly_node::loopback_get(host_ui, "/api/v1/diagnostics/metrics")
         .await
         .expect("metrics query succeeds");
     assert_eq!(code_m, 200);
@@ -3526,8 +3527,8 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     assert!(rep.sessions_established >= 1);
     assert_eq!(rep.handshakes_failed, 0);
 
-    // Verify GET /api/traffic returns isomorphic response
-    let (code_t, body_t) = tetherly_node::loopback_get(host_ui, "/api/traffic")
+    // Verify a second GET returns the same counters (legacy alias gone).
+    let (code_t, body_t) = tetherly_node::loopback_get(host_ui, "/api/v1/diagnostics/metrics")
         .await
         .expect("traffic query succeeds");
     assert_eq!(code_t, 200);
@@ -3563,7 +3564,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Check that control telemetry reflects ping/pong & notify
-    let (code_m2, body_m2) = tetherly_node::loopback_get(host_ui, "/api/metrics")
+    let (code_m2, body_m2) = tetherly_node::loopback_get(host_ui, "/api/v1/diagnostics/metrics")
         .await
         .expect("metrics query 2 succeeds");
     assert_eq!(code_m2, 200);
@@ -3604,7 +3605,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     assert_eq!(received, payload);
 
     // Check that file telemetry recorded TX
-    let (code_m3, body_m3) = tetherly_node::loopback_get(host_ui, "/api/metrics")
+    let (code_m3, body_m3) = tetherly_node::loopback_get(host_ui, "/api/v1/diagnostics/metrics")
         .await
         .expect("metrics query 3 succeeds");
     assert_eq!(code_m3, 200);
@@ -3612,14 +3613,15 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     assert!(rep3.file.tx_bytes >= payload.len() as u64);
     assert!(rep3.messages.file_offers_sent >= 1);
 
-    // 5. Reset metrics via POST /api/metrics/reset
-    let (code_rst, body_rst) = tetherly_node::loopback_post(host_ui, "/api/metrics/reset", b"{}")
+    // 5. Reset metrics via PATCH /api/v1/diagnostics/metrics (idempotent
+    // reset folded into the same readback; §153).
+    let (code_rst, body_rst) = tetherly_node::loopback_request(host_ui, "PATCH", "/api/v1/diagnostics/metrics", Some(b"{}"), None)
         .await
         .expect("reset metrics succeeds");
     assert_eq!(code_rst, 200);
     let rst_json: serde_json::Value = serde_json::from_slice(&body_rst).unwrap();
-    assert_eq!(rst_json["ok"], true);
-    assert_eq!(rst_json["reset"], true);
+    assert_eq!(rst_json["total_tx_bytes"], 0);
+    assert_eq!(rst_json["total_rx_bytes"], 0);
 
     // 6. Verify SSE event stream receives UiEvent::MetricsReset
     let mut found_reset = false;
@@ -3641,8 +3643,8 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         "expected to receive UiEvent::MetricsReset on SSE"
     );
 
-    // 7. Verify metrics reset took effect via GET /api/metrics
-    let (code_m4, body_m4) = tetherly_node::loopback_get(host_ui, "/api/metrics")
+    // 7. Verify metrics reset took effect via GET /api/v1/diagnostics/metrics
+    let (code_m4, body_m4) = tetherly_node::loopback_get(host_ui, "/api/v1/diagnostics/metrics")
         .await
         .expect("metrics query 4 succeeds");
     assert_eq!(code_m4, 200);
@@ -3655,14 +3657,6 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     assert_eq!(rep4.messages.notifies_sent, 0);
     assert_eq!(rep4.messages.file_offers_sent, 0);
     assert_eq!(rep4.sessions_established, 0);
-
-    // Also test POST /api/traffic/reset endpoint
-    let (code_rst2, body_rst2) = tetherly_node::loopback_post(host_ui, "/api/traffic/reset", b"")
-        .await
-        .expect("reset traffic succeeds");
-    assert_eq!(code_rst2, 200);
-    let rst_json2: serde_json::Value = serde_json::from_slice(&body_rst2).unwrap();
-    assert_eq!(rst_json2["ok"], true);
 
     host.shutdown();
     peer.shutdown();
@@ -6003,9 +5997,10 @@ async fn lan_discovery_and_beacon_governance_via_loopback_api() {
     assert!(!p1.is_trusted);
     assert!(!p1.is_online);
 
-    // 5. Smart dial resolution testing via POST /api/dial
+    // 5. Smart dial resolution testing via POST /api/v1/pairing/dial (§154;
+    // the legacy /api/dial alias is deleted).
     // 5a. Bad json / missing both addr and peer -> 400
-    let (c_empty, b_empty) = tetherly_node::loopback_post(ui_port, "/api/dial", b"{}")
+    let (c_empty, b_empty) = tetherly_node::loopback_post(ui_port, "/api/v1/pairing/dial", b"{}")
         .await
         .unwrap();
     assert_eq!(c_empty, 400);
@@ -6015,7 +6010,7 @@ async fn lan_discovery_and_beacon_governance_via_loopback_api() {
     let dial_bad = serde_json::json!({ "peer": "non_existent_device" });
     let (c_bad, b_bad) = tetherly_node::loopback_post(
         ui_port,
-        "/api/dial",
+        "/api/v1/pairing/dial",
         &serde_json::to_vec(&dial_bad).unwrap(),
     )
     .await
@@ -6031,7 +6026,7 @@ async fn lan_discovery_and_beacon_governance_via_loopback_api() {
     let dial_dev = serde_json::json!({ "peer": dev1_id });
     let (c_dial_dev, b_dial_dev) = tetherly_node::loopback_post(
         ui_port,
-        "/api/dial",
+        "/api/v1/pairing/dial",
         &serde_json::to_vec(&dial_dev).unwrap(),
     )
     .await
