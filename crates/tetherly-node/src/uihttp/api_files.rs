@@ -1130,7 +1130,10 @@ pub(super) async fn get_file_drag_status(
         controller_total_bytes,
         controller_norm_pos,
     ) = {
-        let ctl = node.drag_controller().lock().expect("drag_controller");
+        let ctl = node
+            .drag_controller()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         if let Some(session) = ctl.active_session() {
             (
                 true,
@@ -1155,7 +1158,7 @@ pub(super) async fn get_file_drag_status(
     };
 
     let (target_phase, target_visual, target_norm_pos) = {
-        let mut target = node.drag_target().lock().expect("drag_target");
+        let mut target = node.drag_target().lock().unwrap_or_else(|p| p.into_inner());
         target.prune_expired(now);
         (
             target.current_phase(),
@@ -1290,7 +1293,10 @@ pub(super) async fn post_file_drag_move(
     match node.update_drag_move(d.norm_x, d.norm_y) {
         Some(msg) => {
             let target = {
-                let ctl = node.drag_controller().lock().expect("drag_controller");
+                let ctl = node
+                    .drag_controller()
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 ctl.active_target_peer().map(|s| s.to_string())
             };
             if let Some(tp) = target {
@@ -1341,7 +1347,10 @@ pub(super) async fn post_file_drag_cancel(
 
     // Capture the target peer before cancel consumes the session.
     let cancel_target = {
-        let ctl = node.drag_controller().lock().expect("drag_controller");
+        let ctl = node
+            .drag_controller()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         ctl.active_target_peer().map(|s| s.to_string())
     };
 

@@ -594,9 +594,18 @@ pub(crate) async fn unblock(peer: String, json: bool, ui_port: u16) -> Result<()
         } else {
             println!("unblocked peer {peer}");
         }
-    } else if code == 404 && !json {
-        println!("peer {peer} was not in the blocklist");
-    } else if code != 200 {
+    } else if code == 404 {
+        // §158: an idempotent unblock of an unblocked peer is success, not a
+        // hard error — machine consumers get a JSON report either way.
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"peer": peer, "unblocked": false, "was_blocked": false})
+            );
+        } else {
+            println!("peer {peer} was not in the blocklist");
+        }
+    } else {
         anyhow::bail!(
             "node refused unblock (HTTP {code}): {}",
             String::from_utf8_lossy(&resp)
@@ -731,21 +740,42 @@ pub(crate) async fn handle_link_cmd(
             } else {
                 default_ui_port
             };
+            // §158: same tolerance contract as `status --watch` — a monitor
+            // loop survives transient fetch failures; the cold-start miss
+            // stays fatal so one-shot semantics are preserved.
+            let mut iteration = 0u64;
             loop {
-                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/link")
-                    .await
-                    .map_err(|e| {
+                let first = iteration == 0;
+                let fetch = async {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/link")
+                        .await
+                        .map_err(|e| {
                         anyhow::anyhow!(
                             "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
+                                 start one with `tetherly --data-dir <dir> run` first"
                         )
                     })?;
-                if code != 200 {
-                    anyhow::bail!(
-                        "node refused link quality query (HTTP {code}): {}",
-                        String::from_utf8_lossy(&resp)
-                    );
-                }
+                    if code != 200 {
+                        anyhow::bail!(
+                            "node refused link quality query (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    Ok(resp)
+                };
+                let resp = match fetch.await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if first {
+                            return Err(e);
+                        }
+                        eprintln!("link status: {e:#}; retrying in {}s", interval.max(1));
+                        iteration += 1;
+                        tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+                        continue;
+                    }
+                };
+                iteration += 1;
                 if json {
                     println!("{}", String::from_utf8_lossy(&resp).trim());
                 } else {

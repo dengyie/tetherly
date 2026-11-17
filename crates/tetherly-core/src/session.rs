@@ -49,6 +49,13 @@ impl Lockout {
         }
     }
 
+    /// An expired lock is spent: the entry becomes eligible for eviction and
+    /// a fresh attacker gets a fresh fail budget. (Keeps the table bounded
+    /// without a time-stamped eviction queue.)
+    pub fn expired(&self, now_ms: u64) -> bool {
+        !self.is_locked(now_ms)
+    }
+
     pub fn reset(&mut self) {
         self.fails = 0;
         self.locked_until_ms = 0;
@@ -65,7 +72,26 @@ pub struct LockoutTable {
     by_ip: std::collections::HashMap<IpAddr, Lockout>,
 }
 
+/// Entries retained after a sweep. Lockout entries only matter while a lock
+/// is live or a fail counter is accumulating toward one; anything past both
+/// is dead weight, and pre-auth keys are attacker-controlled, so an
+/// unbounded table would let a peer (or LAN scanner) grow it forever.
+const LOCKOUT_SWEEP_FLOOR: usize = 64;
+
 impl LockoutTable {
+    /// Drop entries whose lock expired with no new fails since. Called from
+    /// `fail` (the only writer) so attacker-forged keys cannot grow the
+    /// tables without bound; keeps a small floor so a live lock is never
+    /// evicted by a concurrent sweep of stale entries.
+    fn sweep(&mut self, now_ms: u64) {
+        if self.by_peer.len() > LOCKOUT_SWEEP_FLOOR {
+            self.by_peer.retain(|_, l| l.fails() > 0 && !l.expired(now_ms));
+        }
+        if self.by_ip.len() > LOCKOUT_SWEEP_FLOOR {
+            self.by_ip.retain(|_, l| l.fails() > 0 && !l.expired(now_ms));
+        }
+    }
+
     pub fn check(&self, peer: Option<&DeviceId>, ip: Option<IpAddr>, now_ms: u64) -> bool {
         if let Some(id) = peer {
             if self.by_peer.get(id).is_some_and(|l| l.is_locked(now_ms)) {
@@ -90,6 +116,7 @@ impl LockoutTable {
         if let Some(ip) = ip {
             self.by_ip.entry(ip).or_default().record_failure(now_ms);
         }
+        self.sweep(now_ms);
     }
 
     pub fn success(&mut self, peer: Option<&DeviceId>, ip: Option<IpAddr>) {
@@ -204,6 +231,66 @@ mod tests {
         assert!(t.check(Some(&id), None, 1000));
         let last_fail_ms = 1000 + 4;
         assert!(!t.check(Some(&id), None, last_fail_ms + LOCKOUT.as_millis() as u64));
+    }
+
+    /// §158: a flood of attacker-forged pre-auth device ids cannot grow the
+    /// table without bound — expired entries are swept once past the floor,
+    /// while a live lock is never evicted.
+    #[test]
+    fn lockout_table_sweeps_expired_entries_and_keeps_live_locks() {
+        let mut t = LockoutTable::default();
+        let live = DeviceId::from_id_pk(&[9u8; 32]);
+        // The live lock first so the sweep floor covers it.
+        for i in 0..PIN_MAX_FAILS {
+            t.fail(Some(&live), None, 1000 + i as u64);
+        }
+        // A flood of one-shot forged ids: each fails once, never locks, never
+        // returns — exactly the unbounded-growth vector.
+        let flood = LOCKOUT_SWEEP_FLOOR + 40;
+        for n in 0..flood {
+            let mut pk = [0u8; 32];
+            pk[0] = 0xA0 + (n % 0x10) as u8;
+            pk[1] = (n / 0x10) as u8 + 1;
+            let id = DeviceId::from_id_pk(&pk);
+            t.fail(Some(&id), None, 1000);
+        }
+        // Every flood entry is a single fail (no lock): they survive a sweep
+        // only while unexpired-and-counting, so the table stays at floor+live.
+        assert!(
+            t.by_peer.len() <= LOCKOUT_SWEEP_FLOOR + 1,
+            "sweep caps the table (got {})",
+            t.by_peer.len()
+        );
+        // The genuine locked peer is untouched.
+        assert!(t.check(Some(&live), None, 1000), "live lock survives the sweep");
+    }
+
+    /// An expired lock is spent: after LOCKOUT the entry is swept away and a
+    /// fresh attacker gets a fresh fail budget (no sticky re-lock).
+    #[test]
+    fn expired_lock_entry_is_swept_so_budgets_reset() {
+        let mut t = LockoutTable::default();
+        let id = DeviceId::from_id_pk(&[7u8; 32]);
+        for i in 0..PIN_MAX_FAILS {
+            t.fail(Some(&id), None, 1000 + i as u64);
+        }
+        assert!(t.check(Some(&id), None, 1000), "locked while the lock lives");
+        // Past expiry + past the floor, one more fail (a new attempt) sweeps
+        // the stale entry: the map must not retain the expired record. The
+        // lock runs from the LAST fail (1004), so expiry is 1004+LOCKOUT.
+        let after = 1004 + LOCKOUT.as_millis() as u64 + 1;
+        // Fill past the floor so the sweep triggers.
+        for n in 0..=LOCKOUT_SWEEP_FLOOR {
+            let mut pk = [0u8; 32];
+            pk[0] = (n as u8) + 1;
+            pk[1] = 0xEE;
+            t.fail(Some(&DeviceId::from_id_pk(&pk)), None, after);
+        }
+        assert!(
+            !t.by_peer.contains_key(&DeviceId::from_id_pk(&[7u8; 32])),
+            "expired entry swept"
+        );
+        assert!(!t.check(Some(&id), None, after), "budget is fresh again");
     }
 
     #[test]

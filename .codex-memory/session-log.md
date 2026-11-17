@@ -1433,3 +1433,11 @@
 - §156a（profiles/caps 域 + Patch<T> 三态契约，run 44105392730 全绿）+ §156b（topology/routes/net 域 15 DTO + 13 端点 + CLI ×13，run 44117110707 全绿）合并发版。
 - bump Cargo.toml/package.json/tauri.conf.json 0.2.61→0.2.62；发版后 deploy.sh --target all 双端部署。
 - v0.2.62 双端部署完成 (2026-11-18)：tag 触发注意——release 工作流只认 push tags v*，bump 提交必须补打 tag（这次漏打后补 v0.2.62）。release run 44127719173 全绿 11 资产；deploy.sh --target all 成功——Mac pid 1148、home-win 19304→23648（NTFS 原子热重启），版本门双端 0.2.62，双端 live_peers=1，受保护进程 SRBMiner/komari-agent/verge-mihomo 部署前后 3/3 完好。§156a+§156b 上生产，待用户线上测试。
+
+## §157-§160 总优化轮 (2026-11-18) — 深度 review 收敛后四批实施
+- review 结论先行：三路代理 + 逐行实证交叉验证——runtime 3 P0 全误报（guard 块内释放，未采纳）；坐实 API 3 P1 + CLI/core 2 P1 + P2 批。
+- §157 API P1：core_error 逐变体分类映射（400/409/413/503，caller-state 409）；五个路径段提取器 percent-decode（空格/UTF-8 别名恢复可寻址）；requires_token 注释对齐 ADR-139（inbox-open v1 是 Write 级不改行为）；V1_ADMIN_PATHS pinning 测试。
+- §158 CLI/core P1：LockoutTable sweep 有界化（floor 64，锁过期即刑满放弃粘性重锁——语义取舍已记录）；status/sys/link status 三个 --watch 瞬态容错（首轮 fatal 保留、后续 warn+continue）。
+- §159 P2 批：unblock --json 404 软化；八处 map_err 收敛 core_error；TopologyUnlinkReport/TopologyConfigReport 补契约 DTO（+bindings）；SSE 写超时（4×PING，防卡死客户端绕过 lag 检测）；drag_controller/drag_target 毒锁恢复 into_inner；peer_caps_all 错误传播。
+- §160 M5 第九批：Discovery×3 + DaemonRestart/Shutdow×3 契约 DTO；GET/POST /api/v1/discovery + POST /api/v1/system/shutdown/restart（**V1_ADMIN_PATHS 首个现存 Admin 路由正式接线**）；CLI discover/stop/restart ×3 迁 v1（Admin 级显式 api_token_for）。
+- 门禁：契约 28 / bin 16 / lib 356 全绿；clippy --all-targets 0 错；集成测试 v1_discovery_reads_and_lifecycle_gates 一次过（403 forbidden 包络 + 401 fail-closed + 405）。全量交 CI。

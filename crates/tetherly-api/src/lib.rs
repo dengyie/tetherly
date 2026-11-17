@@ -1305,6 +1305,22 @@ pub struct TopologyUnlinkRequest {
     pub edge: String,
 }
 
+/// `POST /topology/unlinks` report: the edge that was detached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TopologyUnlinkReport {
+    pub edge: String,
+}
+
+/// `PATCH /topology/config` report: the effective display rect and crossing
+/// config after the sparse patch applied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct TopologyConfigReport {
+    pub display: DisplayRect,
+    pub config: CrossingConfig,
+}
+
 /// `PATCH /topology/config` request: sparse crossing-geometry update.
 /// Absent keys keep their current values (§4.2 sparse PATCH semantics).
 #[derive(Debug, Clone, PartialEq, Deserialize, Default)]
@@ -1470,6 +1486,76 @@ pub struct NetworkRefreshReport {
     pub overlay_local_ips: Vec<String>,
     #[cfg_attr(test, ts(type = "number"))]
     pub overlay_peers_count: u64,
+}
+
+// ---- §160: discovery / daemon lifecycle domain ----
+
+/// One peer discovered on the LAN via mDNS beacons (mirrors the runtime
+/// `DiscoveredPeerDto`; the legacy `ok` envelope folds away).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DiscoveredPeer {
+    pub device_id: String,
+    pub name: String,
+    pub addrs: Vec<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub port: u16,
+    pub fp: Option<String>,
+    pub caps: Vec<String>,
+    pub is_trusted: bool,
+    pub is_online: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_seen_ms: u64,
+}
+
+/// `GET /discovery` — all peers discovered on the local network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Discovery {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: u64,
+    pub peers: Vec<DiscoveredPeer>,
+}
+
+/// `POST /discovery/rescan` report: a fresh mDNS sweep was started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DiscoveryRescanReport {
+    pub message: String,
+}
+
+/// `POST /system/restart` request: optional replacement binary and a delay
+/// before the restart fires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct DaemonRestartRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub delay_ms: Option<u64>,
+}
+
+/// `POST /system/restart` report (legacy `ok`/`message` folded; the action
+/// string keeps the legacy value).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DaemonRestartReport {
+    pub action: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub old_pid: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub new_pid: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /system/shutdown` report: the shutdown was scheduled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DaemonShutdownReport {
+    pub status: String,
 }
 
 // ---- M2e: activity feed ----
@@ -1641,7 +1727,9 @@ mod bindings {
             decl::<TopologyLinkRequest>(&cfg),
             decl::<TopologyLinkReport>(&cfg),
             decl::<TopologyUnlinkRequest>(&cfg),
+            decl::<TopologyUnlinkReport>(&cfg),
             decl::<TopologyConfigPatch>(&cfg),
+            decl::<TopologyConfigReport>(&cfg),
             decl::<TopologyPolicy>(&cfg),
             decl::<TopologyPolicyPatch>(&cfg),
             decl::<TopologySyncReport>(&cfg),
@@ -1653,6 +1741,12 @@ mod bindings {
             decl::<OverlayStatus>(&cfg),
             decl::<Network>(&cfg),
             decl::<NetworkRefreshReport>(&cfg),
+            decl::<DiscoveredPeer>(&cfg),
+            decl::<Discovery>(&cfg),
+            decl::<DiscoveryRescanReport>(&cfg),
+            decl::<DaemonRestartRequest>(&cfg),
+            decl::<DaemonRestartReport>(&cfg),
+            decl::<DaemonShutdownReport>(&cfg),
             decl::<MessageDirection>(&cfg),
             decl::<HandoffStatus>(&cfg),
             decl::<ActivityCandidate>(&cfg),

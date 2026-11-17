@@ -321,7 +321,7 @@ pub fn crossing(r: tetherly_core::topology::EdgeCrossingConfig) -> tetherly_api:
     }
 }
 
-fn display_rect(r: tetherly_core::topology::DisplayRect) -> tetherly_api::DisplayRect {
+pub fn display_rect(r: tetherly_core::topology::DisplayRect) -> tetherly_api::DisplayRect {
     tetherly_api::DisplayRect {
         width: r.width,
         height: r.height,
@@ -460,6 +460,40 @@ pub fn network_refresh(
         overlay_source: rep.overlay_source,
         overlay_local_ips: rep.overlay_local_ips,
         overlay_peers_count: rep.overlay_peers_count as u64,
+    }
+}
+
+// ---- §160: discovery / daemon lifecycle ----
+
+/// `GET /discovery` — the mDNS discovery view (legacy `ok` envelope folded).
+pub fn discovery(node: &Node) -> tetherly_api::Discovery {
+    let r = node.discovered_peers();
+    tetherly_api::Discovery {
+        count: r.peers.len() as u64,
+        peers: r
+            .peers
+            .into_iter()
+            .map(|p| tetherly_api::DiscoveredPeer {
+                device_id: p.device_id,
+                name: p.name,
+                addrs: p.addrs,
+                port: p.port,
+                fp: p.fp,
+                caps: p.caps,
+                is_trusted: p.is_trusted,
+                is_online: p.is_online,
+                last_seen_ms: p.last_seen_ms,
+            })
+            .collect(),
+    }
+}
+
+/// `POST /discovery` — kick a fresh LAN rescan (legacy `ok`/`message`
+/// folded; the message carried no information beyond "rescan started").
+pub fn discovery_rescan(node: &Node) -> tetherly_api::DiscoveryRescanReport {
+    let _ = node.rescan_discovery();
+    tetherly_api::DiscoveryRescanReport {
+        message: "discovery rescan started".to_string(),
     }
 }
 
@@ -629,25 +663,25 @@ pub fn peer_caps(node: &Node, target: &str) -> Result<PeerCaps, CoreError> {
 
 /// `GET /caps/peers` — all live peers' capability profiles (the legacy
 /// untargeted `/api/peers/caps` slice, envelope folded to a bare array).
-pub fn peer_caps_all(node: &Node) -> Vec<PeerCaps> {
-    node.peers_caps_report(None)
-        .map(|r| {
-            r.peers
-                .into_iter()
-                .map(|p| PeerCaps {
-                    device_id: p.device_id,
-                    name: p.name,
-                    alias: p.alias,
-                    caps: p.caps,
-                    features: p.features,
-                    file_port: p.file_port,
-                    input_port: p.input_port,
-                    screen_port: p.screen_port,
-                    online: p.online,
-                })
-                .collect()
+/// §158: the all-peers caps fetch propagates resolve failures instead of
+/// folding them into an empty list (an empty list means "no live peers", not
+/// "the query failed"); v1 maps the error onto its envelope.
+pub fn peer_caps_all(node: &Node) -> Result<Vec<PeerCaps>, CoreError> {
+    let r = node.peers_caps_report(None)?;
+    Ok(r.peers
+        .into_iter()
+        .map(|p| PeerCaps {
+            device_id: p.device_id,
+            name: p.name,
+            alias: p.alias,
+            caps: p.caps,
+            features: p.features,
+            file_port: p.file_port,
+            input_port: p.input_port,
+            screen_port: p.screen_port,
+            online: p.online,
         })
-        .unwrap_or_default()
+        .collect())
 }
 
 /// The activity resource: notification candidates, pending replies, the

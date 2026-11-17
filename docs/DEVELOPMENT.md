@@ -9507,3 +9507,41 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **v1 端点 ×13**：`GET /topology`、`GET /topology/peers`、`GET/PATCH /topology/policy`（PATCH 稀疏 + clear_filters；legacy query 参数变体折掉，body-only）、`POST /topology/links`、`POST /topology/unlinks`、`POST /topology/sync`、`PATCH /topology/config`（12 个稀疏键）、`GET/POST/DELETE /routes`（DELETE ?peer= 沿用 legacy 查询风格，404 镜像 resolve 失败）、`GET /net`、`POST /net/refresh`。edge 解析大小写不敏感（与 legacy FromStr 同语义）。
 - **CLI 迁移 ×13**：cmd_topology 8 处（show/peers/sync/policy GET 走 GET；config/policy POST 走 PATCH + api_token_for；link/unlink 走 POST 动词名词化 links/unlinks）——`show` 打印机从 HashMap 键遍历改双 zip（neighbor_edges × neighbors）；`peers` 打印机 `age_ms`→`timestamp_ms` 现算（现在-时间戳）。cmd_peers 5 处（route add/remove/list、net/refresh、net get）——反序列化从 node 内部结构换契约层（`ok` 折掉后 node 结构体缺字段会失败），net 打印机字段名不变。
 - **门禁**：fmt 绿；--all-targets clippy 0 错；契约 27 / bin 16 / lib 352 全绿。全量与冒烟交 CI。
+
+## 157. 总优化轮（一）：v1 API P1 三修复——core_error 分类映射、路径段 percent-decode、tier 治理（ADR-139 对齐）
+
+接 §156b。全项目三路深度 review 收敛后第一批实施（runtime 层 3 个 P0 经逐行核实均为误报——guard 全部块内释放、无跨 await 持锁，未采纳）。
+
+- **core_error 分类映射**（v1.rs）：catch-all 一律 500 违反"branch on code"契约。逐变体映射到 legacy 同类：`UnsafeFileName`/`OpenRefused`/`InvalidPin`/`ResumeOffset` 等 → 400；`NoConnectedPeer`/`PingTimeout`（legacy api_peers 语义为 400，v1 语义收敛为 409 Caller-state）/`PeerBlocked`/`Revoked` → 409；`FileTooLarge`/`PayloadTooLarge` → 413；`NoTargetsMatched`/`NoOtp`/`NoAncsTransport` → 503；真正意外故障才落 500。单测锁 11 断言。
+- **路径段 percent-decode**：`device_item`/`profile_item`/`inbox_item`/`device_action`/`inbox_open_action` 五个路径段提取器全部改为解码后返回（`String`），带空格/UTF-8 别名的 peer 恢复可寻址（对齐 legacy query 参数语义）；`transfer_action` 保持原样（id 为系统生成）。单测锁空格/中文/多段拒绝。
+- **tier 治理**：`requires_token` 的 doc 注释修正——inbox-open 在 legacy 特权集只因历史，ADR-139 v1 下它是 Write 级日常操作（§123 可执行降级防护在），不改行为只正注释。`V1_ADMIN_PATHS` 加 pinning 测试：3 条 admin 路径（log-level 现存 + restart/shutdown 预留）逐一断言 Admin tier，防未来新 admin 路由漏分类静默降 Write。
+- **门禁**：apitoken 17 / uihttp 75 / lib 355 全绿；clippy 0 错。
+
+## 158. 总优化轮（二）：LockoutTable 有界化 + 三个 --watch 循环瞬态容错（CLI/core P1）
+
+接 §157。
+
+- **LockoutTable 淘汰扫**（tetherly-core/session.rs）：`by_peer` 键是攻击者可自报的 pre-auth device_id，原实现零淘汰可无界增长。新增 `sweep()` 挂入 `fail()`（唯一写者）：超过 `LOCKOUT_SWEEP_FLOOR`（64）后 retain `fails>0 && 未过期` 条目。语义取舍（记录）：锁过期即"刑满"，条目被扫后新攻击者拿全新 5 次预算——放弃原实现的"粘性即时重锁"，换表有界。测试 +2：64+ 泛洪攻击 id 下表长 ≤ floor+live 锁；过期条目被扫后预算重置。坑：锁起点是**最后一次** fail 的 now_ms，断言时刻从 last-fail 起算。
+- **--watch 瞬态容错**（cmd_core status/sys + cmd_peers link status）：单次 v1_get 失败（daemon 重启 5xx 瞬间、网络抖动）原来 `bail!` 杀死整个监控循环。改为：watch 模式下 stderr 警告 + 睡 interval 后 continue；**首轮失败仍 fatal**（一次性语义保留，无 node 时 `tetherly status` 照样报错退出）。实现统一为 fetch async block + match 重试模板。
+
+## 159. 总优化轮（三）：P2 批七项——错误传播、契约 DTO 补全、SSE 韧性、毒锁恢复
+
+接 §158。
+
+- **unblock --json 404 软化**（cmd_peers.rs）：幂等 unblock 未知 peer 从硬错改 `{"peer","unblocked":false,"was_blocked":false}` JSON 报告，退出码 0。
+- **topology/routes map_err 收敛**（v1.rs）：link/unlink/sync/config/policy/route add/remove 八处 `|e| error(BadRequest, e.to_string())` 全部改走 §157 `core_error` 分类（PeerNotFound→404 等）。
+- **unlink/config 契约 DTO**：`TopologyUnlinkReport`/`TopologyConfigReport`（+bindings，契约 DTO 24→26）；两 handler 的 ad-hoc `json!` 输出换 typed DTO；`display_rect` 转 pub。
+- **SSE 写超时**（v1.rs events）：新 `write_sse_timeout`（4×PING 预算）包住全部帧/ping 写——卡死客户端不再永久阻塞循环、绕过 lag 检测；超时断流走 `Last-Event-ID` 重连。
+- **毒锁恢复**（api_files.rs）：4 处 `drag_controller/drag_target .lock().expect()` 改 `unwrap_or_else(|p| p.into_inner())`——一次 panic 后 UI 文件路由不再整体崩。
+- **peer_caps_all 错误传播**（model.rs）：`unwrap_or_default()` 静默吞 resolve 错误改 `Result` 返回，v1 caps/peers 端点 map 上包络（空数组只表示"无 live peer"）。
+- **dashboard token 文档化**：打印 URL 含 fragment token 属命令本意，doc 注释警示共享 shell 场景用 `--open`。
+- **门禁**：契约 27 / lib 355 / bin 16 全绿。
+
+## 160. 总优化轮（四）：discover/stop/restart 迁 v1 + lifecycle Admin 端点落地（M5 第九批）
+
+接 §159。M5 收敛续轮：discovery 域 + daemon 生命周期域整组迁 v1，§157 预留的 restart/shutdown Admin 路由正式接线。
+
+- **契约扩展 ×6**（tetherly-api）：`DiscoveredPeer`/`Discovery`（count 从数组长度现算，legacy `ok` 折掉）/`DiscoveryRescanReport`（`ok` 折掉，message 保留）；`DaemonRestartRequest`（稀疏，deny_unknown_fields，Serialize 补齐供 CLI 构造）/`DaemonRestartReport`（legacy `ok:true`/`message` 折掉，action/pid 三元组保留）/`DaemonShutdownReport`（status 单字段）。契约测试 +1（28）。
+- **v1 端点 ×4**：`GET /api/v1/discovery`（Read 级）、`POST /api/v1/discovery`（Write 级，rescan 动词折进 method）、`POST /api/v1/system/shutdown`（**Admin 级**——V1_ADMIN_PATHS 首个现存路由，延迟 50ms 优雅退出镜像 legacy）、`POST /api/v1/system/restart`（**Admin 级**，替换路径失败 400 / 进行中 409 / 其余 500）。集成测试 `v1_discovery_reads_and_lifecycle_gates`：空 LAN 200 + client token shutdown 403 forbidden 包络 + 无 token 401 + 405 包络，一次通过。
+- **CLI 迁移 ×3**：`discover`（rescan→POST + list→GET，反序列化换契约 `Discovery`，打印机字段名不变）；`stop`（→POST /system/shutdown，`loopback_request` + `api_token_for` 显式带 daemon token——Admin 级 client token 不够）；`restart`（→POST /system/restart，请求体构造换契约 `DaemonRestartRequest`）。
+- **门禁**：fmt 绿；--all-targets clippy 0 错；契约 28 / bin 16 / lib 356 全绿。全量与冒烟交 CI。

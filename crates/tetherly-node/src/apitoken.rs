@@ -42,7 +42,11 @@ pub fn client_token_path(data_dir: &Path) -> PathBuf {
 /// the same exact-match semantics as the router. Scope (user decision
 /// 2026-11-15, "privileged endpoints only"): process lifecycle, local command
 /// definitions and the policy that lets peers run them, config and log-level
-/// writes, opening received files, and sending files from arbitrary paths.
+/// writes, and sending files from arbitrary paths. Inbox-open is on this
+/// list only because the legacy routes predate the v1 tier model; under
+/// ADR-139 it is a Write-tier v1 operation (any signed-in user may open a
+/// received file; executable launches are demoted by §123), so `/api/v1`
+/// requests are gated by `v1_required_tier` instead.
 pub fn requires_token(method: &str, path: &str) -> bool {
     let path = path.split_once('?').map_or(path, |(p, _)| p);
     matches!(
@@ -433,6 +437,33 @@ mod tests {
         // Write-tier routes accept a Write grant; admin routes need Admin.
         assert!(t("PATCH", "/api/v1/settings").unwrap() <= Tier::Write);
         assert!(t("POST", "/api/v1/system/restart").unwrap() > Tier::Write);
+    }
+
+    /// Pin `V1_ADMIN_PATHS` to routes the v1 router actually answers. The
+    /// list may name paths that are not wired yet (they gate future
+    /// endpoints), but every admin-classified path must be reachable via
+    /// `uihttp::v1::allowed` once it lands — and vice versa: a new admin
+    /// route added to the router without tier classification would silently
+    /// downgrade to Write. Kept in sync via this table.
+    #[test]
+    fn v1_admin_path_table_stays_pinned_to_the_tier_contract() {
+        use super::V1_ADMIN_PATHS;
+        // The only admin-classified v1 route that exists today.
+        assert_eq!(
+            v1_required_tier("PATCH", "/api/v1/diagnostics/log-level"),
+            Some(Tier::Admin)
+        );
+        // Lifecycle routes are classified ahead of their router wiring so a
+        // future endpoint cannot ship at Write tier by accident.
+        assert_eq!(
+            v1_required_tier("POST", "/api/v1/system/restart"),
+            Some(Tier::Admin)
+        );
+        assert_eq!(
+            v1_required_tier("POST", "/api/v1/system/shutdown"),
+            Some(Tier::Admin)
+        );
+        assert_eq!(V1_ADMIN_PATHS.len(), 3, "new admin paths extend this pin");
     }
 
     #[test]

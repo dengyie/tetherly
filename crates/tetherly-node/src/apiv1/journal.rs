@@ -22,6 +22,11 @@ impl Frame {
             seq,
             event: event.clone(),
         };
+        // Fail-soft on purpose: every `Event` variant is plain data, so an
+        // encode failure is effectively unreachable — and tearing down the
+        // shared ring (or emitting a malformed SSE frame) over one would
+        // hurt every subscriber. `{}` keeps the frame parseable; the id
+        // still advances so replay offsets stay consistent.
         Self {
             seq,
             topic: event.topic(),

@@ -2357,6 +2357,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// §160: discovery reads at Read tier and the lifecycle Admin gate —
+    /// GET /discovery answers for a client token, POST /system/shutdown
+    /// refuses it (the daemon token passes and schedules the exit; the test
+    /// node asserts the gate, not the exit).
+    #[tokio::test]
+    async fn v1_discovery_reads_and_lifecycle_gates() {
+        let (node, dir) = temp_test_node("v1_discovery_lifecycle");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("daemon token");
+        let auth = format!("Authorization: Bearer {token}");
+
+        // Discovery: an empty LAN is a valid, empty report (Read tier; the
+        // legacy `ok` envelope folded away).
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/discovery", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["count"], 0, "{body}");
+        assert_eq!(body["peers"], serde_json::json!([]), "{body}");
+
+        // Client token: Read passes, Admin shutdown refuses.
+        let client = crate::apitoken::read_client(&dir).expect("client token");
+        let client_auth = format!("Authorization: Bearer {client}");
+        let (_, code, _) = raw_with_head(port, "GET", "/api/v1/discovery", Some(&client_auth)).await;
+        assert_eq!(code, 200);
+        let (_, code, body) =
+            raw_with_head(port, "POST", "/api/v1/system/shutdown", Some(&client_auth)).await;
+        assert_eq!(code, 403, "{body}");
+        assert_eq!(body["error"]["code"], "forbidden", "{body}");
+
+        // A missing token is 401, not 403 (fail closed before tier math).
+        let (_, code, _) =
+            raw_with_head(port, "POST", "/api/v1/system/shutdown", None).await;
+        assert_eq!(code, 401);
+
+        // Unknown v1 method on a known path is 405 with the typed envelope.
+        let (_, code, _) = raw_with_head(port, "DELETE", "/api/v1/discovery", Some(&auth)).await;
+        assert_eq!(code, 405);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// ADR-139 M4 switch: `/` serves the new SPA entry, `/assets/*` the
     /// embedded bundle, `/legacy/` the old single-file console — all over
     /// real HTTP against the live listener.

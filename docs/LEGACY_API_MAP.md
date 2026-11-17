@@ -146,3 +146,12 @@
 | `DELETE /api/routes?peer=` | `DELETE /routes?peer=` | 同语义；404 镜像 resolve 失败；body 变体折掉 |
 | `GET /api/net` | `GET /net` | `ok` 折掉；Network{interfaces,overlay} 镜像 |
 | `POST /api/net/refresh` | `POST /net/refresh` | `ok`/`action`/`timestamp_ms` 折掉 |
+
+## 已迁移第九批（§160，discovery/daemon 生命周期域）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `GET /api/discovery` | `GET /discovery` | `ok` 折掉；count=数组长度现算 |
+| `POST /api/discovery/rescan` | `POST /discovery` | rescan 动词折进 method；`ok` 折掉，message 保留 |
+| `POST /api/daemon/shutdown` | `POST /system/shutdown` | **Admin 级**（V1_ADMIN_PATHS 首个现存路由）；`ok`/`message` 折掉，留 `status:"shutting_down"` |
+| `POST /api/daemon/restart` | `POST /system/restart` | **Admin 级**；`ok:true`/`message` 折掉，留 action/old_pid/new_pid/timestamp_ms；替换路径 400 / 进行中 409 |

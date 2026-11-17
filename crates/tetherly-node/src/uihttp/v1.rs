@@ -45,23 +45,27 @@ pub(super) fn error(code: ErrorCode, message: impl Into<String>) -> UiResponse {
     ))
 }
 
-/// `/api/v1/devices/{id}` -> `id` (one non-empty segment).
-fn device_item(path: &str) -> Option<&str> {
-    path.strip_prefix("/api/v1/devices/")
-        .filter(|id| !id.is_empty() && !id.contains('/'))
+/// `/api/v1/devices/{id}` -> `id` (one non-empty segment, percent-decoded).
+fn device_item(path: &str) -> Option<String> {
+    Some(super::util::percent_decode(
+        path.strip_prefix("/api/v1/devices/")?,
+    ))
+    .filter(|id| !id.is_empty() && !id.contains('/'))
 }
 
-/// `/api/v1/profiles/{id}` -> `id` (one non-empty segment).
-fn profile_item(path: &str) -> Option<&str> {
-    path.strip_prefix("/api/v1/profiles/")
-        .filter(|id| !id.is_empty() && !id.contains('/'))
+/// `/api/v1/profiles/{id}` -> `id` (one non-empty segment, percent-decoded).
+fn profile_item(path: &str) -> Option<String> {
+    Some(super::util::percent_decode(
+        path.strip_prefix("/api/v1/profiles/")?,
+    ))
+    .filter(|id| !id.is_empty() && !id.contains('/'))
 }
 
-/// `/api/v1/devices/{id}/{action}` -> (`id`, `action`).
-fn device_action(path: &str) -> Option<(&str, &str)> {
+/// `/api/v1/devices/{id}/{action}` -> (`id`, `action`); id percent-decoded.
+fn device_action(path: &str) -> Option<(String, &str)> {
     let rest = path.strip_prefix("/api/v1/devices/")?;
     let (id, action) = rest.split_once('/')?;
-    (!id.is_empty() && !action.contains('/')).then_some((id, action))
+    (!id.is_empty() && !action.contains('/')).then_some((super::util::percent_decode(id), action))
 }
 
 /// `/api/v1/transfers/{id}/{action}` -> (`id`, `action`).
@@ -71,17 +75,20 @@ fn transfer_action(path: &str) -> Option<(&str, &str)> {
     (!id.is_empty() && !action.contains('/')).then_some((id, action))
 }
 
-/// `/api/v1/inbox/{name}` -> name (single segment, may contain dots).
-fn inbox_item(path: &str) -> Option<&str> {
-    path.strip_prefix("/api/v1/inbox/")
-        .filter(|n| !n.is_empty() && !n.contains('/'))
+/// `/api/v1/inbox/{name}` -> name (single segment, may contain dots;
+/// percent-decoded).
+fn inbox_item(path: &str) -> Option<String> {
+    Some(super::util::percent_decode(
+        path.strip_prefix("/api/v1/inbox/")?,
+    ))
+    .filter(|n| !n.is_empty() && !n.contains('/'))
 }
 
-/// `/api/v1/inbox/{name}/open` -> name.
-fn inbox_open_action(path: &str) -> Option<&str> {
+/// `/api/v1/inbox/{name}/open` -> name (percent-decoded).
+fn inbox_open_action(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/api/v1/inbox/")?;
     let (name, action) = rest.split_once('/')?;
-    (action == "open" && !name.is_empty()).then_some(name)
+    (action == "open" && !name.is_empty()).then(|| super::util::percent_decode(name))
 }
 
 /// Methods each known v1 path answers; drives 404 vs 405.
@@ -121,6 +128,10 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/routes" => Some(&["GET", "POST", "DELETE"]),
         "/api/v1/net" => Some(&["GET"]),
         "/api/v1/net/refresh" => Some(&["POST"]),
+        // §160: discovery + daemon lifecycle (restart/shutdown are the
+        // pre-classified Admin routes the tier table reserved).
+        "/api/v1/discovery" => Some(&["GET", "POST"]),
+        "/api/v1/system/restart" | "/api/v1/system/shutdown" => Some(&["POST"]),
         p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
         p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -161,20 +172,50 @@ fn parse_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, UiRespons
         .map_err(|e| error(ErrorCode::BadRequest, format!("invalid body: {e}")))
 }
 
-/// Map a node error onto the v1 envelope.
+/// Map a node error onto the v1 envelope. Every variant the daemon can
+/// surface to a v1 route gets its legacy-mirrored class; the catch-all
+/// stays `Internal` so a genuinely unexpected fault is not masked as a
+/// client problem.
 fn core_error(e: CoreError) -> UiResponse {
+    use CoreError as E;
     let code = match &e {
-        CoreError::PeerNotFound(_) | CoreError::UnknownTransfer => ErrorCode::NotFound,
+        E::PeerNotFound(_) | E::UnknownCandidate | E::UnknownTransfer => ErrorCode::NotFound,
         // Inbox lookups surface missing files as File("file not found…");
         // legacy /api/file/inbox maps the same shape to 404.
-        CoreError::File(ref msg) if msg.contains("not found") => ErrorCode::NotFound,
-        CoreError::InvalidAlias(_)
-        | CoreError::InvalidProfile(_)
-        | CoreError::InvalidRoute(_)
-        | CoreError::InvalidPayload(_)
-        | CoreError::InvalidConfig(_)
-        | CoreError::InvalidDeviceId => ErrorCode::BadRequest,
-        CoreError::PeerBlocked(_) => ErrorCode::Conflict,
+        E::File(ref msg) if msg.contains("not found") => ErrorCode::NotFound,
+        E::InvalidAlias(_)
+        | E::InvalidProfile(_)
+        | E::InvalidRoute(_)
+        | E::InvalidPayload(_)
+        | E::InvalidConfig(_)
+        | E::InvalidDeviceId
+        | E::InvalidPin
+        | E::InvalidPublicKey
+        | E::UnsafeFileName
+        | E::EmptyReply
+        | E::ResumeOffset
+        | E::InsertRefused(_)
+        | E::OpenRefused(_)
+        | E::FileNotAccepted
+        | E::FileAlreadyDecided
+        | E::InputFrame
+        | E::InputSeqJump
+        | E::InputRequiresTrust
+        | E::AncsFrame
+        | E::ScreenFrame
+        | E::ScreenSeqJump
+        | E::ScreenTooLarge
+        | E::ScreenFragment => ErrorCode::BadRequest,
+        // Caller-side state: the request is valid but cannot run now.
+        E::NoConnectedPeer
+        | E::PingTimeout
+        | E::PeerBlocked(_)
+        | E::StaticKeyChanged
+        | E::Revoked => ErrorCode::Conflict,
+        E::FileTooLarge(_) | E::PayloadTooLarge | E::HelloTooLarge | E::ClipboardTooLarge => {
+            ErrorCode::PayloadTooLarge
+        }
+        E::NoTargetsMatched(_) | E::NoAncsTransport | E::NoOtp => ErrorCode::Unavailable,
         _ => ErrorCode::Internal,
     };
     error(code, e.to_string())
@@ -292,14 +333,17 @@ pub(super) async fn route(
             ),
         )),
         ("GET", p) if profile_item(p).is_some() => {
-            profile_json(node, profile_item(p).unwrap_or_default())
+            profile_json(node, &profile_item(p).unwrap_or_default())
         }
         ("PATCH", p) if profile_item(p).is_some() => {
-            patch_profile(node, profile_item(p).unwrap_or_default(), body)
+            patch_profile(node, &profile_item(p).unwrap_or_default(), body)
         }
         ("GET", "/api/v1/caps") => Ok(json(200, &crate::apiv1::model::local_caps(node))),
         ("PATCH", "/api/v1/caps") => patch_caps(node, body).await,
-        ("GET", "/api/v1/caps/peers") => Ok(json(200, &crate::apiv1::model::peer_caps_all(node))),
+        ("GET", "/api/v1/caps/peers") => match crate::apiv1::model::peer_caps_all(node) {
+            Ok(peers) => Ok(json(200, &peers)),
+            Err(e) => Err(core_error(e)),
+        },
         // §156b: topology domain.
         ("GET", "/api/v1/topology") => Ok(json(200, &crate::apiv1::model::topology(node))),
         ("GET", "/api/v1/topology/peers") => {
@@ -322,31 +366,39 @@ pub(super) async fn route(
             let rep = node.refresh_network().await;
             Ok(json(200, &crate::apiv1::model::network_refresh(rep)))
         }
-        ("GET", p) if matches!(device_action(p), Some((_, "caps"))) => {
-            peer_caps_json(node, device_action(p).map(|(id, _)| id).unwrap_or_default())
+        // §160: discovery + daemon lifecycle.
+        ("GET", "/api/v1/discovery") => Ok(json(200, &crate::apiv1::model::discovery(node))),
+        ("POST", "/api/v1/discovery") => {
+            Ok(json(200, &crate::apiv1::model::discovery_rescan(node)))
         }
+        ("POST", "/api/v1/system/shutdown") => Ok(post_system_shutdown(node)),
+        ("POST", "/api/v1/system/restart") => post_system_restart(node, body).await,
+        ("GET", p) if matches!(device_action(p), Some((_, "caps"))) => peer_caps_json(
+            node,
+            &device_action(p).map(|(id, _)| id).unwrap_or_default(),
+        ),
         ("GET", p) if device_item(p).is_some() => {
-            Ok(device_json(node, device_item(p).unwrap_or_default()))
+            Ok(device_json(node, &device_item(p).unwrap_or_default()))
         }
         ("PATCH", p) if device_item(p).is_some() => {
-            patch_device(node, device_item(p).unwrap_or_default(), body)
+            patch_device(node, &device_item(p).unwrap_or_default(), body)
         }
         ("DELETE", p) if device_item(p).is_some() => {
-            forget_device(node, device_item(p).unwrap_or_default()).await
+            forget_device(node, &device_item(p).unwrap_or_default()).await
         }
         (m, p) => match (m, device_action(p)) {
-            ("POST", Some((id, "connect"))) => connect_device(node, id, body).await,
-            ("POST", Some((id, "ping"))) => ping_device(node, id).await,
-            ("POST", Some((id, "probe"))) => probe_device(node, id, body).await,
-            ("POST", Some((id, "disconnect"))) => disconnect_device(node, id).await,
-            ("POST", Some((id, "block"))) => block_device(node, id, body).await,
-            ("DELETE", Some((id, "block"))) => unblock_device(node, id).await,
+            ("POST", Some((id, "connect"))) => connect_device(node, &id, body).await,
+            ("POST", Some((id, "ping"))) => ping_device(node, &id).await,
+            ("POST", Some((id, "probe"))) => probe_device(node, &id, body).await,
+            ("POST", Some((id, "disconnect"))) => disconnect_device(node, &id).await,
+            ("POST", Some((id, "block"))) => block_device(node, &id, body).await,
+            ("DELETE", Some((id, "block"))) => unblock_device(node, &id).await,
             _ => match (m, transfer_action(p)) {
                 ("POST", Some((id, "cancel"))) => cancel_transfer(node, id).await,
                 _ => match (m, inbox_open_action(p)) {
-                    ("POST", Some(name)) => open_inbox_file(node, name, body).await,
+                    ("POST", Some(name)) => open_inbox_file(node, &name, body).await,
                     _ => match (m, inbox_item(p)) {
-                        ("DELETE", Some(name)) => delete_inbox_file(node, name),
+                        ("DELETE", Some(name)) => delete_inbox_file(node, &name),
                         _ => Ok(match allowed(path) {
                             Some(methods) => error(
                                 ErrorCode::MethodNotAllowed,
@@ -771,7 +823,7 @@ async fn post_topology_link(node: &Node, body: &[u8]) -> Handled {
     let rep = node
         .topology_link_neighbor(edge, &peer, peer_edge, req.offset)
         .await
-        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+        .map_err(core_error)?;
     Ok(json(
         200,
         &tetherly_api::TopologyLinkReport {
@@ -800,8 +852,13 @@ async fn post_topology_unlink(node: &Node, body: &[u8]) -> Handled {
     let rep = node
         .topology_unlink_neighbor(edge)
         .await
-        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
-    Ok(json(200, &serde_json::json!({ "edge": rep.edge.as_str() })))
+        .map_err(core_error)?;
+    Ok(json(
+        200,
+        &tetherly_api::TopologyUnlinkReport {
+            edge: rep.edge.as_str().to_string(),
+        },
+    ))
 }
 
 /// `POST /topology/sync` — dispatch sync requests + broadcast local state
@@ -817,7 +874,7 @@ async fn post_topology_sync(node: &Node) -> Handled {
                 broadcasts_sent: bc as u64,
             },
         )),
-        (Err(e), _) | (_, Err(e)) => Err(error(ErrorCode::BadRequest, e.to_string())),
+        (Err(e), _) | (_, Err(e)) => Err(core_error(e)),
     }
 }
 
@@ -841,17 +898,13 @@ async fn patch_topology_config(node: &Node, body: &[u8]) -> Handled {
             patch.remote_speed_percent,
         )
         .await
-        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+        .map_err(core_error)?;
     Ok(json(
         200,
-        &serde_json::json!({
-            "display": {
-                "width": rep.display.width,
-                "height": rep.display.height,
-                "scale_factor": rep.display.scale_factor,
-            },
-            "config": crate::apiv1::model::crossing(rep.config),
-        }),
+        &tetherly_api::TopologyConfigReport {
+            display: crate::apiv1::model::display_rect(rep.display),
+            config: crate::apiv1::model::crossing(rep.config),
+        },
     ))
 }
 
@@ -895,9 +948,51 @@ fn patch_topology_policy(node: &Node, body: &[u8]) -> Handled {
         policy.allowed_tags.clear();
         policy.allowed_types.clear();
     }
-    node.set_topology_policy(policy)
-        .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    node.set_topology_policy(policy).map_err(core_error)?;
     Ok(json(200, &crate::apiv1::model::topology_policy(node)))
+}
+
+// ---- §160: discovery / daemon lifecycle handlers ----
+
+/// `POST /system/shutdown` — schedule the daemon's own exit (Admin tier,
+/// mirroring the legacy `/api/daemon/shutdown` graceful path: the response
+/// is written first, the shutdown fires 50 ms later).
+fn post_system_shutdown(node: &Node) -> UiResponse {
+    let n = node.clone_handle();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        n.shutdown();
+    });
+    json(
+        200,
+        &tetherly_api::DaemonShutdownReport {
+            status: "shutting_down".to_string(),
+        },
+    )
+}
+
+/// `POST /system/restart` — hot-replace the daemon binary (Admin tier; the
+/// legacy `ok: true`/`message` fields fold away, the action/pid/timestamp
+/// triple is the contract). Replacement path failures map through
+/// `core_error`-style classes: bad path → 400, in-progress → 409.
+async fn post_system_restart(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::DaemonRestartRequest = parse_body(body)?;
+    match node.restart_daemon(req.replacement_path.as_deref(), req.delay_ms) {
+        Ok(rep) => Ok(json(
+            200,
+            &tetherly_api::DaemonRestartReport {
+                action: rep.action,
+                old_pid: rep.old_pid,
+                new_pid: rep.new_pid,
+                timestamp_ms: rep.timestamp_ms,
+            },
+        )),
+        Err(e) if e.contains("not found") || e.contains("must be placed inside") => {
+            Err(error(ErrorCode::BadRequest, e))
+        }
+        Err(e) if e.contains("already in progress") => Err(error(ErrorCode::Conflict, e)),
+        Err(e) => Err(error(ErrorCode::Internal, e)),
+    }
 }
 
 // ---- §156b: routes / network handlers ----
@@ -920,7 +1015,7 @@ fn post_route(node: &Node, body: &[u8]) -> Handled {
                 action: rep.action,
             },
         )),
-        Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
+        Err(e) => Err(core_error(e)),
     }
 }
 
@@ -948,8 +1043,7 @@ fn delete_route(node: &Node, query: Option<&str>) -> Handled {
                 action: rep.action,
             },
         )),
-        Err(CoreError::PeerNotFound(msg)) => Err(error(ErrorCode::NotFound, msg)),
-        Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
+        Err(e) => Err(core_error(e)),
     }
 }
 
@@ -1077,14 +1171,14 @@ pub(super) async fn events(
     match sub.replay.take() {
         Some(frames) => {
             for f in frames.iter().filter(|f| wanted(f)) {
-                stream.write_all(f.sse().as_bytes()).await?;
+                write_sse_timeout(stream, f.sse().as_bytes()).await?;
             }
             sent = frames.last().map_or(sent, |f| f.seq.max(sent));
         }
         None => {
             let snapshot = crate::apiv1::model::snapshot(node).await;
             let frame = Frame::new(sub.current, &Event::Snapshot { snapshot });
-            stream.write_all(frame.sse().as_bytes()).await?;
+            write_sse_timeout(stream, frame.sse().as_bytes()).await?;
         }
     }
     stream.flush().await?;
@@ -1106,7 +1200,7 @@ pub(super) async fn events(
                     }
                     sent = f.seq;
                     if wanted(&f) {
-                        stream.write_all(f.sse().as_bytes()).await?;
+                        write_sse_timeout(stream, f.sse().as_bytes()).await?;
                         stream.flush().await?;
                     }
                     // Any forwarded frame proves the subscriber is alive.
@@ -1115,7 +1209,7 @@ pub(super) async fn events(
                 Err(RecvError::Lagged(_)) | Err(RecvError::Closed) => break,
             },
             _ = ping.tick() => {
-                stream.write_all(b": ping\n\n").await?;
+                write_sse_timeout(stream, b": ping\n\n").await?;
                 stream.flush().await?;
                 // §147: the ping IS the silent link's keepalive feed — the
                 // §6.3 contract says "per frame + ping", but this arm never
@@ -1125,4 +1219,96 @@ pub(super) async fn events(
         }
     }
     Ok(())
+}
+
+/// §158: an SSE write that never completes (a wedged peer, not merely a slow
+/// one) would stall this loop forever — the broadcast buffer then lags and
+/// the lagged-client disconnect never fires. Each write gets a generous
+/// budget (several ping periods); on timeout the stream is torn down and the
+/// client reconnects via `Last-Event-ID`.
+async fn write_sse_timeout(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+    tokio::time::timeout(PING.saturating_mul(4), stream.write_all(bytes))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "sse client stopped reading")
+        })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §157: every CoreError a v1 route can surface maps onto the class its
+    /// legacy route used — client faults never come back as 500.
+    #[test]
+    fn core_error_maps_each_variant_to_its_legacy_class() {
+        use tetherly_api::ErrorCode as C;
+        let class = |e: CoreError| core_error(e).code;
+        assert_eq!(
+            class(CoreError::PeerNotFound("x".into())),
+            C::NotFound.http_status()
+        );
+        assert_eq!(class(CoreError::UnknownTransfer), C::NotFound.http_status());
+        assert_eq!(
+            class(CoreError::File("file not found: x".into())),
+            C::NotFound.http_status()
+        );
+        assert_eq!(
+            class(CoreError::UnsafeFileName),
+            C::BadRequest.http_status()
+        );
+        assert_eq!(
+            class(CoreError::OpenRefused("no app".into())),
+            C::BadRequest.http_status()
+        );
+        assert_eq!(class(CoreError::InvalidPin), C::BadRequest.http_status());
+        assert_eq!(
+            class(CoreError::NoConnectedPeer),
+            C::Conflict.http_status(),
+            "caller-state errors are 409, not 500 (legacy said 400)"
+        );
+        assert_eq!(class(CoreError::PingTimeout), C::Conflict.http_status());
+        assert_eq!(
+            class(CoreError::FileTooLarge(9)),
+            C::PayloadTooLarge.http_status()
+        );
+        assert_eq!(class(CoreError::NoConnectedPeer), C::Conflict.http_status());
+        assert_eq!(
+            class(CoreError::File("disk full".into())),
+            C::Internal.http_status(),
+            "genuinely unexpected faults stay 500"
+        );
+        assert_eq!(
+            class(CoreError::Json("bad".into())),
+            C::Internal.http_status()
+        );
+    }
+
+    /// §157: path-item helpers percent-decode their segment, so aliases with
+    /// spaces or UTF-8 are addressable (legacy query-param parity).
+    #[test]
+    fn path_item_helpers_decode_percent_escapes() {
+        assert_eq!(
+            device_item("/api/v1/devices/mac%20book%20pro").as_deref(),
+            Some("mac book pro")
+        );
+        assert_eq!(
+            profile_item("/api/v1/profiles/%E6%9C%BA%E6%88%BF").as_deref(),
+            Some("机房")
+        );
+        assert_eq!(
+            device_item("/api/v1/devices/a/b"),
+            None,
+            "multi-segment stays unrouted"
+        );
+        assert_eq!(
+            inbox_open_action("/api/v1/inbox/re%20port.pdf/open").as_deref(),
+            Some("re port.pdf")
+        );
+        assert_eq!(
+            inbox_item("/api/v1/inbox/"),
+            None,
+            "empty name is not an item"
+        );
+    }
 }

@@ -680,7 +680,9 @@ pub(crate) async fn dial(
 /// `tetherly discover` -- Discover arm of the top-level dispatch.
 pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<()> {
     if rescan {
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/discovery/rescan", b"{}")
+        // §160: rescan posts the v1 discovery action (verb folded into the
+        // method; the rescan report's message carries no information).
+        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/discovery", b"{}")
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -695,7 +697,7 @@ pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<(
             );
         }
     }
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/discovery")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/discovery")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -705,7 +707,7 @@ pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<(
         })?;
     if code != 200 {
         anyhow::bail!(
-            "node returned HTTP {code} on /api/discovery: {}",
+            "node returned HTTP {code} on /api/v1/discovery: {}",
             String::from_utf8_lossy(&resp)
         );
     }
@@ -713,7 +715,7 @@ pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<(
         println!("{}", String::from_utf8_lossy(&resp));
         return Ok(());
     }
-    let rep: tetherly_node::DiscoveryReport = serde_json::from_slice(&resp)?;
+    let rep: tetherly_api::Discovery = serde_json::from_slice(&resp)?;
     println!("Discovered LAN Peers ({}):", rep.count);
     if rep.peers.is_empty() {
         println!("  (no peers discovered on local network)");
@@ -770,11 +772,34 @@ pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16)
         serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))
     }
 
+    let mut iteration = 0u64;
     loop {
-        let system = v1_get(ui_port, "/api/v1/system").await?;
-        let pairing = v1_get(ui_port, "/api/v1/pairing").await?;
-        let devices = v1_get(ui_port, "/api/v1/devices").await?;
-        let transfers = v1_get(ui_port, "/api/v1/transfers").await?;
+        // §158: a monitor loop tolerates transient failures (a daemon
+        // restart, a 5xx blip) — it warns on stderr and keeps polling instead
+        // of dying; only a cold-start miss (first iteration) is fatal so
+        // one-shot `status` without a running node still errors.
+        let first = iteration == 0;
+        let snapshot = async {
+            Ok::<_, anyhow::Error>((
+                v1_get(ui_port, "/api/v1/system").await?,
+                v1_get(ui_port, "/api/v1/pairing").await?,
+                v1_get(ui_port, "/api/v1/devices").await?,
+                v1_get(ui_port, "/api/v1/transfers").await?,
+            ))
+        };
+        let (system, pairing, devices, transfers) = match snapshot.await {
+            Ok(v) => v,
+            Err(e) => {
+                if !watch || first {
+                    return Err(e);
+                }
+                eprintln!("status: {e:#}; retrying in {}s", interval.max(1));
+                iteration += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+                continue;
+            }
+        };
+        iteration += 1;
 
         let peers: Vec<serde_json::Value> = devices
             .as_array()
@@ -829,24 +854,44 @@ pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16)
 
 /// `tetherly sys` -- Sys arm of the top-level dispatch.
 pub(crate) async fn sys(watch: bool, interval: u64, json: bool, ui_port: u16) -> Result<()> {
+    // §158: same tolerance contract as `status --watch` — a monitor loop
+    // survives transient fetch failures; the cold-start miss stays fatal.
+    let mut iteration = 0u64;
     loop {
+        let first = iteration == 0;
         // §146: v1 diagnostics/sys keeps the legacy field names (`node_name`,
         // `device_id`, `process`, `host`, `timestamp_ms`) so both the human
         // printer and `--json` consumers are unchanged.
-        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/diagnostics/sys")
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
-        if code != 200 {
-            anyhow::bail!(
-                "node refused system telemetry query (HTTP {code}): {}",
-                String::from_utf8_lossy(&resp)
-            );
-        }
+        let fetch = async {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/diagnostics/sys")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node refused system telemetry query (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            Ok(resp)
+        };
+        let resp = match fetch.await {
+            Ok(r) => r,
+            Err(e) => {
+                if !watch || first {
+                    return Err(e);
+                }
+                eprintln!("sys: {e:#}; retrying in {}s", interval.max(1));
+                iteration += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+                continue;
+            }
+        };
+        iteration += 1;
         if json {
             println!("{}", String::from_utf8_lossy(&resp).trim());
         } else {
@@ -1089,7 +1134,9 @@ pub(crate) async fn config(
 /// `tetherly dashboard` -- print or open the tokenized dashboard URL. The
 /// token was loaded at CLI startup (env `TETHERLY_API_TOKEN` or the data
 /// dir's `api.token`); without it the plain URL still serves every
-/// read-only view.
+/// read-only view. Note: the printed URL embeds the token in the fragment
+/// (browser-safe — never sent to the server), but printing it DOES put the
+/// token on stdout; prefer `--open` in shared shells.
 pub(crate) fn dashboard(ui_port: u16, open: bool, next: bool) -> Result<()> {
     let token = tetherly_node::api_token();
     if token.is_none() {
@@ -1124,14 +1171,22 @@ pub(crate) fn dashboard(ui_port: u16, open: bool, next: bool) -> Result<()> {
 
 /// `tetherly stop` -- Stop arm of the top-level dispatch.
 pub(crate) async fn stop(ui_port: u16) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/daemon/shutdown", b"")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    // §160: v1 Admin-tier shutdown — requires the daemon token (client
+    // token answers 403), same as the legacy privileged route.
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/system/shutdown",
+        Some(b"{}"),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "node shutdown failed (HTTP {code}): {}",
@@ -1149,19 +1204,27 @@ pub(crate) async fn restart(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let payload = serde_json::json!({
-        "replacement_path": replacement,
-        "delay_ms": delay_ms,
-    });
+    // §160: v1 Admin-tier restart. The legacy `delay_ms: Option<u64>` keeps
+    // its alias folding (delay → delay_ms) at the contract layer.
+    let payload = tetherly_api::DaemonRestartRequest {
+        replacement_path: replacement,
+        delay_ms: Some(delay_ms),
+    };
     let body = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/daemon/restart", &body)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/system/restart",
+        Some(&body),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "node restart failed (HTTP {code}): {}",
@@ -1171,7 +1234,7 @@ pub(crate) async fn restart(
     if json {
         println!("{}", String::from_utf8_lossy(&resp));
     } else {
-        let rep: tetherly_node::DaemonRestartReport = serde_json::from_slice(&resp)?;
+        let rep: tetherly_api::DaemonRestartReport = serde_json::from_slice(&resp)?;
         println!(
             "Node daemon restart initiated: old PID {} -> new PID {} ({})",
             rep.old_pid, rep.new_pid, rep.action

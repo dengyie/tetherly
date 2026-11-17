@@ -245,7 +245,11 @@ edge: string, peer_id: string, peer_edge: string, offset: number, };
 
 export type TopologyUnlinkRequest = { edge: string, };
 
+export type TopologyUnlinkReport = { edge: string, };
+
 export type TopologyConfigPatch = { resistance_px?: number | null, delay_ms?: number | null, corner_lock_size_px?: number | null, wrap_around?: boolean | null, redundancy_band_px?: number | null, slow_dwell_ms?: number | null, fast_push_delta_px?: number | null, entry_return_grace_ms?: number | null, remote_speed_percent?: number | null, width?: number | null, height?: number | null, scale_factor?: number | null, };
+
+export type TopologyConfigReport = { display: DisplayRect, config: CrossingConfig, };
 
 export type TopologyPolicy = { enabled: boolean, allow_inbound_control: boolean, auto_link_paired_peers: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, allowed_types: Array<string>, };
 
@@ -280,6 +284,18 @@ export type OverlayStatus = { enabled: boolean, present: boolean, source: string
 export type Network = { interfaces: Array<IfaceReport>, overlay: OverlayStatus, };
 
 export type NetworkRefreshReport = { ifaces_scanned: number, ifaces_listening: number, overlay_present: boolean, overlay_source: string, overlay_local_ips: Array<string>, overlay_peers_count: number, };
+
+export type DiscoveredPeer = { device_id: string, name: string, addrs: Array<string>, port: number, fp: string | null, caps: Array<string>, is_trusted: boolean, is_online: boolean, last_seen_ms: number, };
+
+export type Discovery = { count: number, peers: Array<DiscoveredPeer>, };
+
+export type DiscoveryRescanReport = { message: string, };
+
+export type DaemonRestartRequest = { replacement_path?: string | null, delay_ms?: number | null, };
+
+export type DaemonRestartReport = { action: string, old_pid: number, new_pid: number, timestamp_ms: number, };
+
+export type DaemonShutdownReport = { status: string, };
 
 export type MessageDirection = "inbound" | "outbound";
 

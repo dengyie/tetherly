@@ -911,4 +911,61 @@ mod commands {
             serde_json::from_value(serde_json::to_value(&refresh).unwrap()).unwrap();
         assert_eq!(back_f, refresh);
     }
+
+    /// §160: discovery + daemon lifecycle round-trips and strictness.
+    #[test]
+    fn discovery_and_daemon_lifecycle_round_trips() {
+        let disc = Discovery {
+            count: 1,
+            peers: vec![DiscoveredPeer {
+                device_id: "tdev_q".into(),
+                name: "laptop".into(),
+                addrs: vec!["192.168.1.9:46100".into()],
+                port: 46100,
+                fp: Some("aabb".into()),
+                caps: vec!["notify".into()],
+                is_trusted: false,
+                is_online: true,
+                last_seen_ms: 42,
+            }],
+        };
+        let v = serde_json::to_value(&disc).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["peers"][0]["is_trusted"], false);
+        let back: Discovery = serde_json::from_value(v).unwrap();
+        assert_eq!(back, disc);
+
+        let rescan = DiscoveryRescanReport {
+            message: "discovery rescan started".into(),
+        };
+        let back_r: DiscoveryRescanReport =
+            serde_json::from_value(serde_json::to_value(&rescan).unwrap()).unwrap();
+        assert_eq!(back_r, rescan);
+
+        // Restart request: sparse (all-default) must parse; unknown fields
+        // must be rejected; delay folds to the contract field.
+        let req: DaemonRestartRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(req.replacement_path, None);
+        assert_eq!(req.delay_ms, None);
+        let req: DaemonRestartRequest = serde_json::from_value(json!({"delay_ms": 500})).unwrap();
+        assert_eq!(req.delay_ms, Some(500));
+        assert!(serde_json::from_value::<DaemonRestartRequest>(json!({"z": 1})).is_err());
+
+        let rep = DaemonRestartReport {
+            action: "replaced_and_restarted".into(),
+            old_pid: 100,
+            new_pid: 200,
+            timestamp_ms: 7,
+        };
+        let back_p: DaemonRestartReport =
+            serde_json::from_value(serde_json::to_value(&rep).unwrap()).unwrap();
+        assert_eq!(back_p, rep);
+
+        let shut = DaemonShutdownReport {
+            status: "shutting_down".into(),
+        };
+        let back_s: DaemonShutdownReport =
+            serde_json::from_value(serde_json::to_value(&shut).unwrap()).unwrap();
+        assert_eq!(back_s, shut);
+    }
 }
