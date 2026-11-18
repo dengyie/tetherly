@@ -624,3 +624,403 @@ direction: string, measured_at_ms: number, tier: string, };
 
 export type RecommendationStatus = { peers: Array<RecommendationSummaryDto>, timestamp_ms: number, };
 
+export type BatteryStateDto = { 
+/**
+ * Battery level percentage: 0..=100.
+ */
+battery_level: number, is_charging: boolean, 
+/**
+ * `PowerSource` lowercase string (`battery`/`ac`/`wireless`/`unknown`).
+ */
+power_source: string, battery_saver: boolean, health_percent?: number, timestamp_ms: number, };
+
+export type BatteryState = { peer?: string, 
+/**
+ * Absent when the target has never broadcast a measurement.
+ */
+state?: BatteryStateDto, };
+
+export type BatteryStatePatch = { battery_level?: number, is_charging?: boolean, power_source?: string, battery_saver?: boolean, health_percent?: number, };
+
+export type BatteryPolicyDto = { low_battery_threshold: number, critical_battery_threshold: number, alert_on_low_battery: boolean, auto_throttle_on_battery_saver: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * Allowed device form factors, as the `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, };
+
+export type BatteryPolicyPatch = { low_battery_threshold?: number, critical_battery_threshold?: number, alert_on_low_battery?: boolean, auto_throttle_on_battery_saver?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type MediaCommandRequest = { peer?: string, 
+/**
+ * `play`/`pause`/`play_pause`/`stop`/`next`/`prev`/`seek`/`volume`/`toggle_mute`.
+ */
+command?: string, volume?: number, 
+/**
+ * Seek offset for `seek` (ms; negative rewinds).
+ */
+offset_ms?: number, target_player?: string, tag?: string, group?: string, device_type?: string, all?: boolean, };
+
+export type MediaCommandReport = { id: string, peer: string, peer_alias?: string, 
+/**
+ * Normalized `MediaCommand` wire string (e.g. `play`, `seek:-30000`).
+ */
+command: string, target_player?: string, timestamp_ms: number, };
+
+export type MediaDispatchItem = { peer: string, peer_alias?: string, command_id?: string, success: boolean, error?: string, };
+
+export type MediaCommandMultiReport = { 
+/**
+ * Selector wire string (e.g. `all`, `tag:kiosk`, `type:phone`).
+ */
+selector: string, command: string, target_count: number, success_count: number, skipped_offline_count: number, failed_count: number, dispatches: Array<MediaDispatchItem>, };
+
+export type MediaStateDto = { player_id: string, 
+/**
+ * `PlaybackState` lowercase string (`stopped`/`playing`/`paused`).
+ */
+state: string, title: string, artist: string, album: string, position_ms: number, duration_ms: number, volume_percent: number, muted: boolean, can_play: boolean, can_pause: boolean, can_go_next: boolean, can_go_previous: boolean, can_seek: boolean, timestamp_ms: number, };
+
+export type MediaState = { peer?: string, 
+/**
+ * Absent when nothing has been broadcast yet.
+ */
+state?: MediaStateDto, };
+
+export type MediaStatePatch = { player_id?: string, 
+/**
+ * `PlaybackState` lowercase string.
+ */
+state?: string, title?: string, artist?: string, album?: string, position_ms?: number, duration_ms?: number, volume_percent?: number, muted?: boolean, can_play?: boolean, can_pause?: boolean, can_go_next?: boolean, can_go_previous?: boolean, can_seek?: boolean, };
+
+export type MediaStateUpdateReport = { state: MediaStateDto, };
+
+export type MediaPolicyDto = { 
+/**
+ * `MediaControlMode` snake_case string (`allow`/`prompt_only`/`disabled`).
+ */
+mode: string, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * Allowed device form factors, as the `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, max_volume_limit: number, allow_seek: boolean, };
+
+export type MediaPolicyPatch = { mode?: string, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, max_volume_limit?: number, allow_seek?: boolean, clear_filters?: boolean, };
+
+export type AncsRule = { app_id: string, url: string, };
+
+export type AncsStatus = { attached: boolean, state: string, peripheral?: string, 
+/**
+ * Next reconnect attempt (absent when not scheduled).
+ */
+retry_at_ms?: number, rules: Array<AncsRule>, allowlist: Array<string>, };
+
+export type AncsConnectReport = { state: string, retry_at_ms?: number, message: string, };
+
+export type AncsDisconnectReport = { state: string, retry_at_ms?: number, message: string, };
+
+export type AncsAllowRequest = { app_id: string, url: string, };
+
+export type AncsRuleReport = { 
+/**
+ * `"add"` or `"remove"`.
+ */
+action: string, rule?: AncsRule, total_rules: number, timestamp_ms: number, };
+
+export type AncsClearRulesReport = { cleared_count: number, total_rules: number, timestamp_ms: number, };
+
+export type AncsRemoveRequest = { app_id?: string, };
+
+export type ActiveInputSessionDto = { session_id: string, peer_id: string, 
+/**
+ * `InputTunnelRole` snake_case string (`controller`/`target`).
+ */
+role: string, requested_edge?: string, entry_x?: number, entry_y?: number, capture_width?: number, capture_height?: number, pre_arm_epoch: number, };
+
+export type InputStatus = { channel_open: boolean, 
+/**
+ * `CursorSeat` snake_case string (`local`/`remote`).
+ */
+seat: string, active_peer?: string, applied: number, dropped: number, rx_buttons: number, rx_wheel: number, rx_keys: number, tx_buttons: number, };
+
+export type InputTraceEntryDto = { ts_ms: number, kind: string, detail: string, };
+
+export type InputTrace = { seat: string, channel_open: boolean, capacity: number, entries: Array<InputTraceEntryDto>, };
+
+export type InputControl = { action: string, seat: string, channel_open: boolean, peer?: string, timestamp_ms: number, };
+
+export type InputTunnelStatus = { active: boolean, session?: ActiveInputSessionDto, policy: InputPolicyDto, accessibility_trusted: boolean, capture_active: boolean, timestamp_ms: number, };
+
+export type InputTunnelDecision = { action: string, session_id?: string, peer_id?: string, 
+/**
+ * `InputTunnelRole` snake_case string.
+ */
+role?: string, message: string, timestamp_ms: number, };
+
+export type InputPolicyDto = { enabled: boolean, allow_inbound_control: boolean, allow_keyboard: boolean, allow_mouse: boolean, hotkey_release_enabled: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, keymap?: string, edge?: string, wheel_speed: number, };
+
+export type InputPolicyPatch = { enabled?: boolean, allow_inbound_control?: boolean, allow_keyboard?: boolean, allow_mouse?: boolean, hotkey_release_enabled?: boolean, idle_timeout_secs?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, keymap?: string, edge?: string, wheel_speed?: number, clear_filters?: boolean, };
+
+export type InputAttachRequest = { peer?: string, edge?: string, x?: number, y?: number, };
+
+export type InputReleaseRequest = { reason?: string, };
+
+export type InputStartRequest = { peer?: string, };
+
+export type HandoffInboxEntryDto = { id: string, from_peer: string, from_alias?: string, url: string, title: string, auto_open_requested: boolean, received_at_ms: number, };
+
+export type HandoffInbox = { count: number, entries: Array<HandoffInboxEntryDto>, };
+
+export type HandoffSendReport = { id: string, peer: string, peer_alias?: string, url: string, title: string, auto_open_requested: boolean, timestamp_ms: number, };
+
+export type HandoffDispatchItem = { peer: string, peer_alias?: string, id?: string, success: boolean, error?: string, };
+
+export type HandoffSendMultiReport = { 
+/**
+ * Selector wire string (e.g. `all`, `tag:kiosk`, `type:phone`).
+ */
+selector: string, url: string, title: string, target_count: number, success_count: number, skipped_offline_count: number, failed_count: number, dispatches: Array<HandoffDispatchItem>, };
+
+export type HandoffInboxActionReport = { 
+/**
+ * `"open"` or `"dismiss"`.
+ */
+action: string, id: string, remaining: number, timestamp_ms: number, };
+
+export type HandoffInboxClearReport = { cleared_count: number, timestamp_ms: number, };
+
+export type HandoffPolicyDto = { 
+/**
+ * Handoff admission action (`HandoffPolicyAction` snake_case string).
+ */
+action: string, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, max_inbox_entries: number, };
+
+export type HandoffPolicyPatch = { action?: string, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, max_inbox_entries?: number, clear_filters?: boolean, };
+
+export type HandoffSendRequest = { peer?: string, url: string, title?: string, auto_open?: boolean, tag?: string, group?: string, device_type?: string, all?: boolean, };
+
+export type HandoffInboxActionRequest = { id?: string, };
+
+export type FocusStateDto = { enabled: boolean, 
+/**
+ * `FocusMode` snake_case string (`dnd`/`work`/`meeting`/`sleep`).
+ */
+mode: string, expires_ms?: number, reason?: string, timestamp_ms: number, };
+
+export type PeerFocusDto = { peer: string, peer_alias?: string, state: FocusStateDto, active: boolean, remaining_secs?: number, };
+
+export type FocusPeers = { count: number, peers: Array<PeerFocusDto>, };
+
+export type FocusState = { state: FocusStateDto, active: boolean, remaining_secs?: number, };
+
+export type FocusSetReport = { enabled: boolean, 
+/**
+ * `FocusMode` snake_case string.
+ */
+mode: string, active: boolean, expires_ms?: number, reason?: string, broadcast_count: number, message: string, };
+
+export type FocusSyncReport = { requested: number, responded: number, peers: Array<PeerFocusDto>, timestamp_ms: number, };
+
+export type FocusPolicyDto = { enabled: boolean, 
+/**
+ * `FocusMode` snake_case string.
+ */
+default_mode: string, mirror_inbound_focus: boolean, allow_emergency_breakthrough: boolean, quiet_hours_enabled: boolean, quiet_hours_start_minute: number, quiet_hours_end_minute: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, };
+
+export type FocusPolicyPatch = { enabled?: boolean, default_mode?: string, mirror_inbound_focus?: boolean, allow_emergency_breakthrough?: boolean, quiet_hours_enabled?: boolean, 
+/**
+ * `HH:MM` shorthand folded into minutes on apply.
+ */
+quiet_hours_start?: string, 
+/**
+ * `HH:MM` shorthand folded into minutes on apply.
+ */
+quiet_hours_end?: string, quiet_hours_start_minute?: number, quiet_hours_end_minute?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type FocusSetRequest = { enabled?: boolean, mode?: string, 
+/**
+ * Duration in minutes (`duration`/`duration_minutes` aliases folded).
+ */
+duration_mins?: number, reason?: string, broadcast?: boolean, };
+
+export type ActiveCameraSessionDto = { session_id: string, peer_id: string, 
+/**
+ * `CameraRole` snake_case string (`viewer`/`lens`).
+ */
+role: string, lens_id: string, width: number, height: number, target_fps: number, current_fps: number, 
+/**
+ * `CameraCodec` snake_case string.
+ */
+codec: string, flashlight_on: boolean, zoom_ratio: number, frames_sent: number, frames_received: number, bytes_transferred: number, started_at_ms: number, last_activity_ms: number, };
+
+export type CameraStatus = { active: boolean, session?: ActiveCameraSessionDto, policy: CameraPolicyDto, timestamp_ms: number, };
+
+export type CameraDecision = { action: string, session_id?: string, peer_id?: string, 
+/**
+ * `CameraRole` snake_case string.
+ */
+role?: string, message: string, timestamp_ms: number, };
+
+export type CameraPolicyDto = { enabled: boolean, allow_inbound_stream: boolean, allow_remote_capture: boolean, max_resolution_width: number, max_resolution_height: number, max_fps: number, enforce_privacy_shutter_indicator: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, };
+
+export type CameraPolicyPatch = { enabled?: boolean, allow_inbound_stream?: boolean, allow_remote_capture?: boolean, max_resolution_width?: number, max_resolution_height?: number, max_fps?: number, enforce_privacy_shutter_indicator?: boolean, idle_timeout_secs?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type CameraAttachRequest = { peer?: string, lens_id?: string, width?: number, height?: number, fps?: number, codec?: string, flashlight?: boolean, zoom?: number, };
+
+export type CameraDetachRequest = { reason?: string, };
+
+export type ActiveMicSessionDto = { session_id: string, peer_id: string, 
+/**
+ * `MicRole` snake_case string (`listener`/`source`).
+ */
+role: string, 
+/**
+ * `MicMode` snake_case string (`stream`/`intercom`).
+ */
+mode: string, mic_id: string, 
+/**
+ * `MicCodec` snake_case string.
+ */
+codec: string, sample_rate: number, channels: number, gain: number, muted: boolean, noise_suppression: boolean, echo_cancellation: boolean, auto_gain: boolean, privacy_indicator_active: boolean, frames_sent: number, frames_received: number, bytes_transferred: number, started_at_ms: number, last_activity_ms: number, };
+
+export type MicStatus = { active: boolean, session?: ActiveMicSessionDto, policy: MicPolicyDto, timestamp_ms: number, };
+
+export type MicDecision = { action: string, session_id?: string, peer_id?: string, 
+/**
+ * `MicRole` snake_case string.
+ */
+role?: string, message: string, timestamp_ms: number, };
+
+export type MicPolicyDto = { enabled: boolean, allow_inbound_stream: boolean, allow_remote_capture: boolean, allow_intercom: boolean, max_sample_rate: number, max_session_duration_secs: number, enforce_privacy_indicator: boolean, default_muted: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, };
+
+export type MicPolicyPatch = { enabled?: boolean, allow_inbound_stream?: boolean, allow_remote_capture?: boolean, allow_intercom?: boolean, max_sample_rate?: number, max_session_duration_secs?: number, enforce_privacy_indicator?: boolean, default_muted?: boolean, idle_timeout_secs?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type MicAttachRequest = { peer?: string, mic_id?: string, mode?: string, codec?: string, sample_rate?: number, channels?: number, gain?: number, muted?: boolean, noise_suppression?: boolean, echo_cancellation?: boolean, auto_gain?: boolean, };
+
+export type MicDetachRequest = { reason?: string, };
+
+export type SpatialPositionDto = { x: number, y: number, z: number, };
+
+export type ActiveAudioSessionDto = { session_id: string, peer_id: string, 
+/**
+ * `AudioRoutingRole` snake_case string (`speaker`/`source`).
+ */
+role: string, 
+/**
+ * `AudioChannelLayout` snake_case string (`mono`/`stereo`).
+ */
+layout: string, sample_rate: number, channels: number, 
+/**
+ * `AudioSampleFormat` snake_case string.
+ */
+format: string, 
+/**
+ * `AudioStreamCodec` snake_case string.
+ */
+codec: string, spatial_pos?: SpatialPositionDto, volume_gain: number, chunks_sent: number, chunks_received: number, bytes_transferred: number, started_at_ms: number, last_activity_ms: number, };
+
+export type AudioStatus = { active: boolean, session?: ActiveAudioSessionDto, policy: AudioPolicyDto, timestamp_ms: number, };
+
+export type AudioDecision = { action: string, session_id?: string, peer_id?: string, 
+/**
+ * `AudioRoutingRole` snake_case string.
+ */
+role?: string, message: string, timestamp_ms: number, };
+
+export type AudioPolicyDto = { enabled: boolean, allow_inbound_sink: boolean, allow_outbound_routing: boolean, max_volume_limit: number, allow_spatial_rendering: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, };
+
+export type AudioPolicyPatch = { enabled?: boolean, allow_inbound_sink?: boolean, allow_outbound_routing?: boolean, max_volume_limit?: number, allow_spatial_rendering?: boolean, idle_timeout_secs?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type AudioAttachRequest = { peer?: string, layout?: string, sample_rate?: number, channels?: number, spatial_x?: number, spatial_y?: number, spatial_z?: number, spatial_position?: SpatialPositionDto, volume_gain?: number, };
+
+export type AudioDetachRequest = { reason?: string, };
+
+export type ActiveLocateRingDto = { request_id: string, initiator_peer: string, initiator_alias: string, duration_secs: number, 
+/**
+ * `LocatePattern` snake_case string (`pulse`/`sos`/`chime`).
+ */
+pattern: string, override_silent: boolean, message?: string, started_at_ms: number, expires_at_ms: number, };
+
+export type LocateStatus = { is_ringing: boolean, active_ring?: ActiveLocateRingDto, policy: LocatePolicyDto, message: string, };
+
+export type LocateRingReport = { request_id: string, target_peer: string, duration_secs: number, 
+/**
+ * `LocatePattern` snake_case string.
+ */
+pattern: string, override_silent: boolean, message: string, };
+
+export type LocateStopReport = { request_id?: string, target_peer?: string, reason: string, message: string, };
+
+export type LocatePolicyDto = { enabled: boolean, allow_override_silent: boolean, max_duration_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, };
+
+export type LocatePolicyPatch = { enabled?: boolean, allow_override_silent?: boolean, max_duration_secs?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type LocateRingRequest = { peer?: string, duration_secs?: number, pattern?: string, override_silent?: boolean, message?: string, };
+
+export type LocateStopRequest = { peer?: string, request_id?: string, reason?: string, };
+
+export type ActiveDisplaySessionDto = { session_id: string, peer_id: string, 
+/**
+ * `VirtualDisplayRole` snake_case string (`viewer`/`host`).
+ */
+role: string, 
+/**
+ * `DisplayEdge` snake_case string.
+ */
+assigned_edge: string, 
+/**
+ * `VirtualDisplayMode` snake_case string.
+ */
+mode: string, 
+/**
+ * `VirtualDisplayCodec` snake_case string.
+ */
+codec: string, target_fps: number, current_fps: number, rtt_us: number, dropped_frames: number, started_at_ms: number, last_activity_ms: number, };
+
+export type DisplayVirtualStatus = { active: boolean, session?: ActiveDisplaySessionDto, policy: DisplayPolicyDto, timestamp_ms: number, };
+
+export type DisplayDecision = { action: string, session_id?: string, peer_id?: string, 
+/**
+ * `VirtualDisplayRole` snake_case string.
+ */
+role?: string, message: string, timestamp_ms: number, };
+
+export type DisplayPolicyDto = { enabled: boolean, allow_hosting: boolean, allow_remote_extend: boolean, max_resolution_width: number, max_resolution_height: number, max_fps: number, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, };
+
+export type DisplayPolicyPatch = { enabled?: boolean, allow_hosting?: boolean, allow_remote_extend?: boolean, max_resolution_width?: number, max_resolution_height?: number, max_fps?: number, idle_timeout_secs?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type DisplayAttachRequest = { peer?: string, edge?: string, width?: number, height?: number, fps?: number, };
+
+export type DisplayDetachRequest = { reason?: string, };
+
