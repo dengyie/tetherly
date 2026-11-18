@@ -9606,3 +9606,13 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **测试**：apiv1 mapper 单测 28 全绿；契约 41 全绿；`TETHERLY_API_BLESS=1` bindings 再生一致。集成测试与全量验证交 CI（phase3 m3_2 / phase5 m6_5 为已知偶发挂）。
 - **门禁**：fmt 两 crate 绿；clippy `-p tetherly-api -p tetherly-node --all-targets` 0 错（修除 9 个 model.rs 未用 request/patch import——请求体解析在 v1.rs，model.rs 只产响应）；`cargo check --lib/--bins` 每域 0 错。
 - **未动**：/legacy/ 别名、SPA legacy 调用路径、SSE watch（M6 批）——screen 域（最大域）与 /legacy/ 删除一并归 §167。
+
+## 168. M5 第十四批（三）：screen 域迁移 v1（契约 + 端点 + CLI）+ /legacy/ 删除
+
+接 §166。M5 最大遗留域一次收敛：102 条去重 legacy 路由 → v1 契约 ×113（56 报告 + 51 patch/request + 6 白板/激光响应）+ v1 端点 ×~150（32 个模式组 GET|PATCH|DELETE + 会话/录制/回放/快照/隐私/水印/标注/白板/激光）+ CLI 调用点 ×151（6 文件），/legacy/ 旧控制台整体删除。契约生成器从 runtime 结构体源码直接提炼（1489 行契约块），杜绝手抄 200 字段聚合体的转录错误。
+
+- **契约层 ×113**（tetherly-api §167 块）：报告 `ok` 信封全折、typed enum 折 serde wire 串（`wire_enum` 泛型 helper——与 legacy HTTP 直出的线上格式逐字节一致）、嵌套展平（ScreenDisplayInfo/ScreenLatencyBreakdown/ScreenTuningDecision/AnnotationItem/Whiteboard* 1:1 镜像，AnnotationKind 保留 `#[serde(tag="type")]` tagged 形态）。patch 族 Deserialize-only + deny_unknown_fields。`loop` 关键字 rename、`pts` 加 `pts_us` alias、annotation `from_str`/`to_str` 补为 canonical 字段（CLI 发送形态）。decl ×113 + bindings 再生（api.ts +112 行，tagged union/tuple/[u8;3] 全部正确降 TypeScript）。契约测试 +1（tile batch/snapshot null/annotation tagged 往返 + patch 严格性）。
+- **v1 端点 ×~150**：模式组统一 `GET 报告 + PATCH 稀疏设置 + DELETE 重置`；mode absent → 返回当前报告（GET-over-POST 幂等语义保留），例外：color/qoe/pir/svc/delta/metric/motion/focus/ltr/tile* 有缺省值总是设置（镜像 legacy），bitrate/fps/scale 缺参 400。枚举解析按 core 各自 lenient 约定（FromStr→400 / from_str_loose→Option / ScreenSvcMode::parse_mode 永不报错）。错误全走 core_error。特殊端点：recording/snapshot `format=bmp` 流二进制 `image/bmp`、snapshot 无帧 503 折为 core_error、whiteboard import 三通道（snapshot|items|file，file 拒绝 `..` 穿越）、watermark host_enforced 403 由 core_error 传导。
+- **CLI 迁移 ×151**（cmd_screen_session/tile/overlay/encoding/quality/replay）：括号配平的迁移器把 `loopback_get/post` 统一改写 `loopback_request`（GET 也带 api_token）；POST→PATCH（模式组）/DELETE（/reset）/POST 原样（start/stop/undo/redo/import/trigger 等）；body 键与契约 canonical 对齐（`zoom_percent`、`loop` rename、`pts_us` alias）。3 处打印机 `ok` 读取中性化（v1 折信封，HTTP 200 即成功）。迁移器 bug 修复记录：GET 路径透传未重写（全局字面量二次替换）+ 变量路径 `&uri` 被字符串拼接破坏（whiteboard undo/redo 误指根路径——已修正）。
+- **/legacy/ 删除**（§167c）：`/legacy` 与 `/legacy/*` 路由 arms、next.rs 的 LEGACY_INDEX embed + get_legacy_entry/get_legacy_asset + 单测、`ui/index.html`（10230 行旧单文件控制台）+ `ui/README.md` 整体删除；集成测试改为断言 404。SPA（client/）已确认零 legacy 调用（仅 /api/v1）。
+- **门禁**：fmt --all --check 绿；clippy api+node --all-targets 0 错 0 警（workspace 级 2 个预存警告除外）；apiv1 28 / 契约 42 / uihttp 79 全绿；bins 0 错。/api/* legacy 路由面（~900 arms + 27 个 api_*.rs）成为不可达死代码，归 §169 统一删除收敛。

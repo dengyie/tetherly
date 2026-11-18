@@ -2120,3 +2120,69 @@ mod commands {
         assert!(serde_json::from_value::<AncsRemoveRequest>(json!({"z": 1})).is_err());
     }
 }
+
+#[test]
+fn screen_domain_reports_round_trip() {
+    use serde_json::json;
+    use tetherly_api::{
+        AnnotationItemDto, AnnotationKindDto, ScreenColorPatch, ScreenSnapshot, ScreenTileBatch,
+        ScreenWatermarkPatch,
+    };
+
+    // Tile batch report: `ok` folded, plain counters survive the round trip.
+    let tb = ScreenTileBatch {
+        enabled: true,
+        target_chunk_bytes: 1200,
+        pacing_interval_us: 200,
+        batches_sent: 9,
+        chunks_sent: 41,
+        avg_chunk_bytes: 1180,
+        pacing_pauses: 2,
+    };
+    let back: ScreenTileBatch = serde_json::from_value(serde_json::to_value(&tb).unwrap()).unwrap();
+    assert_eq!(back, tb);
+
+    // Snapshot: Option fields serialize explicitly (null when None).
+    let sn = ScreenSnapshot {
+        source: "live".into(),
+        frame_seq: 7,
+        pts_us: 123,
+        width: 1920,
+        height: 1080,
+        format: "raw".into(),
+        bytes_len: 4096,
+        privacy_blanked: false,
+        watermarked: true,
+        path: None,
+        data_base64: None,
+    };
+    let v = serde_json::to_value(&sn).unwrap();
+    assert_eq!(v["path"], serde_json::Value::Null);
+    let back: ScreenSnapshot = serde_json::from_value(v).unwrap();
+    assert_eq!(back, sn);
+
+    // Annotation item: tagged kind mirror survives the round trip.
+    let item = AnnotationItemDto {
+        id: 1,
+        author: "alice".into(),
+        kind: AnnotationKindDto::Stroke {
+            points: vec![(1, 2), (3, 4)],
+        },
+        color_rgb: [255, 59, 48],
+        thickness: 3,
+        alpha: 230,
+        ttl_ms: 0,
+        created_at_ms: 42,
+    };
+    let v = serde_json::to_value(&item).unwrap();
+    assert_eq!(v["kind"]["type"], "stroke");
+    let back: AnnotationItemDto = serde_json::from_value(v).unwrap();
+    assert_eq!(back, item);
+
+    // Patches: sparse + strict (unknown fields rejected).
+    let cp: ScreenColorPatch = serde_json::from_value(json!({"mode": "reduced"})).unwrap();
+    assert_eq!(cp.mode.as_deref(), Some("reduced"));
+    assert!(serde_json::from_value::<ScreenColorPatch>(json!({"z": 1})).is_err());
+    let wp: ScreenWatermarkPatch = serde_json::from_value(json!({"opacity": 40})).unwrap();
+    assert_eq!(wp.opacity, Some(40));
+}

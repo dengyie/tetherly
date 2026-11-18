@@ -9,9 +9,25 @@ pub(crate) async fn screen_bitrate(kbps: Option<u32>, json: bool, ui_port: u16) 
         Some(k) => {
             let req = serde_json::json!({ "kbps": k });
             let body = serde_json::to_vec(&req)?;
-            tetherly_node::loopback_post(ui_port, "/api/screen/bitrate", &body).await
+            tetherly_node::loopback_request(
+                ui_port,
+                "PATCH",
+                "/api/v1/screen/bitrate",
+                Some(&body),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
         }
-        None => tetherly_node::loopback_get(ui_port, "/api/screen/bitrate").await,
+        None => {
+            tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/bitrate",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+        }
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -63,9 +79,25 @@ pub(crate) async fn screen_fps(fps: Option<u32>, json: bool, ui_port: u16) -> Re
         Some(f) => {
             let req = serde_json::json!({ "fps": f });
             let body = serde_json::to_vec(&req)?;
-            tetherly_node::loopback_post(ui_port, "/api/screen/fps", &body).await
+            tetherly_node::loopback_request(
+                ui_port,
+                "PATCH",
+                "/api/v1/screen/fps",
+                Some(&body),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
         }
-        None => tetherly_node::loopback_get(ui_port, "/api/screen/fps").await,
+        None => {
+            tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/fps",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+        }
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -120,9 +152,25 @@ pub(crate) async fn screen_scale(scale: Option<u32>, json: bool, ui_port: u16) -
         Some(s) => {
             let req = serde_json::json!({ "scale": s });
             let body = serde_json::to_vec(&req)?;
-            tetherly_node::loopback_post(ui_port, "/api/screen/scale", &body).await
+            tetherly_node::loopback_request(
+                ui_port,
+                "PATCH",
+                "/api/v1/screen/scale",
+                Some(&body),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
         }
-        None => tetherly_node::loopback_get(ui_port, "/api/screen/scale").await,
+        None => {
+            tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/scale",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+        }
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -190,9 +238,23 @@ pub(crate) async fn screen_profile(
             req.insert("max_qp".into(), serde_json::json!(max));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/profile", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/profile",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/profile").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/profile",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -250,9 +312,23 @@ pub(crate) async fn screen_matrix(mode: Option<String>, json: bool, ui_port: u16
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/matrix", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/matrix",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/matrix").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/matrix",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -310,9 +386,23 @@ pub(crate) async fn screen_playout(mode: Option<String>, json: bool, ui_port: u1
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/playout", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/playout",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/playout").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/playout",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -371,9 +461,23 @@ pub(crate) async fn screen_cursor(mode: Option<String>, json: bool, ui_port: u16
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/cursor", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/cursor",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/cursor").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/cursor",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -421,9 +525,23 @@ pub(crate) async fn screen_squelch(mode: Option<String>, json: bool, ui_port: u1
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/squelch", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/squelch",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/squelch").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/squelch",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -476,9 +594,23 @@ pub(crate) async fn screen_fec(mode: Option<String>, json: bool, ui_port: u16) -
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/fec", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/fec",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/fec").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/fec",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -528,9 +660,23 @@ pub(crate) async fn screen_pacer(mode: Option<String>, json: bool, ui_port: u16)
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/pacer", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/pacer",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/pacer").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/pacer",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -572,9 +718,23 @@ pub(crate) async fn screen_trendline(mode: Option<String>, json: bool, ui_port: 
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/trendline", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/trendline",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/trendline").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/trendline",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -624,9 +784,23 @@ pub(crate) async fn screen_harq(mode: Option<String>, json: bool, ui_port: u16) 
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/harq", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/harq",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/harq").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/harq",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -676,9 +850,23 @@ pub(crate) async fn screen_twcc(mode: Option<String>, json: bool, ui_port: u16) 
             req.insert("mode".into(), serde_json::json!(m));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/twcc", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/twcc",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/twcc").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/twcc",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -745,9 +933,23 @@ pub(crate) async fn screen_probe(
             req.insert("trigger".into(), serde_json::json!(true));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/probe", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "POST",
+            "/api/v1/screen/probe",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/probe").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/probe",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(
@@ -826,9 +1028,23 @@ pub(crate) async fn screen_sync(
             req.insert("trigger".into(), serde_json::json!(true));
         }
         let body = serde_json::to_vec(&req)?;
-        tetherly_node::loopback_post(ui_port, "/api/screen/sync", &body).await
+        tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/screen/sync",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     } else {
-        tetherly_node::loopback_get(ui_port, "/api/screen/sync").await
+        tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/screen/sync",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
     }
     .map_err(|e| {
         anyhow::anyhow!(

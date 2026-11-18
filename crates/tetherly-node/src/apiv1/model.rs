@@ -7,32 +7,208 @@ use crate::store::BlockedPeer;
 use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
-    ActionHistory, ActionHistoryEntry, ActionPolicyDto, ActionTriggerReport, ActiveBenchSessionDto,
-    ActiveCameraSessionDto, ActiveInputSessionDto, Activity, ActivityCandidate, ActivityHandoff,
-    ActivityMessage, ActivityReply, AncsAllowRequest, AncsClearRulesReport, AncsConnectReport,
-    AncsDisconnectReport, AncsRule, AncsRuleReport, AncsStatus, AudioDecision, AudioPolicyDto,
-    AudioStatus, AudioTierDto, AuditClearReport, AuditEntryDto, AuditTrail, BatteryPolicyDto,
-    BatteryState, BatteryStateDto, BenchDecision, BenchPolicyDto, BenchReportDto, BenchStatus,
-    CameraDecision, CameraPolicyDto, CameraStatus, CameraTierDto, ChannelTraffic, ClipClearReport,
-    ClipContent, ClipHistory, ClipHistoryEntry, ClipPolicyDto, ClipPollReport, ClipStatus, Device,
-    DisplayDecision, DisplayModeDto, DisplayPolicyDto, DisplayTierDto, DisplayVirtualStatus,
-    FileBatchItem, FileBatchReport, FileDecision, FileDecisionReport, FileDispatchItem,
-    FileDispatchReport, FileOffer, FileOffers, FocusPeers, FocusPolicyDto, FocusSetReport,
-    FocusState, FocusStateDto, FocusSyncReport, HandoffDispatchItem, HandoffInbox,
-    HandoffInboxActionReport, HandoffInboxClearReport, HandoffInboxEntryDto, HandoffPolicyDto,
-    HandoffSendMultiReport, HandoffSendReport, HandoffStatus, HeartbeatConfig, Inbox, InboxFile,
-    Input, InputControl, InputPolicyDto, InputStatus, InputTrace, InputTraceEntryDto,
-    InputTunnelDecision, InputTunnelStatus, Layout, LayoutEdge, LayoutPolicy, LinkPath,
-    LinkQuality, LinkQualityPeer, LocalActionDto, LocalActions, LocalCaps, LocatePolicyDto,
-    LocateRingReport, LocateStatus, LocateStopReport, MediaCommandMultiReport, MediaCommandReport,
-    MediaDispatchItem, MediaPolicyDto, MediaState, MediaStateDto, MediaStateUpdateReport,
-    MessageDirection, MicDecision, MicPolicyDto, MicStatus, MicTierDto, Outbox, OutboxClearReport,
-    OutboxEntryDto, OutboxResendReport, Pairing, PeerCaps, PeerCounts, PeerFocusDto,
-    PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, RecommendationDto, RecommendationStatus,
-    RecommendationSummaryDto, RemoteActionDto, RemoteActions, ResumeMarker, ResumeMarkers,
-    Settings, SettingsGeneral, SettingsTransfer, Snapshot, SpatialPositionDto, Storage,
-    StorageCleanReport, StreamingRecommendationDto, System, TrafficTelemetry, Transfer,
-    TransferDirection, TransferPhase, TransferStats, Transfers, API_VERSION,
+    ActionHistory,
+    ActionHistoryEntry,
+    ActionPolicyDto,
+    ActionTriggerReport,
+    ActiveBenchSessionDto,
+    ActiveCameraSessionDto,
+    ActiveInputSessionDto,
+    Activity,
+    ActivityCandidate,
+    ActivityHandoff,
+    ActivityMessage,
+    ActivityReply,
+    AncsAllowRequest,
+    AncsClearRulesReport,
+    AncsConnectReport,
+    AncsDisconnectReport,
+    AncsRule,
+    AncsRuleReport,
+    AncsStatus,
+    // §167: screen domain contract types.
+    AnnotationItemDto,
+    AnnotationKindDto,
+    AudioDecision,
+    AudioPolicyDto,
+    AudioStatus,
+    AudioTierDto,
+    AuditClearReport,
+    AuditEntryDto,
+    AuditTrail,
+    BatteryPolicyDto,
+    BatteryState,
+    BatteryStateDto,
+    BenchDecision,
+    BenchPolicyDto,
+    BenchReportDto,
+    BenchStatus,
+    CameraDecision,
+    CameraPolicyDto,
+    CameraStatus,
+    CameraTierDto,
+    ChannelTraffic,
+    ClipClearReport,
+    ClipContent,
+    ClipHistory,
+    ClipHistoryEntry,
+    ClipPolicyDto,
+    ClipPollReport,
+    ClipStatus,
+    Device,
+    DisplayDecision,
+    DisplayModeDto,
+    DisplayPolicyDto,
+    DisplayTierDto,
+    DisplayVirtualStatus,
+    FileBatchItem,
+    FileBatchReport,
+    FileDecision,
+    FileDecisionReport,
+    FileDispatchItem,
+    FileDispatchReport,
+    FileOffer,
+    FileOffers,
+    FocusPeers,
+    FocusPolicyDto,
+    FocusSetReport,
+    FocusState,
+    FocusStateDto,
+    FocusSyncReport,
+    HandoffDispatchItem,
+    HandoffInbox,
+    HandoffInboxActionReport,
+    HandoffInboxClearReport,
+    HandoffInboxEntryDto,
+    HandoffPolicyDto,
+    HandoffSendMultiReport,
+    HandoffSendReport,
+    HandoffStatus,
+    HeartbeatConfig,
+    Inbox,
+    InboxFile,
+    Input,
+    InputControl,
+    InputPolicyDto,
+    InputStatus,
+    InputTrace,
+    InputTraceEntryDto,
+    InputTunnelDecision,
+    InputTunnelStatus,
+    LaserPointerDto,
+    Layout,
+    LayoutEdge,
+    LayoutPolicy,
+    LinkPath,
+    LinkQuality,
+    LinkQualityPeer,
+    LocalActionDto,
+    LocalActions,
+    LocalCaps,
+    LocatePolicyDto,
+    LocateRingReport,
+    LocateStatus,
+    LocateStopReport,
+    MediaCommandMultiReport,
+    MediaCommandReport,
+    MediaDispatchItem,
+    MediaPolicyDto,
+    MediaState,
+    MediaStateDto,
+    MediaStateUpdateReport,
+    MessageDirection,
+    MicDecision,
+    MicPolicyDto,
+    MicStatus,
+    MicTierDto,
+    Outbox,
+    OutboxClearReport,
+    OutboxEntryDto,
+    OutboxResendReport,
+    Pairing,
+    PeerCaps,
+    PeerCounts,
+    PeerFocusDto,
+    PeerProfileDto,
+    PeerProfiles,
+    Ports,
+    ProtocolMessages,
+    RecommendationDto,
+    RecommendationStatus,
+    RecommendationSummaryDto,
+    RemoteActionDto,
+    RemoteActions,
+    ResumeMarker,
+    ResumeMarkers,
+    ScreenAnnotations,
+    ScreenBitrate,
+    ScreenColor,
+    ScreenControl,
+    ScreenCursor,
+    ScreenDelta,
+    ScreenDisplayInfoDto,
+    ScreenDisplays,
+    ScreenFec,
+    ScreenFocus,
+    ScreenFps,
+    ScreenHarq,
+    ScreenLatency,
+    ScreenLatencyBreakdownDto,
+    ScreenLtr,
+    ScreenMatrix,
+    ScreenMotion,
+    ScreenPacer,
+    ScreenPir,
+    ScreenPlayback,
+    ScreenPlayout,
+    ScreenPrivacy,
+    ScreenProbe,
+    ScreenProfile,
+    ScreenQoe,
+    ScreenQualityMetric,
+    ScreenRecording,
+    ScreenRecordingReplay,
+    ScreenReplayRecordDto,
+    ScreenRoi,
+    ScreenScale,
+    ScreenSnapshot,
+    ScreenSquelch,
+    ScreenStatus,
+    ScreenSvc,
+    ScreenSync,
+    ScreenTile,
+    ScreenTileBatch,
+    ScreenTileCache,
+    ScreenTileLod,
+    ScreenTileMotion,
+    ScreenTileNack,
+    ScreenTilePalette,
+    ScreenTilePredict,
+    ScreenTilePresent,
+    ScreenTileSaliency,
+    ScreenTrendline,
+    ScreenTuning,
+    ScreenTuningDecisionDto,
+    ScreenTwcc,
+    ScreenWatermark,
+    Settings,
+    SettingsGeneral,
+    SettingsTransfer,
+    Snapshot,
+    SpatialPositionDto,
+    Storage,
+    StorageCleanReport,
+    StreamingRecommendationDto,
+    System,
+    TrafficTelemetry,
+    Transfer,
+    TransferDirection,
+    TransferPhase,
+    TransferStats,
+    Transfers,
+    WhiteboardPolicyDto,
+    WhiteboardSnapshotDto,
+    API_VERSION,
 };
 use tetherly_core::{CoreError, DisplayEdge, PathKind, TrustedPeer};
 
@@ -2679,6 +2855,1084 @@ pub async fn display_detach(
     node.virtual_display_detach(reason)
         .await
         .map(display_decision)
+}
+
+// ---- §167: screen domain ----
+
+/// Serializes a runtime enum to its exact legacy wire string (serde is the
+/// canonical wire form the legacy HTTP layer emitted directly).
+fn wire_enum<T: serde::Serialize>(v: &T) -> String {
+    match serde_json::to_value(v) {
+        Ok(serde_json::Value::String(s)) => s,
+        _ => String::new(),
+    }
+}
+
+pub fn screen_status_of(rep: crate::runtime::ScreenStatusReport) -> ScreenStatus {
+    ScreenStatus {
+        state: rep.state,
+        channel_open: rep.channel_open,
+        allowed: rep.allowed,
+        sent: rep.sent,
+        received: rep.received,
+        dropped: rep.dropped,
+        refused: rep.refused,
+        bytes: rep.bytes,
+        rx_bytes: rep.rx_bytes,
+        p95_frame_interval_us: rep.p95_frame_interval_us,
+        active_peer: rep.active_peer,
+        acked: rep.acked,
+        in_flight: rep.in_flight,
+        rtt_latest_us: rep.rtt_latest_us,
+        rtt_p95_us: rep.rtt_p95_us,
+        is_congested: rep.is_congested,
+        keyframes_requested: rep.keyframes_requested,
+        gaps: rep.gaps,
+        bitrate_bps: rep.bitrate_bps,
+        fps_target: rep.fps_target,
+        scale_pct: rep.scale_pct,
+        profile: rep.profile,
+        qp_min: rep.qp_min,
+        qp_max: rep.qp_max,
+        matrix_mode: rep.matrix_mode,
+        network_health: rep.network_health,
+        playout_mode: rep.playout_mode,
+        playout_delay_ms: rep.playout_delay_ms,
+        playout_jitter_ms: rep.playout_jitter_ms,
+        playout_buffered: rep.playout_buffered,
+        playout_dropped_late: rep.playout_dropped_late,
+        cursor_mode: rep.cursor_mode,
+        cursor_x: rep.cursor_x,
+        cursor_y: rep.cursor_y,
+        cursor_visible: rep.cursor_visible,
+        cursor_shape: rep.cursor_shape,
+        cursor_updates_sent: rep.cursor_updates_sent,
+        cursor_updates_received: rep.cursor_updates_received,
+        squelch_mode: rep.squelch_mode,
+        is_squelched: rep.is_squelched,
+        squelched_frames: rep.squelched_frames,
+        fec_mode: rep.fec_mode,
+        fec_redundancy_pct: rep.fec_redundancy_pct,
+        fec_recovered_shards: rep.fec_recovered_shards,
+        fec_unrecoverable_blocks: rep.fec_unrecoverable_blocks,
+        pacer_mode: rep.pacer_mode,
+        pacer_packets_paced: rep.pacer_packets_paced,
+        pacer_bursts_smoothed: rep.pacer_bursts_smoothed,
+        pacer_avg_delay_us: rep.pacer_avg_delay_us,
+        trendline_mode: rep.trendline_mode,
+        trendline_state: rep.trendline_state,
+        trendline_slope_us: rep.trendline_slope_us,
+        trendline_overuse_count: rep.trendline_overuse_count,
+        harq_mode: rep.harq_mode,
+        harq_nacks_sent: rep.harq_nacks_sent,
+        harq_nacks_received: rep.harq_nacks_received,
+        harq_shards_retransmitted: rep.harq_shards_retransmitted,
+        harq_recovered_frames: rep.harq_recovered_frames,
+        harq_retransmit_timeouts: rep.harq_retransmit_timeouts,
+        harq_buffer_occupancy: rep.harq_buffer_occupancy,
+        twcc_mode: rep.twcc_mode,
+        twcc_feedbacks_sent: rep.twcc_feedbacks_sent,
+        twcc_feedbacks_received: rep.twcc_feedbacks_received,
+        twcc_delivery_rate_bps: rep.twcc_delivery_rate_bps,
+        twcc_delay_gradient_us: rep.twcc_delay_gradient_us,
+        twcc_loss_ratio: rep.twcc_loss_ratio,
+        probe_mode: rep.probe_mode,
+        probe_state: rep.probe_state,
+        probes_triggered: rep.probes_triggered,
+        probes_completed: rep.probes_completed,
+        probes_failed: rep.probes_failed,
+        probe_target_bps: rep.probe_target_bps,
+        probe_measured_bps: rep.probe_measured_bps,
+        sync_mode: rep.sync_mode,
+        sync_beacons_sent: rep.sync_beacons_sent,
+        sync_beacons_received: rep.sync_beacons_received,
+        sync_skew_us: rep.sync_skew_us,
+        sync_clock_drift_ppm: rep.sync_clock_drift_ppm,
+        sync_adjustments_applied: rep.sync_adjustments_applied,
+        in_sync: rep.in_sync,
+        active_display_id: rep.active_display_id,
+        display_count: rep.display_count,
+        display_switches_count: rep.display_switches_count,
+        privacy_enabled: rep.privacy_enabled,
+        privacy_input_locked: rep.privacy_input_locked,
+        privacy_blanking_method: rep.privacy_blanking_method,
+        latency_mode: rep.latency_mode,
+        latency_bottleneck: rep.latency_bottleneck,
+        latency_total_e2e_us: rep.latency_total_e2e_us,
+        latency_p95_e2e_us: rep.latency_p95_e2e_us,
+        latency_frames_profiled: rep.latency_frames_profiled,
+        tuning_mode: rep.tuning_mode,
+        tuning_actions_total: rep.tuning_actions_total,
+        tuning_recoveries: rep.tuning_recoveries,
+        tuning_last_stage: rep.tuning_last_stage,
+        tuning_last_action: rep.tuning_last_action,
+        recording_active: rep.recording_active,
+        peer_recording: rep.peer_recording,
+        recording_frames: rep.recording_frames,
+        playback_active: rep.playback_active,
+        playback_state: rep.playback_state,
+        playback_frame: rep.playback_frame,
+        snapshot_count: rep.snapshot_count,
+        watermark_enabled: rep.watermark_enabled,
+        watermark_enforced: rep.watermark_enforced,
+        watermark_frames: rep.watermark_frames,
+        annotations_count: rep.annotations_count,
+        laser_active: rep.laser_active,
+        annotations_total: rep.annotations_total,
+        laser_updates_total: rep.laser_updates_total,
+        whiteboard_undo_count: rep.whiteboard_undo_count,
+        whiteboard_redo_count: rep.whiteboard_redo_count,
+        whiteboard_read_only: rep.whiteboard_read_only,
+        whiteboard_max_items: rep.whiteboard_max_items,
+        roi_active: rep.roi_active,
+        roi_x: rep.roi_x,
+        roi_y: rep.roi_y,
+        roi_w: rep.roi_w,
+        roi_h: rep.roi_h,
+        roi_zoom_percent: rep.roi_zoom_percent,
+        roi_updates: rep.roi_updates,
+        color_mode: rep.color_mode,
+        color_threshold: rep.color_threshold,
+        color_updates: rep.color_updates,
+        delta_enabled: rep.delta_enabled,
+        delta_keyframe_interval: rep.delta_keyframe_interval,
+        delta_frames_sent: rep.delta_frames_sent,
+        delta_keyframes_sent: rep.delta_keyframes_sent,
+        delta_frames_received: rep.delta_frames_received,
+        delta_keyframes_received: rep.delta_keyframes_received,
+        delta_saved_bytes: rep.delta_saved_bytes,
+        metric_enabled: rep.metric_enabled,
+        metric_sample_interval: rep.metric_sample_interval,
+        metric_evaluated_frames: rep.metric_evaluated_frames,
+        metric_psnr_db: rep.metric_psnr_db,
+        metric_ssim: rep.metric_ssim,
+        metric_quality_warning: rep.metric_quality_warning,
+        qoe_enabled: rep.qoe_enabled,
+        qoe_mode: rep.qoe_mode,
+        qoe_target_psnr_db: rep.qoe_target_psnr_db,
+        qoe_target_ssim_pct: rep.qoe_target_ssim_pct,
+        qoe_actions_total: rep.qoe_actions_total,
+        qoe_last_action: rep.qoe_last_action,
+        pir_enabled: rep.pir_enabled,
+        pir_mode: rep.pir_mode,
+        pir_bands: rep.pir_bands,
+        pir_sweeps_completed: rep.pir_sweeps_completed,
+        pir_slices_sent: rep.pir_slices_sent,
+        ltr_enabled: rep.ltr_enabled,
+        ltr_auto_interval: rep.ltr_auto_interval,
+        ltr_current_seq: rep.ltr_current_seq,
+        ltr_anchors_established: rep.ltr_anchors_established,
+        ltr_recoveries_completed: rep.ltr_recoveries_completed,
+        svc_enabled: rep.svc_enabled,
+        svc_mode: rep.svc_mode,
+        svc_drop_t1: rep.svc_drop_t1,
+        svc_t0_sent: rep.svc_t0_sent,
+        svc_t1_sent: rep.svc_t1_sent,
+        svc_t1_dropped: rep.svc_t1_dropped,
+        motion_enabled: rep.motion_enabled,
+        motion_max_displacement: rep.motion_max_displacement,
+        motion_frames_sent: rep.motion_frames_sent,
+        motion_fallback_frames_sent: rep.motion_fallback_frames_sent,
+        motion_saved_bytes: rep.motion_saved_bytes,
+        tile_enabled: rep.tile_enabled,
+        tile_size: rep.tile_size,
+        tile_frames_sent: rep.tile_frames_sent,
+        dirty_tiles_sent: rep.dirty_tiles_sent,
+        skipped_tiles_count: rep.skipped_tiles_count,
+        tile_saved_bytes: rep.tile_saved_bytes,
+        tile_cache_enabled: rep.tile_cache_enabled,
+        tile_cache_max_entries: rep.tile_cache_max_entries,
+        tile_cache_entries: rep.tile_cache_entries,
+        tile_cache_hits: rep.tile_cache_hits,
+        tile_cache_misses: rep.tile_cache_misses,
+        tile_cache_hit_ratio_pct: rep.tile_cache_hit_ratio_pct,
+        tile_cache_saved_bytes: rep.tile_cache_saved_bytes,
+        focus_enabled: rep.focus_enabled,
+        focus_mode: rep.focus_mode,
+        focus_radius: rep.focus_radius,
+        focus_peripheral_skip_ratio: rep.focus_peripheral_skip_ratio,
+        focus_box_x: rep.focus_box_x,
+        focus_box_y: rep.focus_box_y,
+        focus_box_w: rep.focus_box_w,
+        focus_box_h: rep.focus_box_h,
+        focus_tiles_sent: rep.focus_tiles_sent,
+        peripheral_tiles_sent: rep.peripheral_tiles_sent,
+        peripheral_tiles_skipped: rep.peripheral_tiles_skipped,
+        focus_saved_bandwidth_bytes: rep.focus_saved_bandwidth_bytes,
+        tile_palette_enabled: rep.tile_palette_enabled,
+        tile_palette_max_colors: rep.tile_palette_max_colors,
+        tile_palette_enable_rle: rep.tile_palette_enable_rle,
+        tile_palette_solid_tiles: rep.tile_palette_solid_tiles,
+        tile_palette_bilevel_tiles: rep.tile_palette_bilevel_tiles,
+        tile_palette_palette_tiles: rep.tile_palette_palette_tiles,
+        tile_palette_truecolor_tiles: rep.tile_palette_truecolor_tiles,
+        tile_palette_saved_bytes: rep.tile_palette_saved_bytes,
+        tile_predict_enabled: rep.tile_predict_enabled,
+        tile_predict_filter_mode: rep.tile_predict_filter_mode,
+        tile_predict_enable_rct: rep.tile_predict_enable_rct,
+        tile_predict_tiles_sent: rep.tile_predict_tiles_sent,
+        tile_predict_saved_bytes: rep.tile_predict_saved_bytes,
+        tile_present_enabled: rep.tile_present_enabled,
+        tile_present_vsync_mode: rep.tile_present_vsync_mode,
+        tile_present_double_buffer: rep.tile_present_double_buffer,
+        tile_present_tear_prevention: rep.tile_present_tear_prevention,
+        tile_present_committed_transactions: rep.tile_present_committed_transactions,
+        tile_present_swapped_frames: rep.tile_present_swapped_frames,
+        tile_present_torn_frames_prevented: rep.tile_present_torn_frames_prevented,
+        tile_present_avg_swap_latency_us: rep.tile_present_avg_swap_latency_us,
+        tile_nack_enabled: rep.tile_nack_enabled,
+        tile_nack_timeout_ms: rep.tile_nack_timeout_ms,
+        tile_nack_max_retries: rep.tile_nack_max_retries,
+        tile_nack_requests_sent: rep.tile_nack_requests_sent,
+        tile_nack_tiles_retransmitted: rep.tile_nack_tiles_retransmitted,
+        tile_nack_degraded_commits: rep.tile_nack_degraded_commits,
+        tile_saliency_enabled: rep.tile_saliency_enabled,
+        tile_saliency_high_threshold: rep.tile_saliency_high_threshold,
+        tile_saliency_low_threshold: rep.tile_saliency_low_threshold,
+        tile_saliency_drop_background_on_congestion: rep
+            .tile_saliency_drop_background_on_congestion,
+        tile_saliency_critical_tiles: rep.tile_saliency_critical_tiles,
+        tile_saliency_normal_tiles: rep.tile_saliency_normal_tiles,
+        tile_saliency_background_tiles: rep.tile_saliency_background_tiles,
+        tile_saliency_background_skipped: rep.tile_saliency_background_skipped,
+        tile_lod_enabled: rep.tile_lod_enabled,
+        tile_lod_max_lod: rep.tile_lod_max_lod,
+        tile_lod_auto_lod_on_congestion: rep.tile_lod_auto_lod_on_congestion,
+        tile_lod0_tiles: rep.tile_lod0_tiles,
+        tile_lod1_tiles: rep.tile_lod1_tiles,
+        tile_lod2_tiles: rep.tile_lod2_tiles,
+        tile_lod_bytes_saved: rep.tile_lod_bytes_saved,
+        tile_batch_enabled: rep.tile_batch_enabled,
+        tile_batch_target_chunk_bytes: rep.tile_batch_target_chunk_bytes,
+        tile_batch_pacing_interval_us: rep.tile_batch_pacing_interval_us,
+        tile_batches_sent: rep.tile_batches_sent,
+        tile_chunks_sent: rep.tile_chunks_sent,
+        tile_batch_avg_chunk_bytes: rep.tile_batch_avg_chunk_bytes,
+        tile_batch_pacing_pauses: rep.tile_batch_pacing_pauses,
+        tile_motion_enabled: rep.tile_motion_enabled,
+        tile_motion_max_displacement: rep.tile_motion_max_displacement,
+        tile_motion_min_match_ratio: rep.tile_motion_min_match_ratio,
+        tile_motion_tiles_sent: rep.tile_motion_tiles_sent,
+        tile_motion_fallback_tiles_sent: rep.tile_motion_fallback_tiles_sent,
+        tile_motion_bytes_saved: rep.tile_motion_bytes_saved,
+    }
+}
+
+pub fn screen_control_of(rep: crate::runtime::ScreenControlReport) -> ScreenControl {
+    ScreenControl {
+        action: rep.action,
+        state: rep.state,
+        allowed: rep.allowed,
+        peer: rep.peer,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_displays_of(rep: tetherly_core::screen::ScreenDisplayReport) -> ScreenDisplays {
+    ScreenDisplays {
+        active_display_id: rep.active_display_id,
+        displays: rep
+            .displays
+            .into_iter()
+            .map(screen_display_info_dto_of)
+            .collect(),
+        switches_count: rep.switches_count,
+        last_switch_us: rep.last_switch_us,
+    }
+}
+
+pub fn screen_display_info_dto_of(
+    rep: tetherly_core::screen::ScreenDisplayInfo,
+) -> ScreenDisplayInfoDto {
+    ScreenDisplayInfoDto {
+        display_id: rep.display_id,
+        title: rep.title,
+        width: rep.width,
+        height: rep.height,
+        scale_factor_pct: rep.scale_factor_pct,
+        is_primary: rep.is_primary,
+        is_virtual: rep.is_virtual,
+    }
+}
+
+pub fn screen_privacy_of(rep: tetherly_core::screen::ScreenPrivacyReport) -> ScreenPrivacy {
+    ScreenPrivacy {
+        enabled: rep.enabled,
+        lock_input: rep.lock_input,
+        blanking_method: rep.blanking_method,
+        last_change_us: rep.last_change_us,
+    }
+}
+
+pub fn screen_recording_of(rep: crate::runtime::ScreenRecordingReport) -> ScreenRecording {
+    ScreenRecording {
+        active: rep.active,
+        path: rep.path,
+        frames_recorded: rep.frames_recorded,
+        bytes_recorded: rep.bytes_recorded,
+        started_at_us: rep.started_at_us,
+        duration_us: rep.duration_us,
+        last_frame_seq: rep.last_frame_seq,
+        peer_recording: rep.peer_recording,
+        width: rep.width,
+        height: rep.height,
+    }
+}
+
+pub fn screen_recording_replay_of(
+    rep: crate::runtime::ScreenRecordingReplayReport,
+) -> ScreenRecordingReplay {
+    ScreenRecordingReplay {
+        path: rep.path,
+        width: rep.width,
+        height: rep.height,
+        format_tag: rep.format_tag,
+        codec_tag: rep.codec_tag,
+        started_at_us: rep.started_at_us,
+        records: rep
+            .records
+            .into_iter()
+            .map(screen_replay_record_dto_of)
+            .collect(),
+        records_returned: rep.records_returned,
+        truncated: rep.truncated,
+    }
+}
+
+pub fn screen_replay_record_dto_of(
+    rep: crate::runtime::ScreenRecordingReplayRecord,
+) -> ScreenReplayRecordDto {
+    ScreenReplayRecordDto {
+        seq: rep.seq,
+        pts_us: rep.pts_us,
+        len: rep.len,
+    }
+}
+
+pub fn screen_playback_of(rep: tetherly_core::screen::ScreenPlaybackReport) -> ScreenPlayback {
+    ScreenPlayback {
+        state: rep.state,
+        path: rep.path,
+        speed: rep.speed,
+        loop_enabled: rep.loop_enabled,
+        current_frame: rep.current_frame,
+        total_frames: rep.total_frames,
+        elapsed_ms: rep.elapsed_ms,
+        duration_ms: rep.duration_ms,
+        width: rep.width,
+        height: rep.height,
+        format: rep.format,
+        codec: rep.codec,
+    }
+}
+
+pub fn screen_snapshot_of(rep: tetherly_core::screen::ScreenSnapshotReport) -> ScreenSnapshot {
+    ScreenSnapshot {
+        source: rep.source,
+        frame_seq: rep.frame_seq,
+        pts_us: rep.pts_us,
+        width: rep.width,
+        height: rep.height,
+        format: rep.format,
+        bytes_len: rep.bytes_len,
+        privacy_blanked: rep.privacy_blanked,
+        watermarked: rep.watermarked,
+        path: rep.path,
+        data_base64: rep.data_base64,
+    }
+}
+
+pub fn screen_pir_of(rep: tetherly_core::screen::ScreenPirReport) -> ScreenPir {
+    ScreenPir {
+        mode: rep.mode,
+        bands: rep.bands,
+        sweeps_completed: rep.sweeps_completed,
+        slices_sent: rep.slices_sent,
+        current_band: rep.current_band,
+        active_sweep: rep.active_sweep,
+    }
+}
+
+pub fn screen_ltr_of(rep: tetherly_core::screen::ScreenLtrReport) -> ScreenLtr {
+    ScreenLtr {
+        enabled: rep.enabled,
+        auto_interval: rep.auto_interval,
+        current_ltr_seq: rep.current_ltr_seq,
+        anchors_established: rep.anchors_established,
+        recoveries_requested: rep.recoveries_requested,
+        recoveries_completed: rep.recoveries_completed,
+        saved_burst_bytes: rep.saved_burst_bytes,
+    }
+}
+
+pub fn screen_svc_of(rep: tetherly_core::screen::ScreenSvcReport) -> ScreenSvc {
+    ScreenSvc {
+        enabled: rep.enabled,
+        mode: rep.mode,
+        drop_t1: rep.drop_t1,
+        t0_frames_sent: rep.t0_frames_sent,
+        t1_frames_sent: rep.t1_frames_sent,
+        t1_frames_dropped: rep.t1_frames_dropped,
+        saved_bandwidth_bytes: rep.saved_bandwidth_bytes,
+    }
+}
+
+pub fn screen_cursor_of(rep: crate::runtime::ScreenCursorReport) -> ScreenCursor {
+    ScreenCursor {
+        mode: rep.mode,
+        x: rep.x,
+        y: rep.y,
+        visible: rep.visible,
+        shape: rep.shape,
+        updates_sent: rep.updates_sent,
+        updates_received: rep.updates_received,
+        updates_dropped_dedup: rep.updates_dropped_dedup,
+        updates_dropped_rate: rep.updates_dropped_rate,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_trendline_of(rep: tetherly_core::screen::ScreenTrendlineReport) -> ScreenTrendline {
+    ScreenTrendline {
+        mode: wire_enum(&rep.mode),
+        state: wire_enum(&rep.state),
+        samples_count: rep.samples_count,
+        current_slope_us_per_frame: rep.current_slope_us_per_frame,
+        threshold_us_per_frame: rep.threshold_us_per_frame,
+        overuse_count: rep.overuse_count,
+        underuse_count: rep.underuse_count,
+        accumulated_delay_us: rep.accumulated_delay_us,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_probe_of(rep: tetherly_core::screen::ScreenProbeReport) -> ScreenProbe {
+    ScreenProbe {
+        mode: wire_enum(&rep.mode),
+        state: wire_enum(&rep.state),
+        probes_triggered: rep.probes_triggered,
+        probes_completed: rep.probes_completed,
+        probes_failed: rep.probes_failed,
+        last_target_bps: rep.last_target_bps,
+        last_measured_bps: rep.last_measured_bps,
+        last_rtt_us: rep.last_rtt_us,
+        last_loss_ratio: rep.last_loss_ratio,
+        last_delay_gradient_us: rep.last_delay_gradient_us,
+        active_cluster_id: rep.active_cluster_id,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_squelch_of(rep: crate::runtime::ScreenSquelchReport) -> ScreenSquelch {
+    ScreenSquelch {
+        mode: rep.mode,
+        is_squelched: rep.is_squelched,
+        frames_evaluated: rep.frames_evaluated,
+        frames_passed: rep.frames_passed,
+        frames_squelched: rep.frames_squelched,
+        keepalive_frames: rep.keepalive_frames,
+        last_dirty_ratio: rep.last_dirty_ratio,
+        consecutive_static_frames: rep.consecutive_static_frames,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_fec_of(rep: tetherly_core::screen::ScreenFecReport) -> ScreenFec {
+    ScreenFec {
+        mode: wire_enum(&rep.mode),
+        redundancy_pct: rep.redundancy_pct,
+        blocks_encoded: rep.blocks_encoded,
+        data_shards_sent: rep.data_shards_sent,
+        parity_shards_sent: rep.parity_shards_sent,
+        blocks_decoded: rep.blocks_decoded,
+        recovered_shards: rep.recovered_shards,
+        unrecoverable_blocks: rep.unrecoverable_blocks,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_pacer_of(rep: tetherly_core::screen::ScreenPacerReport) -> ScreenPacer {
+    ScreenPacer {
+        mode: wire_enum(&rep.mode),
+        packets_paced: rep.packets_paced,
+        bursts_smoothed: rep.bursts_smoothed,
+        avg_delay_us: rep.avg_delay_us,
+        last_delay_us: rep.last_delay_us,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_harq_of(rep: tetherly_core::screen::ScreenHarqReport) -> ScreenHarq {
+    ScreenHarq {
+        mode: wire_enum(&rep.mode),
+        nacks_sent: rep.nacks_sent,
+        nacks_received: rep.nacks_received,
+        shards_retransmitted: rep.shards_retransmitted,
+        recovered_frames: rep.recovered_frames,
+        retransmit_timeouts: rep.retransmit_timeouts,
+        buffer_occupancy: rep.buffer_occupancy,
+        buffer_capacity: rep.buffer_capacity,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_twcc_of(rep: tetherly_core::screen::ScreenTwccReport) -> ScreenTwcc {
+    ScreenTwcc {
+        mode: wire_enum(&rep.mode),
+        feedbacks_sent: rep.feedbacks_sent,
+        feedbacks_received: rep.feedbacks_received,
+        packets_tracked: rep.packets_tracked,
+        packets_acknowledged: rep.packets_acknowledged,
+        packets_lost: rep.packets_lost,
+        loss_ratio: rep.loss_ratio,
+        delivery_rate_bps: rep.delivery_rate_bps,
+        delay_gradient_us: rep.delay_gradient_us,
+        smoothed_rtt_us: rep.smoothed_rtt_us,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_sync_of(rep: tetherly_core::screen::ScreenAudioSyncReport) -> ScreenSync {
+    ScreenSync {
+        mode: wire_enum(&rep.mode),
+        beacons_sent: rep.beacons_sent,
+        beacons_received: rep.beacons_received,
+        current_skew_us: rep.current_skew_us,
+        clock_drift_ppm: rep.clock_drift_ppm,
+        adjustments_applied: rep.adjustments_applied,
+        in_sync: rep.in_sync,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_latency_of(rep: tetherly_core::screen::ScreenLatencyReport) -> ScreenLatency {
+    ScreenLatency {
+        mode: rep.mode,
+        frames_profiled: rep.frames_profiled,
+        bottleneck: rep.bottleneck,
+        current: screen_latency_breakdown_dto_of(rep.current),
+        avg_e2e_us: rep.avg_e2e_us,
+        p50_e2e_us: rep.p50_e2e_us,
+        p90_e2e_us: rep.p90_e2e_us,
+        p95_e2e_us: rep.p95_e2e_us,
+        p99_e2e_us: rep.p99_e2e_us,
+        min_e2e_us: rep.min_e2e_us,
+        max_e2e_us: rep.max_e2e_us,
+        avg_capture_us: rep.avg_capture_us,
+        avg_encode_us: rep.avg_encode_us,
+        avg_pacer_us: rep.avg_pacer_us,
+        avg_network_us: rep.avg_network_us,
+        avg_jitter_us: rep.avg_jitter_us,
+        avg_decode_us: rep.avg_decode_us,
+        avg_render_us: rep.avg_render_us,
+    }
+}
+
+pub fn screen_latency_breakdown_dto_of(
+    rep: tetherly_core::screen::ScreenLatencyBreakdown,
+) -> ScreenLatencyBreakdownDto {
+    ScreenLatencyBreakdownDto {
+        frame_seq: rep.frame_seq,
+        capture_us: rep.capture_us,
+        encode_us: rep.encode_us,
+        pacer_us: rep.pacer_us,
+        network_us: rep.network_us,
+        jitter_us: rep.jitter_us,
+        decode_us: rep.decode_us,
+        render_us: rep.render_us,
+        total_e2e_us: rep.total_e2e_us,
+    }
+}
+
+pub fn screen_tuning_of(rep: tetherly_core::screen::ScreenTuningReport) -> ScreenTuning {
+    ScreenTuning {
+        mode: rep.mode,
+        actions_applied: rep.actions_applied,
+        recoveries_applied: rep.recoveries_applied,
+        last_stage: rep.last_stage,
+        last_action: rep.last_action,
+        bottleneck_streak: rep.bottleneck_streak,
+        balanced_streak: rep.balanced_streak,
+        last_decision: rep.last_decision.map(screen_tuning_decision_dto_of),
+    }
+}
+
+pub fn screen_tuning_decision_dto_of(
+    rep: tetherly_core::screen::ScreenTuningDecision,
+) -> ScreenTuningDecisionDto {
+    ScreenTuningDecisionDto {
+        frame_seq: rep.frame_seq,
+        stage: rep.stage,
+        action: rep.action,
+        new_bitrate_bps: rep.new_bitrate_bps,
+        new_fps: rep.new_fps,
+        new_scale_pct: rep.new_scale_pct,
+        new_qp_max: rep.new_qp_max,
+        new_playout_delay_us: rep.new_playout_delay_us,
+        recovered: rep.recovered,
+        at_us: rep.at_us,
+    }
+}
+
+pub fn screen_playout_of(rep: crate::runtime::ScreenPlayoutReport) -> ScreenPlayout {
+    ScreenPlayout {
+        mode: rep.mode,
+        target_delay_ms: rep.target_delay_ms,
+        current_jitter_ms: rep.current_jitter_ms,
+        target_delay_us: rep.target_delay_us,
+        current_jitter_us: rep.current_jitter_us,
+        buffered_frames: rep.buffered_frames,
+        played_frames: rep.played_frames,
+        dropped_late_frames: rep.dropped_late_frames,
+        dropped_overflow_frames: rep.dropped_overflow_frames,
+        custom_delay_us: rep.custom_delay_us,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_matrix_of(rep: crate::runtime::ScreenMatrixReport) -> ScreenMatrix {
+    ScreenMatrix {
+        mode: rep.mode,
+        health: rep.health,
+        bitrate_bps: rep.bitrate_bps,
+        fps_target: rep.fps_target,
+        scale_pct: rep.scale_pct,
+        profile: rep.profile,
+        qp_min: rep.qp_min,
+        qp_max: rep.qp_max,
+        auto_fps: rep.auto_fps,
+        auto_scale: rep.auto_scale,
+        consecutive_healthy_acks: rep.consecutive_healthy_acks,
+        consecutive_drops: rep.consecutive_drops,
+        in_flight: rep.in_flight,
+        rtt_us: rep.rtt_us,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_profile_of(rep: crate::runtime::ScreenProfileReport) -> ScreenProfile {
+    ScreenProfile {
+        profile: wire_enum(&rep.profile),
+        min_qp: rep.min_qp,
+        max_qp: rep.max_qp,
+        is_custom_qp: rep.is_custom_qp,
+        auto_profile: rep.auto_profile,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_scale_of(rep: crate::runtime::ScreenScaleReport) -> ScreenScale {
+    ScreenScale {
+        scale_pct: rep.scale_pct,
+        min_scale_pct: rep.min_scale_pct,
+        max_scale_pct: rep.max_scale_pct,
+        auto_profile: rep.auto_profile,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_fps_of(rep: crate::runtime::ScreenFpsReport) -> ScreenFps {
+    ScreenFps {
+        fps: rep.fps,
+        min_fps: rep.min_fps,
+        max_fps: rep.max_fps,
+        interval_us: rep.interval_us,
+        auto_profile: rep.auto_profile,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_bitrate_of(rep: crate::runtime::ScreenBitrateReport) -> ScreenBitrate {
+    ScreenBitrate {
+        bitrate_bps: rep.bitrate_bps,
+        bitrate_kbps: rep.bitrate_kbps,
+        min_bps: rep.min_bps,
+        max_bps: rep.max_bps,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn screen_color_of(rep: tetherly_core::screen::ScreenColorReport) -> ScreenColor {
+    ScreenColor {
+        mode: wire_enum(&rep.mode),
+        threshold: rep.threshold,
+        is_active: rep.is_active,
+        update_count: rep.update_count,
+    }
+}
+
+pub fn screen_delta_of(rep: tetherly_core::screen::ScreenDeltaReport) -> ScreenDelta {
+    ScreenDelta {
+        enabled: rep.enabled,
+        keyframe_interval: rep.keyframe_interval,
+        delta_frames_sent: rep.delta_frames_sent,
+        keyframes_sent: rep.keyframes_sent,
+        delta_frames_received: rep.delta_frames_received,
+        keyframes_received: rep.keyframes_received,
+        saved_bytes: rep.saved_bytes,
+    }
+}
+
+pub fn screen_quality_metric_of(
+    rep: tetherly_core::screen::ScreenQualityMetricReport,
+) -> ScreenQualityMetric {
+    ScreenQualityMetric {
+        enabled: rep.enabled,
+        sample_interval: rep.sample_interval,
+        evaluated_frames: rep.evaluated_frames,
+        avg_mse: rep.avg_mse,
+        avg_psnr_db: rep.avg_psnr_db,
+        avg_ssim: rep.avg_ssim,
+        last_psnr_db: rep.last_psnr_db,
+        last_ssim: rep.last_ssim,
+        quality_warning: rep.quality_warning,
+    }
+}
+
+pub fn screen_qoe_of(rep: tetherly_core::screen::ScreenQoeReport) -> ScreenQoe {
+    ScreenQoe {
+        mode: rep.mode,
+        target_psnr_db: rep.target_psnr_db,
+        target_ssim_pct: rep.target_ssim_pct,
+        actions_total: rep.actions_total,
+        last_action: rep.last_action,
+        last_action_reason: rep.last_action_reason,
+        in_cooldown: rep.in_cooldown,
+        active_boosts: rep.active_boosts,
+    }
+}
+
+pub fn screen_motion_of(rep: tetherly_core::screen::ScreenMotionReport) -> ScreenMotion {
+    ScreenMotion {
+        enabled: rep.enabled,
+        max_displacement: rep.max_displacement,
+        motion_frames_sent: rep.motion_frames_sent,
+        fallback_frames_sent: rep.fallback_frames_sent,
+        saved_bandwidth_bytes: rep.saved_bandwidth_bytes,
+    }
+}
+
+pub fn screen_roi_of(rep: tetherly_core::screen::ScreenRoiReport) -> ScreenRoi {
+    ScreenRoi {
+        active: rep.active,
+        x: rep.x,
+        y: rep.y,
+        w: rep.w,
+        h: rep.h,
+        zoom_percent: rep.zoom_percent,
+        source_w: rep.source_w,
+        source_h: rep.source_h,
+        effective_w: rep.effective_w,
+        effective_h: rep.effective_h,
+        update_count: rep.update_count,
+    }
+}
+
+pub fn screen_watermark_of(rep: tetherly_core::screen::ScreenWatermarkReport) -> ScreenWatermark {
+    ScreenWatermark {
+        enabled: rep.enabled,
+        host_enforced: rep.host_enforced,
+        text_template: rep.text_template,
+        rendered_text: rep.rendered_text,
+        opacity: rep.opacity,
+        opacity_pct: rep.opacity_pct,
+        color_rgb: rep.color_rgb,
+        color_hex: rep.color_hex,
+        scale: rep.scale,
+        pattern: rep.pattern,
+        spacing_x: rep.spacing_x,
+        spacing_y: rep.spacing_y,
+        frames_watermarked: rep.frames_watermarked,
+    }
+}
+
+pub fn screen_annotations_of(
+    rep: tetherly_core::screen::ScreenAnnotationReport,
+) -> ScreenAnnotations {
+    ScreenAnnotations {
+        annotations_count: rep.annotations_count,
+        annotations: rep
+            .annotations
+            .into_iter()
+            .map(annotation_item_dto)
+            .collect(),
+        laser_active: rep.laser_active,
+        laser: rep.laser.map(laser_pointer_dto_of),
+        total_annotations_added: rep.total_annotations_added,
+        laser_updates_total: rep.laser_updates_total,
+        timestamp_ms: rep.timestamp_ms,
+        whiteboard_policy: whiteboard_policy_dto_of(rep.whiteboard_policy),
+        redo_count: rep.redo_count,
+    }
+}
+
+pub fn laser_pointer_dto_of(rep: tetherly_core::screen::LaserPointerState) -> LaserPointerDto {
+    LaserPointerDto {
+        x: rep.x,
+        y: rep.y,
+        active: rep.active,
+        color_rgb: rep.color_rgb,
+        radius: rep.radius,
+    }
+}
+
+pub fn whiteboard_policy_dto_of(
+    rep: tetherly_core::screen::WhiteboardPolicy,
+) -> WhiteboardPolicyDto {
+    WhiteboardPolicyDto {
+        read_only: rep.read_only,
+        allow_peer_clear: rep.allow_peer_clear,
+        max_items: rep.max_items,
+    }
+}
+
+pub fn whiteboard_snapshot_dto_of(
+    rep: tetherly_core::screen::WhiteboardSnapshot,
+) -> WhiteboardSnapshotDto {
+    WhiteboardSnapshotDto {
+        version: rep.version,
+        created_at_ms: rep.created_at_ms,
+        session_id: rep.session_id,
+        active_items: rep
+            .active_items
+            .into_iter()
+            .map(annotation_item_dto)
+            .collect(),
+        total_added_counter: rep.total_added_counter,
+    }
+}
+
+pub fn screen_tile_of(rep: tetherly_core::screen::ScreenTileReport) -> ScreenTile {
+    ScreenTile {
+        enabled: rep.enabled,
+        tile_size: rep.tile_size,
+        grid_frames_sent: rep.grid_frames_sent,
+        dirty_tiles_sent: rep.dirty_tiles_sent,
+        skipped_tiles_count: rep.skipped_tiles_count,
+        saved_bandwidth_bytes: rep.saved_bandwidth_bytes,
+    }
+}
+
+pub fn screen_tile_cache_of(rep: tetherly_core::screen::ScreenTileCacheReport) -> ScreenTileCache {
+    ScreenTileCache {
+        enabled: rep.enabled,
+        max_entries: rep.max_entries,
+        current_entries: rep.current_entries,
+        cache_hits: rep.cache_hits,
+        cache_misses: rep.cache_misses,
+        hit_ratio_pct: rep.hit_ratio_pct,
+        saved_bandwidth_bytes: rep.saved_bandwidth_bytes,
+    }
+}
+
+pub fn screen_focus_of(rep: tetherly_core::screen::ScreenFocusReport) -> ScreenFocus {
+    ScreenFocus {
+        enabled: rep.enabled,
+        mode: wire_enum(&rep.mode),
+        radius: rep.radius,
+        peripheral_skip_ratio: rep.peripheral_skip_ratio,
+        box_x: rep.box_x,
+        box_y: rep.box_y,
+        box_w: rep.box_w,
+        box_h: rep.box_h,
+        focus_tiles_sent: rep.focus_tiles_sent,
+        peripheral_tiles_sent: rep.peripheral_tiles_sent,
+        peripheral_tiles_skipped: rep.peripheral_tiles_skipped,
+        saved_bandwidth_bytes: rep.saved_bandwidth_bytes,
+    }
+}
+
+pub fn screen_tile_palette_of(
+    rep: tetherly_core::screen::ScreenTilePaletteReport,
+) -> ScreenTilePalette {
+    ScreenTilePalette {
+        enabled: rep.enabled,
+        max_colors: rep.max_colors,
+        enable_rle: rep.enable_rle,
+        solid_tiles_count: rep.solid_tiles_count,
+        bilevel_tiles_count: rep.bilevel_tiles_count,
+        palette_tiles_count: rep.palette_tiles_count,
+        truecolor_tiles_count: rep.truecolor_tiles_count,
+        saved_bandwidth_bytes: rep.saved_bandwidth_bytes,
+    }
+}
+
+pub fn screen_tile_predict_of(
+    rep: tetherly_core::screen::ScreenTilePredictReport,
+) -> ScreenTilePredict {
+    ScreenTilePredict {
+        enabled: rep.enabled,
+        filter_mode: wire_enum(&rep.filter_mode),
+        enable_rct: rep.enable_rct,
+        predict_tiles_count: rep.predict_tiles_count,
+        saved_bandwidth_bytes: rep.saved_bandwidth_bytes,
+    }
+}
+
+pub fn screen_tile_present_of(
+    rep: tetherly_core::screen::ScreenTilePresentReport,
+) -> ScreenTilePresent {
+    ScreenTilePresent {
+        enabled: rep.enabled,
+        vsync_mode: rep.vsync_mode,
+        double_buffer: rep.double_buffer,
+        tear_prevention: rep.tear_prevention,
+        committed_transactions: rep.committed_transactions,
+        swapped_frames: rep.swapped_frames,
+        torn_frames_prevented: rep.torn_frames_prevented,
+        avg_swap_latency_us: rep.avg_swap_latency_us,
+    }
+}
+
+pub fn screen_tile_nack_of(rep: tetherly_core::screen::ScreenTileNackReport) -> ScreenTileNack {
+    ScreenTileNack {
+        enabled: rep.enabled,
+        timeout_ms: rep.timeout_ms,
+        max_retries: rep.max_retries,
+        nack_requests_sent: rep.nack_requests_sent,
+        tiles_retransmitted: rep.tiles_retransmitted,
+        degraded_commits: rep.degraded_commits,
+    }
+}
+
+pub fn screen_tile_saliency_of(
+    rep: tetherly_core::screen::ScreenTileSaliencyReport,
+) -> ScreenTileSaliency {
+    ScreenTileSaliency {
+        enabled: rep.enabled,
+        high_threshold: rep.high_threshold,
+        low_threshold: rep.low_threshold,
+        drop_background_on_congestion: rep.drop_background_on_congestion,
+        critical_tiles_sent: rep.critical_tiles_sent,
+        normal_tiles_sent: rep.normal_tiles_sent,
+        background_tiles_sent: rep.background_tiles_sent,
+        background_tiles_skipped: rep.background_tiles_skipped,
+    }
+}
+
+pub fn screen_tile_lod_of(rep: tetherly_core::screen::ScreenTileLodReport) -> ScreenTileLod {
+    ScreenTileLod {
+        enabled: rep.enabled,
+        max_lod: rep.max_lod,
+        auto_lod_on_congestion: rep.auto_lod_on_congestion,
+        lod0_tiles_sent: rep.lod0_tiles_sent,
+        lod1_tiles_sent: rep.lod1_tiles_sent,
+        lod2_tiles_sent: rep.lod2_tiles_sent,
+        bytes_saved: rep.bytes_saved,
+    }
+}
+
+pub fn screen_tile_batch_of(rep: tetherly_core::screen::ScreenTileBatchReport) -> ScreenTileBatch {
+    ScreenTileBatch {
+        enabled: rep.enabled,
+        target_chunk_bytes: rep.target_chunk_bytes,
+        pacing_interval_us: rep.pacing_interval_us,
+        batches_sent: rep.batches_sent,
+        chunks_sent: rep.chunks_sent,
+        avg_chunk_bytes: rep.avg_chunk_bytes,
+        pacing_pauses: rep.pacing_pauses,
+    }
+}
+
+pub fn screen_tile_motion_of(
+    rep: tetherly_core::screen::ScreenTileMotionReport,
+) -> ScreenTileMotion {
+    ScreenTileMotion {
+        enabled: rep.enabled,
+        max_displacement: rep.max_displacement,
+        min_match_ratio: rep.min_match_ratio,
+        motion_tiles_sent: rep.motion_tiles_sent,
+        fallback_tiles_sent: rep.fallback_tiles_sent,
+        bytes_saved: rep.bytes_saved,
+    }
+}
+
+pub fn annotation_item_dto(a: tetherly_core::screen::AnnotationItem) -> AnnotationItemDto {
+    AnnotationItemDto {
+        id: a.id,
+        author: a.author,
+        kind: annotation_kind_dto(&a.kind),
+        color_rgb: a.color_rgb,
+        thickness: a.thickness,
+        alpha: a.alpha,
+        ttl_ms: a.ttl_ms,
+        created_at_ms: a.created_at_ms,
+    }
+}
+
+/// Inverse mapper: contract `AnnotationKindDto` -> runtime core `AnnotationKind`.
+fn annotation_kind_runtime(k: AnnotationKindDto) -> tetherly_core::screen::AnnotationKind {
+    match k {
+        AnnotationKindDto::Stroke { points } => {
+            tetherly_core::screen::AnnotationKind::Stroke { points }
+        }
+        AnnotationKindDto::Rect { x, y, w, h } => {
+            tetherly_core::screen::AnnotationKind::Rect { x, y, w, h }
+        }
+        AnnotationKindDto::Arrow { from, to } => {
+            tetherly_core::screen::AnnotationKind::Arrow { from, to }
+        }
+        AnnotationKindDto::Text { x, y, text, scale } => {
+            tetherly_core::screen::AnnotationKind::Text { x, y, text, scale }
+        }
+    }
+}
+
+/// Inverse mapper: contract `AnnotationItemDto` -> runtime core `AnnotationItem`.
+pub fn annotation_item_runtime(dto: AnnotationItemDto) -> tetherly_core::AnnotationItem {
+    tetherly_core::AnnotationItem {
+        id: dto.id,
+        author: dto.author,
+        kind: annotation_kind_runtime(dto.kind),
+        color_rgb: dto.color_rgb,
+        thickness: dto.thickness,
+        alpha: dto.alpha,
+        ttl_ms: dto.ttl_ms,
+        created_at_ms: dto.created_at_ms,
+    }
+}
+
+/// Inverse mapper: contract `WhiteboardSnapshotDto` -> runtime core `WhiteboardSnapshot`.
+pub fn whiteboard_snapshot_runtime(
+    dto: WhiteboardSnapshotDto,
+) -> tetherly_core::WhiteboardSnapshot {
+    tetherly_core::WhiteboardSnapshot {
+        version: dto.version,
+        created_at_ms: dto.created_at_ms,
+        session_id: dto.session_id,
+        active_items: dto
+            .active_items
+            .into_iter()
+            .map(annotation_item_runtime)
+            .collect(),
+        total_added_counter: dto.total_added_counter,
+    }
+}
+
+pub fn annotation_kind_dto(k: &tetherly_core::screen::AnnotationKind) -> AnnotationKindDto {
+    match k {
+        tetherly_core::screen::AnnotationKind::Stroke { points } => AnnotationKindDto::Stroke {
+            points: points.clone(),
+        },
+        tetherly_core::screen::AnnotationKind::Rect { x, y, w, h } => AnnotationKindDto::Rect {
+            x: *x,
+            y: *y,
+            w: *w,
+            h: *h,
+        },
+        tetherly_core::screen::AnnotationKind::Arrow { from, to } => AnnotationKindDto::Arrow {
+            from: *from,
+            to: *to,
+        },
+        tetherly_core::screen::AnnotationKind::Text { x, y, text, scale } => {
+            AnnotationKindDto::Text {
+                x: *x,
+                y: *y,
+                text: text.clone(),
+                scale: *scale,
+            }
+        }
+    }
 }
 
 #[cfg(test)]

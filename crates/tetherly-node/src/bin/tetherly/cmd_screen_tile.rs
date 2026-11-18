@@ -11,14 +11,20 @@ pub(crate) async fn screen_tile(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile query failed (HTTP {code}): {}",
@@ -39,14 +45,20 @@ pub(crate) async fn screen_tile(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let is_json = j || json;
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile query failed (HTTP {code}): {}",
@@ -80,14 +92,20 @@ pub(crate) async fn screen_tile(
                 );
             }
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile", &bytes)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile",
+                Some(&bytes),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile set failed (HTTP {code}): {}",
@@ -109,14 +127,20 @@ pub(crate) async fn screen_tile(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let is_json = j || json;
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/reset", b"{}")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile reset failed (HTTP {code}): {}",
@@ -401,14 +425,20 @@ pub(crate) async fn execute_screen_tile_cache_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/cache")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/cache",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile cache query failed (HTTP {code}): {}",
@@ -429,14 +459,20 @@ pub(crate) async fn execute_screen_tile_cache_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/cache")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/cache",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile cache query failed (HTTP {code}): {}",
@@ -470,14 +506,20 @@ pub(crate) async fn execute_screen_tile_cache_cmd(
                 );
             }
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/cache", &bytes)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/cache",
+                Some(&bytes),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile cache set failed (HTTP {code}): {}",
@@ -498,15 +540,20 @@ pub(crate) async fn execute_screen_tile_cache_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/cache/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/cache",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile cache reset failed (HTTP {code}): {}",
@@ -589,14 +636,20 @@ pub(crate) async fn execute_screen_focus_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/focus")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/focus",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen focus query failed (HTTP {code}): {}",
@@ -617,14 +670,20 @@ pub(crate) async fn execute_screen_focus_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/focus")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/focus",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen focus query failed (HTTP {code}): {}",
@@ -697,14 +756,20 @@ pub(crate) async fn execute_screen_focus_cmd(
                 );
             }
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/focus", &bytes)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/focus",
+                Some(&bytes),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen focus set failed (HTTP {code}): {}",
@@ -725,14 +790,20 @@ pub(crate) async fn execute_screen_focus_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/focus/reset", b"{}")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/focus",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen focus reset failed (HTTP {code}): {}",
@@ -807,14 +878,20 @@ pub(crate) async fn execute_screen_tile_palette_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/palette")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/palette",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile palette query failed (HTTP {code}): {}",
@@ -835,14 +912,20 @@ pub(crate) async fn execute_screen_tile_palette_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/palette")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/palette",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile palette query failed (HTTP {code}): {}",
@@ -879,15 +962,20 @@ pub(crate) async fn execute_screen_tile_palette_cmd(
                 payload.insert("enable_rle".to_string(), serde_json::Value::Bool(r));
             }
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/palette", &bytes)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/palette",
+                Some(&bytes),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile palette set failed (HTTP {code}): {}",
@@ -908,15 +996,20 @@ pub(crate) async fn execute_screen_tile_palette_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/palette/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/palette",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile palette reset failed (HTTP {code}): {}",
@@ -983,14 +1076,20 @@ pub(crate) async fn execute_screen_tile_predict_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/predict")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/predict",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile predict query failed (HTTP {code}): {}",
@@ -1011,14 +1110,20 @@ pub(crate) async fn execute_screen_tile_predict_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/predict")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/predict",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile predict query failed (HTTP {code}): {}",
@@ -1055,15 +1160,20 @@ pub(crate) async fn execute_screen_tile_predict_cmd(
                 payload.insert("enable_rct".to_string(), serde_json::Value::Bool(rct));
             }
             let body = serde_json::to_vec(&payload)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/predict", &body)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/predict",
+                Some(&body),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile predict set failed (HTTP {code}): {}",
@@ -1084,15 +1194,20 @@ pub(crate) async fn execute_screen_tile_predict_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/predict/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/predict",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile predict reset failed (HTTP {code}): {}",
@@ -1174,14 +1289,20 @@ pub(crate) async fn execute_screen_tile_present_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/present")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/present",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile present query failed (HTTP {code}): {}",
@@ -1202,14 +1323,20 @@ pub(crate) async fn execute_screen_tile_present_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/present")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/present",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile present query failed (HTTP {code}): {}",
@@ -1250,15 +1377,20 @@ pub(crate) async fn execute_screen_tile_present_cmd(
                 payload.insert("tear_prevention".to_string(), serde_json::Value::Bool(tp));
             }
             let body = serde_json::to_vec(&payload)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/present", &body)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/present",
+                Some(&body),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile present set failed (HTTP {code}): {}",
@@ -1279,15 +1411,20 @@ pub(crate) async fn execute_screen_tile_present_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/present/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/present",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile present reset failed (HTTP {code}): {}",
@@ -1343,14 +1480,20 @@ pub(crate) async fn execute_screen_tile_nack_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/nack")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/nack",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile nack query failed (HTTP {code}): {}",
@@ -1371,14 +1514,20 @@ pub(crate) async fn execute_screen_tile_nack_cmd(
         }) => {
             let effective_json = json || j;
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/nack")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/nack",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile nack query failed (HTTP {code}): {}",
@@ -1421,14 +1570,20 @@ pub(crate) async fn execute_screen_tile_nack_cmd(
                 );
             }
             let body = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/nack", &body)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/nack",
+                Some(&body),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile nack set failed (HTTP {code}): {}",
@@ -1449,15 +1604,20 @@ pub(crate) async fn execute_screen_tile_nack_cmd(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let effective_json = json || j;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/nack/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/nack",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile nack reset failed (HTTP {code}): {}",
@@ -1529,14 +1689,20 @@ pub(crate) async fn execute_screen_tile_saliency_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/saliency")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/saliency",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile saliency query failed (HTTP {code}): {}",
@@ -1556,14 +1722,20 @@ pub(crate) async fn execute_screen_tile_saliency_cmd(
             ui_port: p,
         }) => {
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/saliency")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/saliency",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile saliency query failed (HTTP {code}): {}",
@@ -1611,15 +1783,20 @@ pub(crate) async fn execute_screen_tile_saliency_cmd(
                 );
             }
             let body = serde_json::to_vec(&payload)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/saliency", &body)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/saliency",
+                Some(&body),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile saliency set failed (HTTP {code}): {}",
@@ -1640,15 +1817,20 @@ pub(crate) async fn execute_screen_tile_saliency_cmd(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let effective_json = json || j;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/saliency/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/saliency",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile saliency reset failed (HTTP {code}): {}",
@@ -1709,14 +1891,20 @@ pub(crate) async fn execute_screen_tile_lod_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/lod")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/lod",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile lod query failed (HTTP {code}): {}",
@@ -1736,14 +1924,20 @@ pub(crate) async fn execute_screen_tile_lod_cmd(
             ui_port: p,
         }) => {
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/lod")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/lod",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile lod query failed (HTTP {code}): {}",
@@ -1781,14 +1975,20 @@ pub(crate) async fn execute_screen_tile_lod_cmd(
                 );
             }
             let body = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/lod", &body)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/lod",
+                Some(&body),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile lod set failed (HTTP {code}): {}",
@@ -1809,15 +2009,20 @@ pub(crate) async fn execute_screen_tile_lod_cmd(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let effective_json = json || j;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/lod/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/lod",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile lod reset failed (HTTP {code}): {}",
@@ -1875,14 +2080,20 @@ pub(crate) async fn execute_screen_tile_batch_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/batch")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/batch",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile batch query failed (HTTP {code}): {}",
@@ -1902,14 +2113,20 @@ pub(crate) async fn execute_screen_tile_batch_cmd(
             ui_port: p,
         }) => {
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/batch")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/batch",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile batch query failed (HTTP {code}): {}",
@@ -1947,14 +2164,20 @@ pub(crate) async fn execute_screen_tile_batch_cmd(
                 );
             }
             let body = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/batch", &body)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/batch",
+                Some(&body),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile batch set failed (HTTP {code}): {}",
@@ -1975,15 +2198,20 @@ pub(crate) async fn execute_screen_tile_batch_cmd(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let effective_json = json || j;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/batch/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/batch",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile batch reset failed (HTTP {code}): {}",
@@ -2042,14 +2270,20 @@ pub(crate) async fn execute_screen_tile_motion_cmd(
 ) -> Result<()> {
     match action {
         None => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/motion")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/screen/tile/motion",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile motion query failed (HTTP {code}): {}",
@@ -2069,14 +2303,20 @@ pub(crate) async fn execute_screen_tile_motion_cmd(
             ui_port: p,
         }) => {
             let port = if p != 45716 { p } else { ui_port };
-            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/motion")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "GET",
+                "/api/v1/screen/tile/motion",
+                None,
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile motion query failed (HTTP {code}): {}",
@@ -2111,14 +2351,20 @@ pub(crate) async fn execute_screen_tile_motion_cmd(
                 payload.insert("min_match_ratio".to_string(), serde_json::Value::from(r));
             }
             let body = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/motion", &body)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "PATCH",
+                "/api/v1/screen/tile/motion",
+                Some(&body),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile motion set failed (HTTP {code}): {}",
@@ -2139,15 +2385,20 @@ pub(crate) async fn execute_screen_tile_motion_cmd(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let effective_json = json || j;
-            let (code, resp) =
-                tetherly_node::loopback_post(port, "/api/screen/tile/motion/reset", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                port,
+                "DELETE",
+                "/api/v1/screen/tile/motion",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "screen tile motion reset failed (HTTP {code}): {}",

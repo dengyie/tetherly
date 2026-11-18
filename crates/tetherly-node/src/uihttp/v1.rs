@@ -12,18 +12,129 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
 use tetherly_api::{
-    ActionPolicyPatch, ActionTriggerRequest, AncsAllowRequest, AncsRemoveRequest,
-    AudioAttachRequest, AudioDetachRequest, AudioPolicyPatch, BatteryPolicyPatch,
-    BatteryStatePatch, BenchPolicyPatch, BenchStartRequest, BlockRequest, CameraAttachRequest,
-    CameraDetachRequest, CameraPolicyPatch, CapsUpdate, ConnectRequest, DevicePatch, Diagnostics,
-    DialReport, DialRequest, DisplayAttachRequest, DisplayDetachRequest, DisplayPolicyPatch,
-    ErrorBody, ErrorCode, Event, FocusPolicyPatch, FocusSetRequest, HandoffInboxActionRequest,
-    HandoffPolicyPatch, HandoffSendRequest, Health, HeartbeatPatch, InputAttachRequest,
-    InputPolicyPatch, InputReleaseRequest, InputStartRequest, LinkProbeRequest, LocalActionRequest,
-    LocatePolicyPatch, LocateRingRequest, LocateStopRequest, LogLevel, LogLevelRequest, LogTail,
-    MediaCommandRequest, MediaPolicyPatch, MediaStatePatch, MicAttachRequest, MicDetachRequest,
-    MicPolicyPatch, Patch, PeerProfileDto, PeerProfilePatch, PeerProfileUpdated, PinGrant,
-    RemoteActionRefreshRequest, SettingsPatch, SysHost, SysProcess, SysTelemetry, Topic,
+    ActionPolicyPatch,
+    ActionTriggerRequest,
+    AncsAllowRequest,
+    AncsRemoveRequest,
+    AudioAttachRequest,
+    AudioDetachRequest,
+    AudioPolicyPatch,
+    BatteryPolicyPatch,
+    BatteryStatePatch,
+    BenchPolicyPatch,
+    BenchStartRequest,
+    BlockRequest,
+    CameraAttachRequest,
+    CameraDetachRequest,
+    CameraPolicyPatch,
+    CapsUpdate,
+    ConnectRequest,
+    DevicePatch,
+    Diagnostics,
+    DialReport,
+    DialRequest,
+    DisplayAttachRequest,
+    DisplayDetachRequest,
+    DisplayPolicyPatch,
+    ErrorBody,
+    ErrorCode,
+    Event,
+    FocusPolicyPatch,
+    FocusSetRequest,
+    HandoffInboxActionRequest,
+    HandoffPolicyPatch,
+    HandoffSendRequest,
+    Health,
+    HeartbeatPatch,
+    InputAttachRequest,
+    InputPolicyPatch,
+    InputReleaseRequest,
+    InputStartRequest,
+    LinkProbeRequest,
+    LocalActionRequest,
+    LocatePolicyPatch,
+    LocateRingRequest,
+    LocateStopRequest,
+    LogLevel,
+    LogLevelRequest,
+    LogTail,
+    MediaCommandRequest,
+    MediaPolicyPatch,
+    MediaStatePatch,
+    MicAttachRequest,
+    MicDetachRequest,
+    MicPolicyPatch,
+    Patch,
+    PeerProfileDto,
+    PeerProfilePatch,
+    PeerProfileUpdated,
+    PinGrant,
+    RemoteActionRefreshRequest,
+    ScreenAnnotationAdded,
+    ScreenAnnotationCreateRequest,
+    ScreenAnnotations,
+    ScreenAuthorRequest,
+    ScreenBitratePatch,
+    ScreenColorPatch,
+    ScreenCursorPatch,
+    ScreenDeltaPatch,
+    ScreenFecPatch,
+    ScreenFocusPatch,
+    ScreenFpsPatch,
+    ScreenHarqPatch,
+    ScreenLaserPatch,
+    ScreenLaserReport,
+    ScreenLatencyPatch,
+    ScreenLtrPatch,
+    ScreenMatrixModePatch,
+    ScreenMotionPatch,
+    ScreenPacerPatch,
+    ScreenPirPatch,
+    ScreenPlaybackStartRequest,
+    ScreenPlayoutPatch,
+    ScreenPrivacyPatch,
+    ScreenProbePatch,
+    ScreenProfilePatch,
+    ScreenQoePatch,
+    ScreenQualityMetricPatch,
+    ScreenRecordingSnapshotRequest,
+    ScreenRecordingStartRequest,
+    ScreenRoiPatch,
+    ScreenScalePatch,
+    ScreenSquelchPatch,
+    // §167: screen domain contract types.
+    ScreenStartRequest,
+    ScreenSvcDropT1Request,
+    ScreenSvcPatch,
+    ScreenSwitchRequest,
+    ScreenSyncPatch,
+    ScreenTileBatchPatch,
+    ScreenTileCachePatch,
+    ScreenTileLodPatch,
+    ScreenTileMotionPatch,
+    ScreenTileNackPatch,
+    ScreenTilePalettePatch,
+    ScreenTilePatch,
+    ScreenTilePredictPatch,
+    ScreenTilePresentPatch,
+    ScreenTileSaliencyPatch,
+    ScreenTrendlinePatch,
+    ScreenTuningPatch,
+    ScreenTwccPatch,
+    ScreenWatermarkEnableRequest,
+    ScreenWatermarkPatch,
+    ScreenWhiteboardExportReport,
+    ScreenWhiteboardImportReport,
+    ScreenWhiteboardImportRequest,
+    ScreenWhiteboardPolicyPatch,
+    ScreenWhiteboardPolicyView,
+    ScreenWhiteboardRedoReport,
+    ScreenWhiteboardUndoReport,
+    SettingsPatch,
+    SysHost,
+    SysProcess,
+    SysTelemetry,
+    Topic,
     API_VERSION,
 };
 use tetherly_core::CoreError;
@@ -249,6 +360,79 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/display/virtual" => Some(&["GET"]),
         "/api/v1/display/virtual/attach" | "/api/v1/display/virtual/detach" => Some(&["POST"]),
         "/api/v1/display/virtual/policy" => Some(&["GET", "PATCH"]),
+        // §167: screen streaming domain.
+        "/api/v1/screen" => Some(&["GET"]),
+        "/api/v1/screen/allow"
+        | "/api/v1/screen/revoke"
+        | "/api/v1/screen/start"
+        | "/api/v1/screen/stop"
+        | "/api/v1/screen/keyframe" => Some(&["POST"]),
+        "/api/v1/screen/displays" => Some(&["GET"]),
+        "/api/v1/screen/switch" => Some(&["POST"]),
+        "/api/v1/screen/privacy" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/recording" => Some(&["GET"]),
+        "/api/v1/screen/recording/start" | "/api/v1/screen/recording/stop" => Some(&["POST"]),
+        "/api/v1/screen/recording/replay" => Some(&["GET"]),
+        "/api/v1/screen/recording/snapshot" => Some(&["GET", "POST"]),
+        "/api/v1/screen/playback" => Some(&["GET"]),
+        "/api/v1/screen/playback/start"
+        | "/api/v1/screen/playback/pause"
+        | "/api/v1/screen/playback/resume"
+        | "/api/v1/screen/playback/stop" => Some(&["POST"]),
+        "/api/v1/screen/snapshot" => Some(&["GET"]),
+        "/api/v1/screen/laser" => Some(&["GET", "POST"]),
+        "/api/v1/screen/annotation" => Some(&["GET", "POST", "DELETE"]),
+        "/api/v1/screen/whiteboard/undo"
+        | "/api/v1/screen/whiteboard/redo"
+        | "/api/v1/screen/whiteboard/clear"
+        | "/api/v1/screen/whiteboard/import" => Some(&["POST"]),
+        "/api/v1/screen/whiteboard/export" => Some(&["GET"]),
+        "/api/v1/screen/whiteboard/policy" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/watermark" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/watermark/enable" | "/api/v1/screen/watermark/disable" => Some(&["POST"]),
+        "/api/v1/screen/probe/trigger"
+        | "/api/v1/screen/sync/trigger"
+        | "/api/v1/screen/svc/drop-t1"
+        | "/api/v1/screen/ltr/anchor"
+        | "/api/v1/screen/ltr/recover" => Some(&["POST"]),
+        "/api/v1/screen/cursor" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/trendline" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/squelch" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/fec" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/pacer" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/harq" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/twcc" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/sync" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/latency" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/v1/screen/tuning" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/v1/screen/playout" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/matrix" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/bitrate"
+        | "/api/v1/screen/fps"
+        | "/api/v1/screen/scale"
+        | "/api/v1/screen/profile" => Some(&["GET", "PATCH"]),
+        "/api/v1/screen/color"
+        | "/api/v1/screen/delta"
+        | "/api/v1/screen/metric"
+        | "/api/v1/screen/qoe"
+        | "/api/v1/screen/pir"
+        | "/api/v1/screen/motion"
+        | "/api/v1/screen/roi" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/v1/screen/focus" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/v1/screen/tile"
+        | "/api/v1/screen/tile/cache"
+        | "/api/v1/screen/tile/palette"
+        | "/api/v1/screen/tile/predict"
+        | "/api/v1/screen/tile/present"
+        | "/api/v1/screen/tile/nack"
+        | "/api/v1/screen/tile/saliency"
+        | "/api/v1/screen/tile/lod"
+        | "/api/v1/screen/tile/batch"
+        | "/api/v1/screen/tile/motion" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/v1/screen/ltr" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/v1/screen/svc" => Some(&["GET", "PATCH", "DELETE"]),
+        "/api/v1/screen/probe" => Some(&["GET", "PATCH"]),
+
         p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
         p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -772,6 +956,345 @@ pub(super) async fn route(
         ("PATCH", "/api/v1/display/virtual/policy") => {
             patch_display_policy(node, query, body).await
         }
+        // §167: screen streaming domain.
+        ("GET", "/api/v1/screen") => get_screen_status(node).await,
+        ("POST", "/api/v1/screen/allow") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_control_of(node.screen_allow_reported()),
+        )),
+        ("POST", "/api/v1/screen/revoke") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_control_of(node.screen_revoke_reported()),
+        )),
+        ("POST", "/api/v1/screen/start") => post_screen_start(node, body).await,
+        ("POST", "/api/v1/screen/stop") => match node.screen_stop_reported().await {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_control_of(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("POST", "/api/v1/screen/keyframe") => {
+            match node.screen_keyframe_request_reported().await {
+                Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_control_of(rep))),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("GET", "/api/v1/screen/displays") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_displays_of(node.screen_display_report()),
+        )),
+        ("POST", "/api/v1/screen/switch") => post_screen_switch(node, body).await,
+        ("GET", "/api/v1/screen/privacy") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_privacy_of(node.screen_privacy_report()),
+        )),
+        ("PATCH", "/api/v1/screen/privacy") => patch_screen_privacy(node, body).await,
+        ("GET", "/api/v1/screen/recording") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_recording_of(node.screen_recording_report()),
+        )),
+        ("POST", "/api/v1/screen/recording/start") => post_screen_recording_start(node, body).await,
+        ("POST", "/api/v1/screen/recording/stop") => match node.screen_stop_recording().await {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_recording_of(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("GET", "/api/v1/screen/recording/replay") => {
+            get_screen_recording_replay(node, query).await
+        }
+        ("GET", "/api/v1/screen/recording/snapshot")
+        | ("POST", "/api/v1/screen/recording/snapshot") => {
+            screen_recording_snapshot(node, query, body).await
+        }
+        ("GET", "/api/v1/screen/playback") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_playback_of(node.screen_playback_report()),
+        )),
+        ("POST", "/api/v1/screen/playback/start") => post_screen_playback_start(node, body).await,
+        ("POST", "/api/v1/screen/playback/pause") => match node.screen_playback_pause() {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_playback_of(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("POST", "/api/v1/screen/playback/resume") => match node.screen_playback_resume() {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_playback_of(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("POST", "/api/v1/screen/playback/stop") => match node.screen_playback_stop() {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_playback_of(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("GET", "/api/v1/screen/snapshot") => get_screen_snapshot(node, query).await,
+        ("GET", "/api/v1/screen/laser") => Ok(json(200, &screen_laser_report_of(node))),
+        ("POST", "/api/v1/screen/laser") => post_screen_laser(node, body).await,
+        ("GET", "/api/v1/screen/annotation") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_annotations_of(node.screen_annotation_report()),
+        )),
+        ("POST", "/api/v1/screen/annotation") => post_screen_annotation(node, body).await,
+        ("DELETE", "/api/v1/screen/annotation") => match node.screen_clear_annotations().await {
+            Ok(()) => Ok(json(
+                200,
+                &crate::apiv1::model::screen_annotations_of(node.screen_annotation_report()),
+            )),
+            Err(e) => Err(core_error(e)),
+        },
+        ("POST", "/api/v1/screen/whiteboard/undo") => post_screen_whiteboard_undo(node, body).await,
+        ("POST", "/api/v1/screen/whiteboard/redo") => post_screen_whiteboard_redo(node, body).await,
+        ("POST", "/api/v1/screen/whiteboard/clear") => {
+            match node.screen_clear_annotations().await {
+                Ok(()) => Ok(json(
+                    200,
+                    &crate::apiv1::model::screen_annotations_of(node.screen_annotation_report()),
+                )),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("POST", "/api/v1/screen/whiteboard/import") => {
+            post_screen_whiteboard_import(node, body).await
+        }
+        ("GET", "/api/v1/screen/whiteboard/export") => {
+            get_screen_whiteboard_export(node, query).await
+        }
+        ("GET", "/api/v1/screen/whiteboard/policy") => Ok(json(
+            200,
+            &ScreenWhiteboardPolicyView {
+                policy: crate::apiv1::model::whiteboard_policy_dto_of(
+                    node.screen_whiteboard_get_policy(),
+                ),
+            },
+        )),
+        ("PATCH", "/api/v1/screen/whiteboard/policy") => {
+            patch_screen_whiteboard_policy(node, body).await
+        }
+        ("GET", "/api/v1/screen/watermark") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_watermark_of(node.screen_watermark_report()),
+        )),
+        ("PATCH", "/api/v1/screen/watermark") => patch_screen_watermark(node, body).await,
+        ("POST", "/api/v1/screen/watermark/enable") => {
+            post_screen_watermark_enable(node, body).await
+        }
+        ("POST", "/api/v1/screen/watermark/disable") => match node.screen_disable_watermark().await
+        {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_watermark_of(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("POST", "/api/v1/screen/probe/trigger") => post_screen_probe_trigger(node, body).await,
+        ("POST", "/api/v1/screen/sync/trigger") => post_screen_sync_trigger(node).await,
+        ("POST", "/api/v1/screen/svc/drop-t1") => post_screen_svc_drop_t1(node, body).await,
+        ("POST", "/api/v1/screen/ltr/anchor") => match node.screen_anchor_ltr().await {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_ltr_of(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("POST", "/api/v1/screen/ltr/recover") => match node.screen_request_ltr_recovery().await {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_ltr_of(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("GET", "/api/v1/screen/cursor") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_cursor_of(node.screen_cursor_report()),
+        )),
+        ("PATCH", "/api/v1/screen/cursor") => patch_screen_cursor(node, body).await,
+        ("GET", "/api/v1/screen/trendline") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_trendline_of(node.screen_trendline_report()),
+        )),
+        ("PATCH", "/api/v1/screen/trendline") => patch_screen_trendline(node, body).await,
+        ("GET", "/api/v1/screen/squelch") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_squelch_of(node.screen_squelch_report()),
+        )),
+        ("PATCH", "/api/v1/screen/squelch") => patch_screen_squelch(node, body).await,
+        ("GET", "/api/v1/screen/fec") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_fec_of(node.screen_fec_report()),
+        )),
+        ("PATCH", "/api/v1/screen/fec") => patch_screen_fec(node, body).await,
+        ("GET", "/api/v1/screen/pacer") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_pacer_of(node.screen_pacer_report()),
+        )),
+        ("PATCH", "/api/v1/screen/pacer") => patch_screen_pacer(node, body).await,
+        ("GET", "/api/v1/screen/harq") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_harq_of(node.screen_harq_report()),
+        )),
+        ("PATCH", "/api/v1/screen/harq") => patch_screen_harq(node, body).await,
+        ("GET", "/api/v1/screen/twcc") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_twcc_of(node.screen_twcc_report()),
+        )),
+        ("PATCH", "/api/v1/screen/twcc") => patch_screen_twcc(node, body).await,
+        ("GET", "/api/v1/screen/sync") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_sync_of(node.screen_sync_report()),
+        )),
+        ("PATCH", "/api/v1/screen/sync") => patch_screen_sync(node, body).await,
+        ("GET", "/api/v1/screen/latency") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_latency_of(node.screen_latency_report()),
+        )),
+        ("PATCH", "/api/v1/screen/latency") => patch_screen_latency(node, body).await,
+        ("DELETE", "/api/v1/screen/latency") => delete_screen_latency(node).await,
+        ("GET", "/api/v1/screen/tuning") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tuning_of(node.screen_tuning_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tuning") => patch_screen_tuning(node, body).await,
+        ("DELETE", "/api/v1/screen/tuning") => delete_screen_tuning(node).await,
+        ("GET", "/api/v1/screen/playout") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_playout_of(node.screen_playout_report()),
+        )),
+        ("PATCH", "/api/v1/screen/playout") => patch_screen_playout(node, body).await,
+        ("GET", "/api/v1/screen/matrix") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_matrix_of(node.screen_matrix_report()),
+        )),
+        ("PATCH", "/api/v1/screen/matrix") => patch_screen_matrix(node, body).await,
+        ("GET", "/api/v1/screen/bitrate") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_bitrate_of(node.screen_bitrate_report()),
+        )),
+        ("PATCH", "/api/v1/screen/bitrate") => patch_screen_bitrate(node, body).await,
+        ("GET", "/api/v1/screen/fps") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_fps_of(node.screen_fps_report()),
+        )),
+        ("PATCH", "/api/v1/screen/fps") => patch_screen_fps(node, body).await,
+        ("GET", "/api/v1/screen/scale") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_scale_of(node.screen_scale_report()),
+        )),
+        ("PATCH", "/api/v1/screen/scale") => patch_screen_scale(node, body).await,
+        ("GET", "/api/v1/screen/profile") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_profile_of(node.screen_profile_report()),
+        )),
+        ("PATCH", "/api/v1/screen/profile") => patch_screen_profile(node, body).await,
+        ("GET", "/api/v1/screen/color") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_color_of(node.screen_color_report()),
+        )),
+        ("PATCH", "/api/v1/screen/color") => patch_screen_color(node, body).await,
+        ("DELETE", "/api/v1/screen/color") => delete_screen_color(node).await,
+        ("GET", "/api/v1/screen/delta") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_delta_of(node.screen_delta_report()),
+        )),
+        ("PATCH", "/api/v1/screen/delta") => patch_screen_delta(node, body).await,
+        ("DELETE", "/api/v1/screen/delta") => delete_screen_delta(node).await,
+        ("GET", "/api/v1/screen/metric") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_quality_metric_of(node.screen_quality_metric_report()),
+        )),
+        ("PATCH", "/api/v1/screen/metric") => patch_screen_metric(node, body).await,
+        ("DELETE", "/api/v1/screen/metric") => delete_screen_metric(node).await,
+        ("GET", "/api/v1/screen/qoe") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_qoe_of(node.screen_qoe_report()),
+        )),
+        ("PATCH", "/api/v1/screen/qoe") => patch_screen_qoe(node, body).await,
+        ("DELETE", "/api/v1/screen/qoe") => delete_screen_qoe(node).await,
+        ("GET", "/api/v1/screen/pir") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_pir_of(node.screen_pir_report()),
+        )),
+        ("PATCH", "/api/v1/screen/pir") => patch_screen_pir(node, body).await,
+        ("DELETE", "/api/v1/screen/pir") => delete_screen_pir(node).await,
+        ("GET", "/api/v1/screen/motion") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_motion_of(node.screen_motion_report()),
+        )),
+        ("PATCH", "/api/v1/screen/motion") => patch_screen_motion(node, body).await,
+        ("DELETE", "/api/v1/screen/motion") => delete_screen_motion(node).await,
+        ("GET", "/api/v1/screen/roi") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_roi_of(node.screen_roi_report()),
+        )),
+        ("PATCH", "/api/v1/screen/roi") => patch_screen_roi(node, body).await,
+        ("DELETE", "/api/v1/screen/roi") => delete_screen_roi(node).await,
+        ("GET", "/api/v1/screen/focus") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_focus_of(node.screen_focus_report()),
+        )),
+        ("PATCH", "/api/v1/screen/focus") => patch_screen_focus(node, body).await,
+        ("DELETE", "/api/v1/screen/focus") => delete_screen_focus(node).await,
+        ("GET", "/api/v1/screen/tile") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_of(node.screen_tile_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile") => patch_screen_tile(node, body).await,
+        ("DELETE", "/api/v1/screen/tile") => delete_screen_tile(node).await,
+        ("GET", "/api/v1/screen/tile/cache") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_cache_of(node.screen_tile_cache_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/cache") => patch_screen_tile_cache(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/cache") => delete_screen_tile_cache(node).await,
+        ("GET", "/api/v1/screen/tile/palette") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_palette_of(node.screen_tile_palette_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/palette") => patch_screen_tile_palette(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/palette") => delete_screen_tile_palette(node).await,
+        ("GET", "/api/v1/screen/tile/predict") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_predict_of(node.screen_tile_predict_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/predict") => patch_screen_tile_predict(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/predict") => delete_screen_tile_predict(node).await,
+        ("GET", "/api/v1/screen/tile/present") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_present_of(node.screen_tile_present_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/present") => patch_screen_tile_present(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/present") => delete_screen_tile_present(node).await,
+        ("GET", "/api/v1/screen/tile/nack") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_nack_of(node.screen_tile_nack_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/nack") => patch_screen_tile_nack(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/nack") => delete_screen_tile_nack(node).await,
+        ("GET", "/api/v1/screen/tile/saliency") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_saliency_of(node.screen_tile_saliency_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/saliency") => patch_screen_tile_saliency(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/saliency") => delete_screen_tile_saliency(node).await,
+        ("GET", "/api/v1/screen/tile/lod") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_lod_of(node.screen_tile_lod_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/lod") => patch_screen_tile_lod(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/lod") => delete_screen_tile_lod(node).await,
+        ("GET", "/api/v1/screen/tile/batch") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_batch_of(node.screen_tile_batch_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/batch") => patch_screen_tile_batch(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/batch") => delete_screen_tile_batch(node).await,
+        ("GET", "/api/v1/screen/tile/motion") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_motion_of(node.screen_tile_motion_report()),
+        )),
+        ("PATCH", "/api/v1/screen/tile/motion") => patch_screen_tile_motion(node, body).await,
+        ("DELETE", "/api/v1/screen/tile/motion") => delete_screen_tile_motion(node).await,
+        ("GET", "/api/v1/screen/ltr") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_ltr_of(node.screen_ltr_report()),
+        )),
+        ("PATCH", "/api/v1/screen/ltr") => patch_screen_ltr(node, body).await,
+        ("DELETE", "/api/v1/screen/ltr") => delete_screen_ltr(node).await,
+        ("GET", "/api/v1/screen/svc") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_svc_of(node.screen_svc_report()),
+        )),
+        ("PATCH", "/api/v1/screen/svc") => patch_screen_svc(node, body).await,
+        ("DELETE", "/api/v1/screen/svc") => delete_screen_svc(node).await,
+        ("GET", "/api/v1/screen/probe") => Ok(json(
+            200,
+            &crate::apiv1::model::screen_probe_of(node.screen_probe_report()),
+        )),
+        ("PATCH", "/api/v1/screen/probe") => patch_screen_probe(node, body).await,
+
         ("GET", "/api/v1/profiles") => Ok(json(
             200,
             &crate::apiv1::model::peer_profiles(
@@ -3794,6 +4317,1322 @@ async fn patch_display_policy(node: &Node, query: Option<&str>, body: &[u8]) -> 
         Ok(rep) => Ok(json(200, &rep)),
         Err(e) => Err(core_error(e)),
     }
+}
+
+/// `GET /screen` (§167): full aggregate streaming status.
+async fn get_screen_status(node: &Node) -> Handled {
+    Ok(json(
+        200,
+        &crate::apiv1::model::screen_status_of(node.screen_status_report().await),
+    ))
+}
+
+// ==== §167: screen streaming handlers ====
+
+/// `POST /screen/start` (§167): body `{peer}` optional.
+async fn post_screen_start(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenStartRequest>(body)?;
+    match node.screen_start_reported(req.peer.as_deref()).await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_control_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /screen/switch` (§167): body `{display_id}` required (0-255).
+async fn post_screen_switch(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenSwitchRequest>(body)?;
+    let Some(display_id) = req.display_id else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "missing required field: display_id (expected integer 0-255)",
+        ));
+    };
+    match node.screen_switch_display(display_id).await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_displays_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/privacy` (§167): body `{enabled, lock_input}`; enabled required.
+async fn patch_screen_privacy(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenPrivacyPatch>(body)?;
+    let Some(enabled) = patch.enabled else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "missing required field: enabled (expected boolean true/false)",
+        ));
+    };
+    match node
+        .screen_set_privacy_mode(enabled, patch.lock_input.unwrap_or(false))
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_privacy_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /screen/recording/start` (§167): body `{path}` optional.
+async fn post_screen_recording_start(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenRecordingStartRequest>(body)?;
+    match node.screen_start_recording(req.path).await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_recording_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `GET /screen/recording/replay` (§167): `?path=` required, `limit` default 32.
+async fn get_screen_recording_replay(node: &Node, query: Option<&str>) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let Some(path) = qmap.get("path").cloned().filter(|p| !p.trim().is_empty()) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "recording replay requires a ?path= parameter",
+        ));
+    };
+    let limit = qmap
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(32);
+    match node.screen_recording_replay(path, limit) {
+        Ok(rep) => Ok(json(
+            200,
+            &crate::apiv1::model::screen_recording_replay_of(rep),
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `GET|POST /screen/recording/snapshot` (§167): `path` required; `format=bmp`
+/// streams binary, otherwise JSON.
+async fn screen_recording_snapshot(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let req = parse_body::<ScreenRecordingSnapshotRequest>(body)?;
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let Some(path) = req
+        .path
+        .clone()
+        .or_else(|| q_str("path"))
+        .filter(|p| !p.trim().is_empty())
+    else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "recording snapshot requires a path parameter or JSON body",
+        ));
+    };
+    let frame = req
+        .frame
+        .or_else(|| q_str("frame").and_then(|s| s.parse().ok()));
+    let pts = req
+        .pts
+        .or_else(|| q_str("pts").and_then(|s| s.parse().ok()));
+    let out = req.out.clone().or_else(|| q_str("out"));
+    let format = req.format.clone().or_else(|| q_str("format"));
+    if format.as_deref().map(|f| f.eq_ignore_ascii_case("bmp")) == Some(true) {
+        match node.screen_recording_snapshot_data(&path, frame, pts, out) {
+            Ok((bytes, _)) => Ok(UiResponse::new(200, "image/bmp", bytes)),
+            Err(e) => Err(core_error(e)),
+        }
+    } else {
+        match node.screen_recording_snapshot(&path, frame, pts, out) {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_snapshot_of(rep))),
+            Err(e) => Err(core_error(e)),
+        }
+    }
+}
+
+/// `POST /screen/playback/start` (§167): body `{path, speed, loop}`; path required.
+async fn post_screen_playback_start(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenPlaybackStartRequest>(body)?;
+    let Some(path) = req.path.clone().filter(|p| !p.trim().is_empty()) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "playback requires a path parameter or JSON body",
+        ));
+    };
+    match node
+        .screen_playback_start(path, req.speed, req.loop_enabled)
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_playback_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `GET /screen/snapshot` (§167): `?format=&out=`; no frame → 503.
+async fn get_screen_snapshot(node: &Node, query: Option<&str>) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let format = qmap.get("format").cloned();
+    let out = qmap.get("out").cloned();
+    if format.as_deref().map(|f| f.eq_ignore_ascii_case("bmp")) == Some(true) {
+        match node.screen_snapshot_data(Some("bmp".to_string()), out) {
+            Ok((bytes, _)) => Ok(UiResponse::new(200, "image/bmp", bytes)),
+            Err(e) => Err(core_error(e)),
+        }
+    } else {
+        match node.screen_snapshot(format, out) {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_snapshot_of(rep))),
+            Err(e) => Err(core_error(e)),
+        }
+    }
+}
+
+fn screen_laser_report_of(node: &Node) -> ScreenLaserReport {
+    let rep = node.screen_annotation_report();
+    ScreenLaserReport {
+        laser_active: rep.laser_active,
+        laser: rep.laser.map(crate::apiv1::model::laser_pointer_dto_of),
+        laser_updates_total: rep.laser_updates_total,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+/// `POST /screen/laser` (§167): body `{x, y, active, color, color_rgb, radius}`.
+async fn post_screen_laser(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenLaserPatch>(body)?;
+    let color_rgb = patch.color_rgb.unwrap_or_else(|| {
+        patch
+            .color
+            .as_deref()
+            .and_then(parse_hex_rgb)
+            .unwrap_or([255, 30, 30])
+    });
+    let state = tetherly_core::LaserPointerState {
+        x: patch.x.unwrap_or(0),
+        y: patch.y.unwrap_or(0),
+        active: patch.active.unwrap_or(true),
+        color_rgb,
+        radius: patch.radius.unwrap_or(12),
+    };
+    node.screen_set_laser_pointer(state)
+        .await
+        .map_err(core_error)?;
+    Ok(json(200, &screen_laser_report_of(node)))
+}
+
+/// Strips `#` and parses exactly six hex digits into an RGB triple.
+fn parse_hex_rgb(s: &str) -> Option<[u8; 3]> {
+    let hex = s.trim().trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some([r, g, b])
+}
+
+/// Parses a legacy `"x,y"` coordinate string.
+fn parse_coord_str(s: &str) -> Option<(u16, u16)> {
+    let mut it = s.trim().split(',');
+    let x = it.next()?.trim().parse().ok()?;
+    let y = it.next()?.trim().parse().ok()?;
+    Some((x, y))
+}
+
+fn parse_points_str(s: &str) -> Vec<(u16, u16)> {
+    s.split(';')
+        .filter_map(|pair| {
+            let mut it = pair.split(',');
+            let x = it.next()?.trim().parse().ok()?;
+            let y = it.next()?.trim().parse().ok()?;
+            Some((x, y))
+        })
+        .collect()
+}
+
+/// `POST /screen/annotation` (§167): builds an `AnnotationItem` with legacy
+/// kind dispatch (`stroke|polyline|line`, `rect|box`, `arrow`, `text|note`).
+async fn post_screen_annotation(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenAnnotationCreateRequest>(body)?;
+    let kind_str = req
+        .kind
+        .clone()
+        .unwrap_or_else(|| "stroke".to_string())
+        .to_lowercase();
+    let points = req.points.clone().unwrap_or_else(|| {
+        req.points_str
+            .as_deref()
+            .map(parse_points_str)
+            .unwrap_or_default()
+    });
+    let color_rgb = req
+        .color_rgb
+        .or_else(|| req.color.as_deref().and_then(parse_hex_rgb))
+        .unwrap_or([255, 0, 0]);
+    let kind = match kind_str.as_str() {
+        "stroke" | "polyline" | "line" => {
+            if points.is_empty() {
+                return Err(error(
+                    ErrorCode::BadRequest,
+                    "stroke annotation requires non-empty points",
+                ));
+            }
+            tetherly_core::screen::AnnotationKind::Stroke { points }
+        }
+        "rect" | "box" => {
+            let w = req.w.unwrap_or(0);
+            let h = req.h.unwrap_or(0);
+            if w == 0 || h == 0 {
+                return Err(error(
+                    ErrorCode::BadRequest,
+                    "rect annotation requires non-zero width and height",
+                ));
+            }
+            tetherly_core::screen::AnnotationKind::Rect {
+                x: req.x.unwrap_or(0),
+                y: req.y.unwrap_or(0),
+                w,
+                h,
+            }
+        }
+        "arrow" => {
+            let from = req
+                .from
+                .or_else(|| req.from_str.as_deref().and_then(parse_coord_str))
+                .unwrap_or((0, 0));
+            let to = req
+                .to
+                .or_else(|| req.to_str.as_deref().and_then(parse_coord_str))
+                .unwrap_or((0, 0));
+            if from == to {
+                return Err(error(
+                    ErrorCode::BadRequest,
+                    "arrow requires distinct from and to points",
+                ));
+            }
+            tetherly_core::screen::AnnotationKind::Arrow { from, to }
+        }
+        "text" | "note" => {
+            let text = req.text.clone().unwrap_or_default();
+            if text.trim().is_empty() {
+                return Err(error(
+                    ErrorCode::BadRequest,
+                    "text annotation requires non-empty text",
+                ));
+            }
+            tetherly_core::screen::AnnotationKind::Text {
+                x: req.x.unwrap_or(0),
+                y: req.y.unwrap_or(0),
+                text,
+                scale: req.scale.unwrap_or(1),
+            }
+        }
+        other => {
+            return Err(error(
+                ErrorCode::BadRequest,
+                format!("unsupported annotation kind: {other}"),
+            ))
+        }
+    };
+    let item = tetherly_core::AnnotationItem {
+        id: 0,
+        author: req.author.unwrap_or_default(),
+        kind,
+        color_rgb,
+        thickness: req.thickness.unwrap_or(3),
+        alpha: req.alpha.unwrap_or(255),
+        ttl_ms: req.ttl_ms.unwrap_or(0),
+        created_at_ms: 0,
+    };
+    match node.screen_add_annotation(item).await {
+        Ok(id) => {
+            let rep = node.screen_annotation_report();
+            Ok(json(
+                200,
+                &ScreenAnnotationAdded {
+                    id,
+                    report: crate::apiv1::model::screen_annotations_of(rep),
+                },
+            ))
+        }
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+fn screen_annotations_now(node: &Node) -> ScreenAnnotations {
+    crate::apiv1::model::screen_annotations_of(node.screen_annotation_report())
+}
+
+/// `POST /screen/whiteboard/undo` (§167): body `{author}` optional.
+async fn post_screen_whiteboard_undo(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenAuthorRequest>(body)?;
+    match node.screen_whiteboard_undo(req.author.as_deref()).await {
+        Ok(undone) => Ok(json(
+            200,
+            &ScreenWhiteboardUndoReport {
+                undone: undone.map(crate::apiv1::model::annotation_item_dto),
+                report: screen_annotations_now(node),
+            },
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /screen/whiteboard/redo` (§167): body `{author}` optional.
+async fn post_screen_whiteboard_redo(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenAuthorRequest>(body)?;
+    match node.screen_whiteboard_redo(req.author.as_deref()).await {
+        Ok(redone) => Ok(json(
+            200,
+            &ScreenWhiteboardRedoReport {
+                redone: redone.map(crate::apiv1::model::annotation_item_dto),
+                report: screen_annotations_now(node),
+            },
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `GET /screen/whiteboard/export` (§167): `?out=` optional write target.
+async fn get_screen_whiteboard_export(node: &Node, query: Option<&str>) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let out = qmap.get("out").cloned();
+    match node.screen_whiteboard_export(out.as_deref()) {
+        Ok(snapshot) => Ok(json(
+            200,
+            &ScreenWhiteboardExportReport {
+                export: crate::apiv1::model::whiteboard_snapshot_dto_of(snapshot),
+                report: screen_annotations_now(node),
+            },
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /screen/whiteboard/import` (§167): body `{snapshot|items|file, replace}`.
+async fn post_screen_whiteboard_import(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenWhiteboardImportRequest>(body)?;
+    let snapshot = if let Some(snap) = req.snapshot {
+        crate::apiv1::model::whiteboard_snapshot_runtime(snap)
+    } else if let Some(items) = req.items {
+        tetherly_core::WhiteboardSnapshot {
+            version: 1,
+            created_at_ms: 0,
+            session_id: "import".to_string(),
+            active_items: items
+                .into_iter()
+                .map(crate::apiv1::model::annotation_item_runtime)
+                .collect(),
+            total_added_counter: 0,
+        }
+    } else if let Some(file) = req.file {
+        let raw = std::fs::read(&file)
+            .map_err(|e| error(ErrorCode::BadRequest, format!("failed to read {file}: {e}")))?;
+        if file.contains("..") {
+            return Err(error(ErrorCode::BadRequest, "path traversal rejected"));
+        }
+        let dto: tetherly_api::WhiteboardSnapshotDto = serde_json::from_slice(&raw)
+            .map_err(|e| error(ErrorCode::BadRequest, format!("bad snapshot json: {e}")))?;
+        crate::apiv1::model::whiteboard_snapshot_runtime(dto)
+    } else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "missing snapshot, items or file",
+        ));
+    };
+    match node
+        .screen_whiteboard_import(snapshot, req.replace.unwrap_or(false))
+        .await
+    {
+        Ok(count) => Ok(json(
+            200,
+            &ScreenWhiteboardImportReport {
+                imported_count: count,
+                report: screen_annotations_now(node),
+            },
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/whiteboard/policy` (§167): sparse; absent fields keep current.
+async fn patch_screen_whiteboard_policy(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenWhiteboardPolicyPatch>(body)?;
+    let cur = node.screen_whiteboard_get_policy();
+    let policy = tetherly_core::WhiteboardPolicy {
+        read_only: patch.read_only.unwrap_or(cur.read_only),
+        allow_peer_clear: patch.allow_peer_clear.unwrap_or(cur.allow_peer_clear),
+        max_items: patch.max_items.unwrap_or(cur.max_items),
+    };
+    node.screen_whiteboard_set_policy(policy)
+        .await
+        .map_err(core_error)?;
+    Ok(json(
+        200,
+        &ScreenWhiteboardPolicyView {
+            policy: crate::apiv1::model::whiteboard_policy_dto_of(
+                node.screen_whiteboard_get_policy(),
+            ),
+        },
+    ))
+}
+
+/// `PATCH /screen/watermark` (§167): sparse `ScreenWatermarkUpdate`.
+async fn patch_screen_watermark(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenWatermarkPatch>(body)?;
+    let update = crate::runtime::ScreenWatermarkUpdate {
+        enabled: patch.enabled,
+        host_enforced: patch.host_enforced,
+        text_template: patch.text,
+        opacity: patch.opacity,
+        color_rgb: patch
+            .color_rgb
+            .or_else(|| patch.color.as_deref().and_then(parse_hex_rgb)),
+        scale: patch.scale,
+        pattern: patch.pattern,
+        spacing_x: patch.spacing_x,
+        spacing_y: patch.spacing_y,
+    };
+    match node.screen_set_watermark(update).await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_watermark_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /screen/watermark/enable` (§167): body `{host_enforced}` default false.
+async fn post_screen_watermark_enable(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenWatermarkEnableRequest>(body)?;
+    match node
+        .screen_enable_watermark(req.host_enforced.unwrap_or(false))
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_watermark_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+// ==== §167: screen mode-group PATCH handlers ====
+
+/// Uniform mode parse for `FromStr` enums (invalid → 400).
+fn parse_screen_mode<T: std::str::FromStr>(s: &str, what: &str) -> Result<T, UiResponse>
+where
+    T::Err: std::fmt::Display,
+{
+    match s.parse::<T>() {
+        Ok(m) => Ok(m),
+        Err(e) => Err(error(
+            ErrorCode::BadRequest,
+            format!("invalid {what} mode: {e}"),
+        )),
+    }
+}
+
+/// `PATCH /screen/cursor` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_cursor(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenCursorPatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_cursor_of(node.screen_cursor_report()),
+        ));
+    };
+    let Some(mode) = tetherly_core::ScreenCursorMode::parse(&mode_s) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "invalid cursor mode: expected decoupled, embedded, or hidden",
+        ));
+    };
+    let rep = node.screen_set_cursor_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_cursor_of(rep)))
+}
+
+/// `PATCH /screen/trendline` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_trendline(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTrendlinePatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_trendline_of(node.screen_trendline_report()),
+        ));
+    };
+    let mode = parse_screen_mode::<tetherly_core::ScreenTrendlineMode>(&mode_s, "trendline")?;
+    let rep = node.screen_set_trendline_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_trendline_of(rep)))
+}
+
+/// `PATCH /screen/squelch` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_squelch(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenSquelchPatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_squelch_of(node.screen_squelch_report()),
+        ));
+    };
+    let mode = parse_screen_mode::<tetherly_core::ScreenSquelchMode>(&mode_s, "squelch")?;
+    let rep = node.screen_set_squelch_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_squelch_of(rep)))
+}
+
+/// `PATCH /screen/fec` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_fec(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenFecPatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_fec_of(node.screen_fec_report()),
+        ));
+    };
+    let mode = parse_screen_mode::<tetherly_core::ScreenFecMode>(&mode_s, "fec")?;
+    let rep = node.screen_set_fec_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_fec_of(rep)))
+}
+
+/// `PATCH /screen/pacer` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_pacer(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenPacerPatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_pacer_of(node.screen_pacer_report()),
+        ));
+    };
+    let mode = parse_screen_mode::<tetherly_core::ScreenPacerMode>(&mode_s, "pacer")?;
+    let rep = node.screen_set_pacer_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_pacer_of(rep)))
+}
+
+/// `PATCH /screen/harq` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_harq(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenHarqPatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_harq_of(node.screen_harq_report()),
+        ));
+    };
+    let mode = parse_screen_mode::<tetherly_core::ScreenHarqMode>(&mode_s, "harq")?;
+    let rep = node.screen_set_harq_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_harq_of(rep)))
+}
+
+/// `PATCH /screen/twcc` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_twcc(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTwccPatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_twcc_of(node.screen_twcc_report()),
+        ));
+    };
+    let mode = parse_screen_mode::<tetherly_core::ScreenTwccMode>(&mode_s, "twcc")?;
+    let rep = node.screen_set_twcc_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_twcc_of(rep)))
+}
+
+/// `PATCH /screen/sync` (§167): body `{mode, trigger}`; absent mode → report.
+async fn patch_screen_sync(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenSyncPatch>(body)?;
+    let mode_opt = patch.mode.clone();
+    if let Some(mode_s) = mode_opt {
+        let mode = parse_screen_mode::<tetherly_core::ScreenAudioSyncMode>(&mode_s, "sync")?;
+        node.screen_set_sync_mode(mode);
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_sync_of(node.screen_sync_report()),
+        ));
+    }
+    if patch.trigger == Some(true) {
+        let rep = node.trigger_screen_sync().await.map_err(core_error)?;
+        return Ok(json(200, &crate::apiv1::model::screen_sync_of(rep)));
+    }
+    Ok(json(
+        200,
+        &crate::apiv1::model::screen_sync_of(node.screen_sync_report()),
+    ))
+}
+
+/// `POST /screen/sync/trigger` (§167).
+async fn post_screen_sync_trigger(node: &Node) -> Handled {
+    match node.trigger_screen_sync().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_sync_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/latency` (§167): body `{mode, reset}`; absent mode → report.
+async fn patch_screen_latency(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenLatencyPatch>(body)?;
+    if let Some(mode_s) = patch.mode {
+        let mode =
+            parse_screen_mode::<tetherly_core::ScreenProfilerMode>(&mode_s, "latency profiler")?;
+        node.screen_set_latency_mode(mode);
+    }
+    if patch.reset == Some(true) {
+        let rep = node.screen_reset_latency().await.map_err(core_error)?;
+        return Ok(json(200, &crate::apiv1::model::screen_latency_of(rep)));
+    }
+    Ok(json(
+        200,
+        &crate::apiv1::model::screen_latency_of(node.screen_latency_report()),
+    ))
+}
+
+/// `DELETE /screen/latency` (§167): reset the profiler.
+async fn delete_screen_latency(node: &Node) -> Handled {
+    match node.screen_reset_latency().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_latency_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tuning` (§167): body `{mode, reset}`; absent mode → report.
+async fn patch_screen_tuning(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTuningPatch>(body)?;
+    if let Some(mode_s) = patch.mode {
+        let mode = parse_screen_mode::<tetherly_core::ScreenTunerMode>(&mode_s, "tuning")?;
+        let rep = node.screen_set_tuning_mode(mode).await;
+        if patch.reset == Some(true) {
+            let rep = node.screen_reset_tuning().await.map_err(core_error)?;
+            return Ok(json(200, &crate::apiv1::model::screen_tuning_of(rep)));
+        }
+        return Ok(json(200, &crate::apiv1::model::screen_tuning_of(rep)));
+    }
+    if patch.reset == Some(true) {
+        let rep = node.screen_reset_tuning().await.map_err(core_error)?;
+        return Ok(json(200, &crate::apiv1::model::screen_tuning_of(rep)));
+    }
+    Ok(json(
+        200,
+        &crate::apiv1::model::screen_tuning_of(node.screen_tuning_report()),
+    ))
+}
+
+/// `DELETE /screen/tuning` (§167): reset the autonomous tuner.
+async fn delete_screen_tuning(node: &Node) -> Handled {
+    match node.screen_reset_tuning().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tuning_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/playout` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_playout(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenPlayoutPatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_playout_of(node.screen_playout_report()),
+        ));
+    };
+    let Some(mode) = tetherly_core::ScreenPlayoutMode::parse(&mode_s) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "invalid playout mode: expected adaptive, zerolatency, or smooth",
+        ));
+    };
+    let rep = node.screen_set_playout_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_playout_of(rep)))
+}
+
+/// `PATCH /screen/matrix` (§167): body `{mode}`; absent → current report.
+async fn patch_screen_matrix(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenMatrixModePatch>(body)?;
+    let Some(mode_s) = patch.mode else {
+        return Ok(json(
+            200,
+            &crate::apiv1::model::screen_matrix_of(node.screen_matrix_report()),
+        ));
+    };
+    let Some(mode) = tetherly_core::ScreenMatrixMode::from_str_loose(&mode_s) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "invalid matrix mode: expected auto, conservative, or manual",
+        ));
+    };
+    let rep = node.screen_set_matrix_mode(mode);
+    Ok(json(200, &crate::apiv1::model::screen_matrix_of(rep)))
+}
+
+/// `PATCH /screen/color` (§167): body `{mode, threshold}`; mode defaults `full`.
+async fn patch_screen_color(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenColorPatch>(body)?;
+    let mode_s = patch.mode.unwrap_or_else(|| "full".to_string());
+    let mode = parse_screen_mode::<tetherly_core::ScreenColorMode>(&mode_s, "color")?;
+    match node.screen_set_color_mode(mode, patch.threshold).await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_color_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/color` (§167): reset to full color.
+async fn delete_screen_color(node: &Node) -> Handled {
+    match node.screen_reset_color_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_color_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/delta` (§167): body `{enabled, keyframe_interval}`; enabled default true.
+async fn patch_screen_delta(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenDeltaPatch>(body)?;
+    match node
+        .screen_set_delta_mode(patch.enabled.unwrap_or(true), patch.keyframe_interval)
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_delta_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/delta` (§167): reset delta streaming.
+async fn delete_screen_delta(node: &Node) -> Handled {
+    match node.screen_reset_delta_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_delta_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/metric` (§167): body `{enabled, sample_interval}`; enabled default true.
+async fn patch_screen_metric(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenQualityMetricPatch>(body)?;
+    match node
+        .screen_set_quality_metric_mode(patch.enabled.unwrap_or(true), patch.sample_interval)
+        .await
+    {
+        Ok(rep) => Ok(json(
+            200,
+            &crate::apiv1::model::screen_quality_metric_of(rep),
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/metric` (§167): reset the PSNR/SSIM sampler.
+async fn delete_screen_metric(node: &Node) -> Handled {
+    match node.screen_reset_quality_metric_mode().await {
+        Ok(rep) => Ok(json(
+            200,
+            &crate::apiv1::model::screen_quality_metric_of(rep),
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/qoe` (§167): body `{mode, target_psnr_db, target_ssim_pct}`; mode default `balanced`.
+async fn patch_screen_qoe(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenQoePatch>(body)?;
+    let mode_s = patch.mode.unwrap_or_else(|| "balanced".to_string());
+    let mode = parse_screen_mode::<tetherly_core::ScreenQoeMode>(&mode_s, "qoe")?;
+    match node
+        .screen_set_qoe_mode(mode, patch.target_psnr_db, patch.target_ssim_pct)
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_qoe_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/qoe` (§167): reset QoE governor.
+async fn delete_screen_qoe(node: &Node) -> Handled {
+    match node.screen_reset_qoe_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_qoe_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/pir` (§167): body `{mode, bands}`; mode default `continuous`.
+async fn patch_screen_pir(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenPirPatch>(body)?;
+    let mode_s = patch.mode.unwrap_or_else(|| "continuous".to_string());
+    let mode = parse_screen_mode::<tetherly_core::ScreenPirMode>(&mode_s, "pir")?;
+    match node.screen_set_pir_mode(mode, patch.bands).await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_pir_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/pir` (§167): reset PIR.
+async fn delete_screen_pir(node: &Node) -> Handled {
+    match node.screen_reset_pir_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_pir_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/motion` (§167): body `{enabled, max_displacement}`; defaults true / 64.
+async fn patch_screen_motion(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenMotionPatch>(body)?;
+    match node
+        .screen_set_motion_mode(
+            patch.enabled.unwrap_or(true),
+            patch
+                .max_displacement
+                .unwrap_or(tetherly_core::SCREEN_MOTION_DEFAULT_MAX_DISPLACEMENT),
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_motion_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/motion` (§167): reset frame-motion pipeline.
+async fn delete_screen_motion(node: &Node) -> Handled {
+    match node.screen_reset_motion_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_motion_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/roi` (§167): body `{x, y, w, h, zoom_percent}` (legacy defaults 0).
+async fn patch_screen_roi(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenRoiPatch>(body)?;
+    match node
+        .screen_set_roi(
+            patch.x.unwrap_or(0),
+            patch.y.unwrap_or(0),
+            patch.w.unwrap_or(0),
+            patch.h.unwrap_or(0),
+            patch.zoom_percent,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_roi_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/roi` (§167): reset ROI viewport.
+async fn delete_screen_roi(node: &Node) -> Handled {
+    match node.screen_reset_roi().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_roi_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/focus` (§167): body `{enabled, mode, radius, peripheral_skip_ratio, box_*}`.
+async fn patch_screen_focus(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenFocusPatch>(body)?;
+    let mode = match patch.mode.as_deref() {
+        Some(s) => tetherly_core::ScreenFocusMode::from_str_loose(s),
+        None => None,
+    };
+    let box_coords = match (patch.box_x, patch.box_y, patch.box_w, patch.box_h) {
+        (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
+        _ => None,
+    };
+    match node
+        .screen_set_focus_mode(
+            patch.enabled.unwrap_or(true),
+            mode,
+            patch.radius,
+            patch.peripheral_skip_ratio,
+            box_coords,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_focus_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/focus` (§167): reset focus region.
+async fn delete_screen_focus(node: &Node) -> Handled {
+    match node.screen_reset_focus_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_focus_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile` (§167): body `{enabled, tile_size}`; defaults true / 64.
+async fn patch_screen_tile(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTilePatch>(body)?;
+    match node
+        .screen_set_tile_mode(
+            patch.enabled.unwrap_or(true),
+            patch
+                .tile_size
+                .unwrap_or(tetherly_core::SCREEN_TILE_DEFAULT_SIZE),
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile` (§167): reset tile mode.
+async fn delete_screen_tile(node: &Node) -> Handled {
+    match node.screen_reset_tile_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/cache` (§167): body `{enabled, max_entries}`; defaults true / 512.
+async fn patch_screen_tile_cache(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTileCachePatch>(body)?;
+    match node
+        .screen_set_tile_cache_mode(
+            patch.enabled.unwrap_or(true),
+            patch
+                .max_entries
+                .unwrap_or(tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES),
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_cache_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/cache` (§167): reset tile cache.
+async fn delete_screen_tile_cache(node: &Node) -> Handled {
+    match node.screen_reset_tile_cache_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_cache_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/palette` (§167): body `{enabled, max_colors, enable_rle}`.
+async fn patch_screen_tile_palette(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTilePalettePatch>(body)?;
+    match node
+        .screen_set_tile_palette_mode(
+            patch.enabled.unwrap_or(true),
+            patch.max_colors,
+            patch.enable_rle,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_palette_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/palette` (§167): reset palette compression.
+async fn delete_screen_tile_palette(node: &Node) -> Handled {
+    match node.screen_reset_tile_palette_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_palette_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/predict` (§167): body `{enabled, filter_mode, enable_rct}`.
+async fn patch_screen_tile_predict(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTilePredictPatch>(body)?;
+    let filter_mode = patch
+        .filter_mode
+        .as_deref()
+        .and_then(tetherly_core::ScreenTilePredictFilter::from_str_loose);
+    match node
+        .screen_set_tile_predict_mode(patch.enabled.unwrap_or(true), filter_mode, patch.enable_rct)
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_predict_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/predict` (§167): reset predictive filter.
+async fn delete_screen_tile_predict(node: &Node) -> Handled {
+    match node.screen_reset_tile_predict_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_predict_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/present` (§167): body `{enabled, vsync_mode, double_buffer, tear_prevention}`.
+async fn patch_screen_tile_present(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTilePresentPatch>(body)?;
+    let vsync_mode = patch
+        .vsync_mode
+        .as_deref()
+        .and_then(tetherly_core::ScreenTilePresentVsyncMode::from_str_loose);
+    match node
+        .screen_set_tile_present_mode(
+            patch.enabled.unwrap_or(true),
+            vsync_mode,
+            patch.double_buffer,
+            patch.tear_prevention,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_present_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/present` (§167): reset present pipeline.
+async fn delete_screen_tile_present(node: &Node) -> Handled {
+    match node.screen_reset_tile_present_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_present_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/nack` (§167): body `{enabled, timeout_ms, max_retries}`.
+async fn patch_screen_tile_nack(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTileNackPatch>(body)?;
+    match node
+        .screen_set_tile_nack_mode(
+            patch.enabled.unwrap_or(true),
+            patch.timeout_ms,
+            patch.max_retries,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_nack_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/nack` (§167): reset tile NACK.
+async fn delete_screen_tile_nack(node: &Node) -> Handled {
+    match node.screen_reset_tile_nack_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_nack_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/saliency` (§167): body `{enabled, high_threshold, low_threshold, drop_background_on_congestion}`.
+async fn patch_screen_tile_saliency(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTileSaliencyPatch>(body)?;
+    match node
+        .screen_set_tile_saliency_mode(
+            patch.enabled.unwrap_or(true),
+            patch.high_threshold,
+            patch.low_threshold,
+            patch.drop_background_on_congestion,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_saliency_of(rep),
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/saliency` (§167): reset saliency tiering.
+async fn delete_screen_tile_saliency(node: &Node) -> Handled {
+    match node.screen_reset_tile_saliency_mode().await {
+        Ok(rep) => Ok(json(
+            200,
+            &crate::apiv1::model::screen_tile_saliency_of(rep),
+        )),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/lod` (§167): body `{enabled, max_lod, auto_lod_on_congestion}`.
+async fn patch_screen_tile_lod(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTileLodPatch>(body)?;
+    match node
+        .screen_set_tile_lod_mode(
+            patch.enabled.unwrap_or(true),
+            patch.max_lod,
+            patch.auto_lod_on_congestion,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_lod_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/lod` (§167): reset tile LOD.
+async fn delete_screen_tile_lod(node: &Node) -> Handled {
+    match node.screen_reset_tile_lod_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_lod_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/batch` (§167): body `{enabled, target_chunk_bytes, pacing_interval_us}`.
+async fn patch_screen_tile_batch(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTileBatchPatch>(body)?;
+    match node
+        .screen_set_tile_batch_mode(
+            patch.enabled.unwrap_or(true),
+            patch.target_chunk_bytes,
+            patch.pacing_interval_us,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_batch_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/batch` (§167): reset tile batching.
+async fn delete_screen_tile_batch(node: &Node) -> Handled {
+    match node.screen_reset_tile_batch_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_batch_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/tile/motion` (§167): body `{enabled, max_displacement, min_match_ratio}`.
+async fn patch_screen_tile_motion(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenTileMotionPatch>(body)?;
+    match node
+        .screen_set_tile_motion_mode(
+            patch.enabled.unwrap_or(true),
+            patch.max_displacement,
+            patch.min_match_ratio,
+        )
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_motion_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/tile/motion` (§167): reset tile motion matching.
+async fn delete_screen_tile_motion(node: &Node) -> Handled {
+    match node.screen_reset_tile_motion_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_tile_motion_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/ltr` (§167): body `{enabled, auto_interval}`; enabled default true.
+async fn patch_screen_ltr(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenLtrPatch>(body)?;
+    match node
+        .screen_set_ltr_mode(patch.enabled.unwrap_or(true), patch.auto_interval)
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_ltr_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/ltr` (§167): reset LTR.
+async fn delete_screen_ltr(node: &Node) -> Handled {
+    match node.screen_reset_ltr_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_ltr_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/svc` (§167): body `{mode, drop_t1}`; mode default `adaptive`, drop_t1 default false.
+async fn patch_screen_svc(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenSvcPatch>(body)?;
+    let mode =
+        tetherly_core::ScreenSvcMode::parse_mode(patch.mode.as_deref().unwrap_or("adaptive"));
+    match node
+        .screen_set_svc_mode(mode, patch.drop_t1.unwrap_or(false))
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_svc_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /screen/svc` (§167): reset SVC layering.
+async fn delete_screen_svc(node: &Node) -> Handled {
+    match node.screen_reset_svc_mode().await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_svc_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /screen/svc/drop-t1` (§167): body `{drop_t1}` default true.
+async fn post_screen_svc_drop_t1(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenSvcDropT1Request>(body)?;
+    match node
+        .screen_set_svc_drop_t1(req.drop_t1.unwrap_or(true))
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_svc_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /screen/probe` (§167): body `{mode, target_bps, trigger}`; absent → report.
+async fn patch_screen_probe(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenProbePatch>(body)?;
+    if let Some(mode_s) = patch.mode {
+        let mode = parse_screen_mode::<tetherly_core::ScreenProbeMode>(&mode_s, "probe")?;
+        node.screen_set_probe_mode(mode);
+    }
+    if patch.trigger == Some(true) || patch.target_bps.is_some() {
+        let rep = node
+            .trigger_screen_probe(patch.target_bps)
+            .await
+            .map_err(core_error)?;
+        return Ok(json(200, &crate::apiv1::model::screen_probe_of(rep)));
+    }
+    Ok(json(
+        200,
+        &crate::apiv1::model::screen_probe_of(node.screen_probe_report()),
+    ))
+}
+
+/// `POST /screen/probe/trigger` (§167): body `{target_bps}` optional.
+async fn post_screen_probe_trigger(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenProbePatch>(body)?;
+    match node.trigger_screen_probe(patch.target_bps).await {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_probe_of(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+// -- quality scalar setters --
+
+/// `PATCH /screen/bitrate` (§167): body `{kbps}` or `{bps}`; required.
+async fn patch_screen_bitrate(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenBitratePatch>(body)?;
+    let kbps = match (patch.kbps, patch.bps) {
+        (Some(k), _) => Some(k),
+        (None, Some(bps)) => Some(bps / 1000),
+        (None, None) => None,
+    };
+    let Some(kbps) = kbps.filter(|k| *k > 0) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "missing bitrate parameter (kbps or bps)",
+        ));
+    };
+    let rep = node.screen_set_bitrate_reported(kbps);
+    Ok(json(200, &crate::apiv1::model::screen_bitrate_of(rep)))
+}
+
+/// `PATCH /screen/fps` (§167): body `{fps}`; required.
+async fn patch_screen_fps(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenFpsPatch>(body)?;
+    let Some(fps) = patch.fps else {
+        return Err(error(ErrorCode::BadRequest, "missing fps parameter"));
+    };
+    let rep = node.screen_set_fps_reported(fps);
+    Ok(json(200, &crate::apiv1::model::screen_fps_of(rep)))
+}
+
+/// `PATCH /screen/scale` (§167): body `{scale_pct}`; required.
+async fn patch_screen_scale(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenScalePatch>(body)?;
+    let Some(scale_pct) = patch.scale_pct else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "missing scale parameter (scale_pct)",
+        ));
+    };
+    let rep = node.screen_set_scale_reported(scale_pct);
+    Ok(json(200, &crate::apiv1::model::screen_scale_of(rep)))
+}
+
+/// `PATCH /screen/profile` (§167): body `{profile, min_qp, max_qp, qp}`; absent → report.
+async fn patch_screen_profile(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<ScreenProfilePatch>(body)?;
+    if let Some(p) = patch.profile.as_deref() {
+        let profile =
+            parse_screen_mode::<tetherly_core::ScreenContentProfile>(p, "content profile")?;
+        node.screen_set_profile_reported(profile);
+    }
+    if let Some(qp) = patch.qp {
+        node.screen_set_qp_range_reported(qp, qp);
+    } else if patch.min_qp.is_some() || patch.max_qp.is_some() {
+        let cur = node.screen_qp_range();
+        let min = patch.min_qp.unwrap_or(cur.0);
+        let max = patch.max_qp.unwrap_or(cur.1);
+        node.screen_set_qp_range_reported(min, max);
+    }
+    let rep = node.screen_profile_report();
+    Ok(json(200, &crate::apiv1::model::screen_profile_of(rep)))
 }
 
 /// `PATCH /mic/policy` (§165): sparse update; body wins over legacy query

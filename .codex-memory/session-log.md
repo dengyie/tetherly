@@ -1486,3 +1486,11 @@
 - CLI 陷阱：input 请求键 forward_*→allow_*（deny_unknown_fields 400）；ancs remove-rule 改 DELETE 带 JSON 体；policy 写 POST→PATCH；printing 全部适配平铺 DTO。
 - 门禁：fmt 干净；clippy api+node --all-targets 0 错（修 9 个 model.rs 未用 import）；apiv1 28 / 契约 41 全绿；bindings 无 BLESS 一致。集成测试 + 全量交 CI。
 - 遗留：/legacy/ 别名、SPA legacy 路径、SSE watch、screen 大域 → §167。
+- §165 第二批 CI 修复链（4 轮）：e2ca137 fmt 门禁（import 清理后未复跑 fmt --check）→ 9e343b0 clippy：route arm GET /input 重复 + 3 个 mirror wrapper too_many_arguments（events.rs 同款 allow）→ d81b2a7 gate 表 allowed() GET 前缀组也含 /input（遮蔽 §165 arm）→ 178743a **全绿**（ubuntu/macos/windows/deny/android）。教训：v1.rs 改动 gate 表与 route arms 必须同查同改；推送前固定跑 clippy --all-targets + fmt --check + 单目标测试。
+
+## §168（2026-11-19）：screen 域全量迁移 v1 + /legacy/ 删除
+
+- 契约 ×113（56 报告 + 51 patch + 6 响应；生成器从 runtime 源码提炼防手抄错）+ v1 端点 ×~150 + CLI ×151（6 文件）+ /legacy 与 ui/index.html（10230 行旧控制台）删除。SPA 零 legacy 调用已核实。
+- 迁移器两坑：GET 路径透传未重写（全局字面量二次替换补刀）；变量路径 `&uri` 进 resolve 字符串拼接被破坏（undo/redo 误指根路径——index 定位修复）。
+- 契约细节：`pts` alias `pts_us`、`loop` rename、annotation `from_str`/`to_str` canonical 化；AnnotationKind tagged 镜像；`wire_enum` 泛型保证枚举 wire 串与 legacy 逐字节一致。
+- 门禁：fmt check 绿 / clippy --all-targets 0 错 0 警 / apiv1 28 + 契约 42 + uihttp 79 绿 / bins 0 错。legacy /api/* 路由面（~900 arms + 27 文件）成死代码 → §169 收敛删除。

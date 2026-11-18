@@ -264,5 +264,8 @@
 | audio | api/audio/* | GET /audio、POST attach/detach、GET|PATCH /policy | cmd_audio 6 ✅ |
 | locate | api/locate/* | GET /locate/status、POST ring/stop、GET|PATCH /policy | cmd_locate 5 ✅ |
 | display | api/display/* | GET /display/virtual、POST attach/detach、GET|PATCH /policy | cmd_display 5 ✅ |
+| screen | api/screen/*（102 路由） | GET /screen、allow/revoke/start/stop/keyframe、displays/switch、privacy、recording×4、playback×4、snapshot、laser、annotation、whiteboard×6、watermark×3 + 32 模式组 GET|PATCH|DELETE | cmd_screen_* 151 ✅ |
+
+> §168（二）补充：`/legacy` 与 `/legacy/*`（旧单文件控制台 + `ui/index.html`）已整体删除；旧控制台的 `/api/*` 调用面成为不可达死代码，归 §169 删除。screen 域契约 ×113 + 端点 ×~150 + CLI ×151 详见 DEVELOPMENT.md §168。
 
 > 契约修正：`ActiveDisplaySessionDto.mode` 由 String 修为 `DisplayModeDto`（runtime 实字段为结构体，CLI 打印器读 `mode["width"]`）。

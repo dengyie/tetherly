@@ -918,6 +918,242 @@ export type MicAttachRequest = { peer?: string, mic_id?: string, mode?: string, 
 
 export type MicDetachRequest = { reason?: string, };
 
+export type ScreenStatus = { state: string, channel_open: boolean, allowed: boolean, sent: number, received: number, dropped: number, refused: number, bytes: number, rx_bytes: number, p95_frame_interval_us?: number, active_peer?: string, acked: number, in_flight: number, rtt_latest_us?: number, rtt_p95_us?: number, is_congested: boolean, keyframes_requested: number, gaps: number, bitrate_bps: number, fps_target: number, scale_pct: number, profile: string, qp_min: number, qp_max: number, matrix_mode: string, network_health: string, playout_mode: string, playout_delay_ms: number, playout_jitter_ms: number, playout_buffered: number, playout_dropped_late: number, cursor_mode: string, cursor_x: number, cursor_y: number, cursor_visible: boolean, cursor_shape: string, cursor_updates_sent: number, cursor_updates_received: number, squelch_mode: string, is_squelched: boolean, squelched_frames: number, fec_mode: string, fec_redundancy_pct: number, fec_recovered_shards: number, fec_unrecoverable_blocks: number, pacer_mode: string, pacer_packets_paced: number, pacer_bursts_smoothed: number, pacer_avg_delay_us: number, trendline_mode: string, trendline_state: string, trendline_slope_us: number, trendline_overuse_count: number, harq_mode: string, harq_nacks_sent: number, harq_nacks_received: number, harq_shards_retransmitted: number, harq_recovered_frames: number, harq_retransmit_timeouts: number, harq_buffer_occupancy: number, twcc_mode: string, twcc_feedbacks_sent: number, twcc_feedbacks_received: number, twcc_delivery_rate_bps: number, twcc_delay_gradient_us: number, twcc_loss_ratio: number, probe_mode: string, probe_state: string, probes_triggered: number, probes_completed: number, probes_failed: number, probe_target_bps: number, probe_measured_bps: number, sync_mode: string, sync_beacons_sent: number, sync_beacons_received: number, sync_skew_us: number, sync_clock_drift_ppm: number, sync_adjustments_applied: number, in_sync: boolean, active_display_id: number, display_count: number, display_switches_count: number, privacy_enabled: boolean, privacy_input_locked: boolean, privacy_blanking_method: string, latency_mode: string, latency_bottleneck: string, latency_total_e2e_us: number, latency_p95_e2e_us: number, latency_frames_profiled: number, tuning_mode: string, tuning_actions_total: number, tuning_recoveries: number, tuning_last_stage: string, tuning_last_action: string, recording_active: boolean, peer_recording: boolean, recording_frames: number, playback_active: boolean, playback_state: string, playback_frame: number, snapshot_count: number, watermark_enabled: boolean, watermark_enforced: boolean, watermark_frames: number, annotations_count: number, laser_active: boolean, annotations_total: number, laser_updates_total: number, whiteboard_undo_count: number, whiteboard_redo_count: number, whiteboard_read_only: boolean, whiteboard_max_items: number, roi_active: boolean, roi_x: number, roi_y: number, roi_w: number, roi_h: number, roi_zoom_percent: number, roi_updates: number, color_mode: string, color_threshold: number, color_updates: number, delta_enabled: boolean, delta_keyframe_interval: number, delta_frames_sent: number, delta_keyframes_sent: number, delta_frames_received: number, delta_keyframes_received: number, delta_saved_bytes: number, metric_enabled: boolean, metric_sample_interval: number, metric_evaluated_frames: number, metric_psnr_db: number, metric_ssim: number, metric_quality_warning: boolean, qoe_enabled: boolean, qoe_mode: string, qoe_target_psnr_db: number, qoe_target_ssim_pct: number, qoe_actions_total: number, qoe_last_action: string, pir_enabled: boolean, pir_mode: string, pir_bands: number, pir_sweeps_completed: number, pir_slices_sent: number, ltr_enabled: boolean, ltr_auto_interval: number, ltr_current_seq: number, ltr_anchors_established: number, ltr_recoveries_completed: number, svc_enabled: boolean, svc_mode: string, svc_drop_t1: boolean, svc_t0_sent: number, svc_t1_sent: number, svc_t1_dropped: number, motion_enabled: boolean, motion_max_displacement: number, motion_frames_sent: number, motion_fallback_frames_sent: number, motion_saved_bytes: number, tile_enabled: boolean, tile_size: number, tile_frames_sent: number, dirty_tiles_sent: number, skipped_tiles_count: number, tile_saved_bytes: number, tile_cache_enabled: boolean, tile_cache_max_entries: number, tile_cache_entries: number, tile_cache_hits: number, tile_cache_misses: number, tile_cache_hit_ratio_pct: number, tile_cache_saved_bytes: number, focus_enabled: boolean, focus_mode: string, focus_radius: number, focus_peripheral_skip_ratio: number, focus_box_x: number, focus_box_y: number, focus_box_w: number, focus_box_h: number, focus_tiles_sent: number, peripheral_tiles_sent: number, peripheral_tiles_skipped: number, focus_saved_bandwidth_bytes: number, tile_palette_enabled: boolean, tile_palette_max_colors: number, tile_palette_enable_rle: boolean, tile_palette_solid_tiles: number, tile_palette_bilevel_tiles: number, tile_palette_palette_tiles: number, tile_palette_truecolor_tiles: number, tile_palette_saved_bytes: number, tile_predict_enabled: boolean, tile_predict_filter_mode: string, tile_predict_enable_rct: boolean, tile_predict_tiles_sent: number, tile_predict_saved_bytes: number, tile_present_enabled: boolean, tile_present_vsync_mode: string, tile_present_double_buffer: boolean, tile_present_tear_prevention: boolean, tile_present_committed_transactions: number, tile_present_swapped_frames: number, tile_present_torn_frames_prevented: number, tile_present_avg_swap_latency_us: number, tile_nack_enabled: boolean, tile_nack_timeout_ms: number, tile_nack_max_retries: number, tile_nack_requests_sent: number, tile_nack_tiles_retransmitted: number, tile_nack_degraded_commits: number, tile_saliency_enabled: boolean, tile_saliency_high_threshold: number, tile_saliency_low_threshold: number, tile_saliency_drop_background_on_congestion: boolean, tile_saliency_critical_tiles: number, tile_saliency_normal_tiles: number, tile_saliency_background_tiles: number, tile_saliency_background_skipped: number, tile_lod_enabled: boolean, tile_lod_max_lod: number, tile_lod_auto_lod_on_congestion: boolean, tile_lod0_tiles: number, tile_lod1_tiles: number, tile_lod2_tiles: number, tile_lod_bytes_saved: number, tile_batch_enabled: boolean, tile_batch_target_chunk_bytes: number, tile_batch_pacing_interval_us: number, tile_batches_sent: number, tile_chunks_sent: number, tile_batch_avg_chunk_bytes: number, tile_batch_pacing_pauses: number, tile_motion_enabled: boolean, tile_motion_max_displacement: number, tile_motion_min_match_ratio: number, tile_motion_tiles_sent: number, tile_motion_fallback_tiles_sent: number, tile_motion_bytes_saved: number, };
+
+export type ScreenControl = { action: string, state: string, allowed: boolean, peer?: string, timestamp_ms: number, };
+
+export type ScreenDisplays = { active_display_id: number, displays: Array<ScreenDisplayInfoDto>, switches_count: number, last_switch_us: number, };
+
+export type ScreenDisplayInfoDto = { display_id: number, title: string, width: number, height: number, scale_factor_pct: number, is_primary: boolean, is_virtual: boolean, };
+
+export type ScreenPrivacy = { enabled: boolean, lock_input: boolean, blanking_method: string, last_change_us: number, };
+
+export type ScreenRecording = { active: boolean, path: string, frames_recorded: number, bytes_recorded: number, started_at_us: number, duration_us: number, last_frame_seq: number, peer_recording: boolean, width: number, height: number, };
+
+export type ScreenRecordingReplay = { path: string, width: number, height: number, format_tag: number, codec_tag: number, started_at_us: number, records: Array<ScreenReplayRecordDto>, records_returned: number, truncated: boolean, };
+
+export type ScreenReplayRecordDto = { seq: number, pts_us: number, len: number, };
+
+export type ScreenPlayback = { state: string, path: string, speed: number, loop_enabled: boolean, current_frame: number, total_frames: number, elapsed_ms: number, duration_ms: number, width: number, height: number, format: string, codec: string, };
+
+export type ScreenSnapshot = { source: string, frame_seq: number, pts_us: number, width: number, height: number, format: string, bytes_len: number, privacy_blanked: boolean, watermarked: boolean, path?: string, data_base64?: string, };
+
+export type ScreenPir = { mode: string, bands: number, sweeps_completed: number, slices_sent: number, current_band: number, active_sweep: boolean, };
+
+export type ScreenLtr = { enabled: boolean, auto_interval: number, current_ltr_seq: number, anchors_established: number, recoveries_requested: number, recoveries_completed: number, saved_burst_bytes: number, };
+
+export type ScreenSvc = { enabled: boolean, mode: string, drop_t1: boolean, t0_frames_sent: number, t1_frames_sent: number, t1_frames_dropped: number, saved_bandwidth_bytes: number, };
+
+export type ScreenCursor = { mode: string, x: number, y: number, visible: boolean, shape: string, updates_sent: number, updates_received: number, updates_dropped_dedup: number, updates_dropped_rate: number, timestamp_ms: number, };
+
+export type ScreenTrendline = { mode: string, state: string, samples_count: number, current_slope_us_per_frame: number, threshold_us_per_frame: number, overuse_count: number, underuse_count: number, accumulated_delay_us: number, timestamp_ms: number, };
+
+export type ScreenProbe = { mode: string, state: string, probes_triggered: number, probes_completed: number, probes_failed: number, last_target_bps: number, last_measured_bps: number, last_rtt_us: number, last_loss_ratio: number, last_delay_gradient_us: number, active_cluster_id?: number, timestamp_ms: number, };
+
+export type ScreenSquelch = { mode: string, is_squelched: boolean, frames_evaluated: number, frames_passed: number, frames_squelched: number, keepalive_frames: number, last_dirty_ratio: number, consecutive_static_frames: number, timestamp_ms: number, };
+
+export type ScreenFec = { mode: string, redundancy_pct: number, blocks_encoded: number, data_shards_sent: number, parity_shards_sent: number, blocks_decoded: number, recovered_shards: number, unrecoverable_blocks: number, timestamp_ms: number, };
+
+export type ScreenPacer = { mode: string, packets_paced: number, bursts_smoothed: number, avg_delay_us: number, last_delay_us: number, timestamp_ms: number, };
+
+export type ScreenHarq = { mode: string, nacks_sent: number, nacks_received: number, shards_retransmitted: number, recovered_frames: number, retransmit_timeouts: number, buffer_occupancy: number, buffer_capacity: number, timestamp_ms: number, };
+
+export type ScreenTwcc = { mode: string, feedbacks_sent: number, feedbacks_received: number, packets_tracked: number, packets_acknowledged: number, packets_lost: number, loss_ratio: number, delivery_rate_bps: number, delay_gradient_us: number, smoothed_rtt_us: number, timestamp_ms: number, };
+
+export type ScreenSync = { mode: string, beacons_sent: number, beacons_received: number, current_skew_us: number, clock_drift_ppm: number, adjustments_applied: number, in_sync: boolean, timestamp_ms: number, };
+
+export type ScreenLatency = { mode: string, frames_profiled: number, bottleneck: string, current: ScreenLatencyBreakdownDto, avg_e2e_us: number, p50_e2e_us: number, p90_e2e_us: number, p95_e2e_us: number, p99_e2e_us: number, min_e2e_us: number, max_e2e_us: number, avg_capture_us: number, avg_encode_us: number, avg_pacer_us: number, avg_network_us: number, avg_jitter_us: number, avg_decode_us: number, avg_render_us: number, };
+
+export type ScreenLatencyBreakdownDto = { frame_seq: number, capture_us: number, encode_us: number, pacer_us: number, network_us: number, jitter_us: number, decode_us: number, render_us: number, total_e2e_us: number, };
+
+export type ScreenTuning = { mode: string, actions_applied: number, recoveries_applied: number, last_stage: string, last_action: string, bottleneck_streak: number, balanced_streak: number, last_decision?: ScreenTuningDecisionDto, };
+
+export type ScreenTuningDecisionDto = { frame_seq: number, stage: string, action: string, new_bitrate_bps?: number, new_fps?: number, new_scale_pct?: number, new_qp_max?: number, new_playout_delay_us?: number, recovered: boolean, at_us: number, };
+
+export type ScreenPlayout = { mode: string, target_delay_ms: number, current_jitter_ms: number, target_delay_us: number, current_jitter_us: number, buffered_frames: number, played_frames: number, dropped_late_frames: number, dropped_overflow_frames: number, custom_delay_us?: number, timestamp_ms: number, };
+
+export type ScreenMatrix = { mode: string, health: string, bitrate_bps: number, fps_target: number, scale_pct: number, profile: string, qp_min: number, qp_max: number, auto_fps: boolean, auto_scale: boolean, consecutive_healthy_acks: number, consecutive_drops: number, in_flight: number, rtt_us?: number, timestamp_ms: number, };
+
+export type ScreenProfile = { profile: string, min_qp: number, max_qp: number, is_custom_qp: boolean, auto_profile: boolean, timestamp_ms: number, };
+
+export type ScreenScale = { scale_pct: number, min_scale_pct: number, max_scale_pct: number, auto_profile: boolean, timestamp_ms: number, };
+
+export type ScreenFps = { fps: number, min_fps: number, max_fps: number, interval_us: number, auto_profile: boolean, timestamp_ms: number, };
+
+export type ScreenBitrate = { bitrate_bps: number, bitrate_kbps: number, min_bps: number, max_bps: number, timestamp_ms: number, };
+
+export type ScreenColor = { mode: string, threshold: number, is_active: boolean, update_count: number, };
+
+export type ScreenDelta = { enabled: boolean, keyframe_interval: number, delta_frames_sent: number, keyframes_sent: number, delta_frames_received: number, keyframes_received: number, saved_bytes: number, };
+
+export type ScreenQualityMetric = { enabled: boolean, sample_interval: number, evaluated_frames: number, avg_mse: number, avg_psnr_db: number, avg_ssim: number, last_psnr_db: number, last_ssim: number, quality_warning: boolean, };
+
+export type ScreenQoe = { mode: string, target_psnr_db: number, target_ssim_pct: number, actions_total: number, last_action: string, last_action_reason: string, in_cooldown: boolean, active_boosts: number, };
+
+export type ScreenMotion = { enabled: boolean, max_displacement: number, motion_frames_sent: number, fallback_frames_sent: number, saved_bandwidth_bytes: number, };
+
+export type ScreenRoi = { active: boolean, x: number, y: number, w: number, h: number, zoom_percent: number, source_w: number, source_h: number, effective_w: number, effective_h: number, update_count: number, };
+
+export type ScreenWatermark = { enabled: boolean, host_enforced: boolean, text_template: string, rendered_text: string, opacity: number, opacity_pct: number, color_rgb: [number, number, number], color_hex: string, scale: number, pattern: string, spacing_x: number, spacing_y: number, frames_watermarked: number, };
+
+export type ScreenAnnotations = { annotations_count: number, annotations: Array<AnnotationItemDto>, laser_active: boolean, laser?: LaserPointerDto, total_annotations_added: number, laser_updates_total: number, timestamp_ms: number, whiteboard_policy: WhiteboardPolicyDto, redo_count: number, };
+
+export type LaserPointerDto = { x: number, y: number, active: boolean, color_rgb: [number, number, number], radius: number, };
+
+export type WhiteboardPolicyDto = { read_only: boolean, allow_peer_clear: boolean, max_items: number, };
+
+export type WhiteboardSnapshotDto = { version: number, created_at_ms: number, session_id: string, active_items: Array<AnnotationItemDto>, total_added_counter: number, };
+
+export type ScreenTile = { enabled: boolean, tile_size: number, grid_frames_sent: number, dirty_tiles_sent: number, skipped_tiles_count: number, saved_bandwidth_bytes: number, };
+
+export type ScreenTileCache = { enabled: boolean, max_entries: number, current_entries: number, cache_hits: number, cache_misses: number, hit_ratio_pct: number, saved_bandwidth_bytes: number, };
+
+export type ScreenFocus = { enabled: boolean, mode: string, radius: number, peripheral_skip_ratio: number, box_x: number, box_y: number, box_w: number, box_h: number, focus_tiles_sent: number, peripheral_tiles_sent: number, peripheral_tiles_skipped: number, saved_bandwidth_bytes: number, };
+
+export type ScreenTilePalette = { enabled: boolean, max_colors: number, enable_rle: boolean, solid_tiles_count: number, bilevel_tiles_count: number, palette_tiles_count: number, truecolor_tiles_count: number, saved_bandwidth_bytes: number, };
+
+export type ScreenTilePredict = { enabled: boolean, filter_mode: string, enable_rct: boolean, predict_tiles_count: number, saved_bandwidth_bytes: number, };
+
+export type ScreenTilePresent = { enabled: boolean, vsync_mode: string, double_buffer: boolean, tear_prevention: boolean, committed_transactions: number, swapped_frames: number, torn_frames_prevented: number, avg_swap_latency_us: number, };
+
+export type ScreenTileNack = { enabled: boolean, timeout_ms: number, max_retries: number, nack_requests_sent: number, tiles_retransmitted: number, degraded_commits: number, };
+
+export type ScreenTileSaliency = { enabled: boolean, high_threshold: number, low_threshold: number, drop_background_on_congestion: boolean, critical_tiles_sent: number, normal_tiles_sent: number, background_tiles_sent: number, background_tiles_skipped: number, };
+
+export type ScreenTileLod = { enabled: boolean, max_lod: number, auto_lod_on_congestion: boolean, lod0_tiles_sent: number, lod1_tiles_sent: number, lod2_tiles_sent: number, bytes_saved: number, };
+
+export type ScreenTileBatch = { enabled: boolean, target_chunk_bytes: number, pacing_interval_us: number, batches_sent: number, chunks_sent: number, avg_chunk_bytes: number, pacing_pauses: number, };
+
+export type ScreenTileMotion = { enabled: boolean, max_displacement: number, min_match_ratio: number, motion_tiles_sent: number, fallback_tiles_sent: number, bytes_saved: number, };
+
+export type ScreenAnnotationAdded = { id: number, report: ScreenAnnotations, };
+
+export type ScreenWhiteboardUndoReport = { undone?: AnnotationItemDto, report: ScreenAnnotations, };
+
+export type ScreenWhiteboardRedoReport = { redone?: AnnotationItemDto, report: ScreenAnnotations, };
+
+export type ScreenWhiteboardExportReport = { export: WhiteboardSnapshotDto, report: ScreenAnnotations, };
+
+export type ScreenWhiteboardImportReport = { imported_count: number, report: ScreenAnnotations, };
+
+export type ScreenWhiteboardPolicyView = { policy: WhiteboardPolicyDto, };
+
+export type ScreenLaserReport = { laser_active: boolean, laser?: LaserPointerDto, laser_updates_total: number, timestamp_ms: number, };
+
+export type ScreenStartRequest = { peer?: string, };
+
+export type ScreenSwitchRequest = { display_id?: number, };
+
+export type ScreenPrivacyPatch = { enabled?: boolean, lock_input?: boolean, };
+
+export type ScreenRecordingStartRequest = { path?: string, };
+
+export type ScreenPlaybackStartRequest = { path?: string, speed?: number, loop?: boolean, };
+
+export type ScreenRecordingSnapshotRequest = { path?: string, frame?: number, pts?: number, out?: string, format?: string, };
+
+export type ScreenCursorPatch = { mode?: string, };
+
+export type ScreenTrendlinePatch = { mode?: string, };
+
+export type ScreenProbePatch = { mode?: string, target_bps?: number, trigger?: boolean, };
+
+export type ScreenSquelchPatch = { mode?: string, };
+
+export type ScreenFecPatch = { mode?: string, };
+
+export type ScreenPacerPatch = { mode?: string, };
+
+export type ScreenHarqPatch = { mode?: string, };
+
+export type ScreenTwccPatch = { mode?: string, };
+
+export type ScreenSyncPatch = { mode?: string, trigger?: boolean, };
+
+export type ScreenLatencyPatch = { mode?: string, reset?: boolean, };
+
+export type ScreenTuningPatch = { mode?: string, reset?: boolean, };
+
+export type ScreenPlayoutPatch = { mode?: string, };
+
+export type ScreenMatrixModePatch = { mode?: string, };
+
+export type ScreenProfilePatch = { profile?: string, min_qp?: number, max_qp?: number, qp?: number, };
+
+export type ScreenScalePatch = { scale_pct?: number, };
+
+export type ScreenFpsPatch = { fps?: number, };
+
+export type ScreenBitratePatch = { kbps?: number, bps?: number, };
+
+export type ScreenColorPatch = { mode?: string, threshold?: number, };
+
+export type ScreenDeltaPatch = { enabled?: boolean, keyframe_interval?: number, };
+
+export type ScreenQualityMetricPatch = { enabled?: boolean, sample_interval?: number, };
+
+export type ScreenQoePatch = { mode?: string, target_psnr_db?: number, target_ssim_pct?: number, };
+
+export type ScreenPirPatch = { mode?: string, bands?: number, };
+
+export type ScreenMotionPatch = { enabled?: boolean, max_displacement?: number, };
+
+export type ScreenRoiPatch = { x?: number, y?: number, w?: number, h?: number, zoom_percent?: number, };
+
+export type ScreenLtrPatch = { enabled?: boolean, auto_interval?: number, };
+
+export type ScreenSvcPatch = { mode?: string, drop_t1?: boolean, };
+
+export type ScreenSvcDropT1Request = { drop_t1?: boolean, };
+
+export type ScreenWatermarkPatch = { enabled?: boolean, host_enforced?: boolean, text?: string, opacity?: number, color?: string, color_rgb?: [number, number, number], scale?: number, pattern?: string, spacing_x?: number, spacing_y?: number, };
+
+export type ScreenWatermarkEnableRequest = { host_enforced?: boolean, };
+
+export type ScreenLaserPatch = { x?: number, y?: number, active?: boolean, color?: string, color_rgb?: [number, number, number], radius?: number, };
+
+export type ScreenAnnotationCreateRequest = { author?: string, kind?: string, points?: Array<[number, number]>, points_str?: string, x?: number, y?: number, w?: number, h?: number, from?: [number, number], to?: [number, number], 
+/**
+ * `"x,y"` string form (legacy alias).
+ */
+from_str?: string, 
+/**
+ * `"x,y"` string form (legacy alias).
+ */
+to_str?: string, text?: string, scale?: number, color?: string, color_rgb?: [number, number, number], thickness?: number, alpha?: number, ttl_ms?: number, };
+
+export type ScreenAuthorRequest = { author?: string, };
+
+export type ScreenWhiteboardImportRequest = { snapshot?: WhiteboardSnapshotDto, items?: Array<AnnotationItemDto>, file?: string, replace?: boolean, };
+
+export type ScreenWhiteboardPolicyPatch = { read_only?: boolean, allow_peer_clear?: boolean, max_items?: number, };
+
+export type ScreenTilePatch = { enabled?: boolean, tile_size?: number, };
+
+export type ScreenTileCachePatch = { enabled?: boolean, max_entries?: number, };
+
+export type ScreenFocusPatch = { enabled?: boolean, mode?: string, radius?: number, peripheral_skip_ratio?: number, box_x?: number, box_y?: number, box_w?: number, box_h?: number, };
+
+export type ScreenTilePalettePatch = { enabled?: boolean, max_colors?: number, enable_rle?: boolean, };
+
+export type ScreenTilePredictPatch = { enabled?: boolean, filter_mode?: string, enable_rct?: boolean, };
+
+export type ScreenTilePresentPatch = { enabled?: boolean, vsync_mode?: string, double_buffer?: boolean, tear_prevention?: boolean, };
+
+export type ScreenTileNackPatch = { enabled?: boolean, timeout_ms?: number, max_retries?: number, };
+
+export type ScreenTileSaliencyPatch = { enabled?: boolean, high_threshold?: number, low_threshold?: number, drop_background_on_congestion?: boolean, };
+
+export type ScreenTileLodPatch = { enabled?: boolean, max_lod?: number, auto_lod_on_congestion?: boolean, };
+
+export type ScreenTileBatchPatch = { enabled?: boolean, target_chunk_bytes?: number, pacing_interval_us?: number, };
+
+export type ScreenTileMotionPatch = { enabled?: boolean, max_displacement?: number, min_match_ratio?: number, };
+
+export type AnnotationItemDto = { id: number, author: string, kind: AnnotationKindDto, color_rgb: [number, number, number], thickness: number, alpha: number, ttl_ms: number, created_at_ms: number, };
+
+export type AnnotationKindDto = { "type": "stroke", points: Array<[number, number]>, } | { "type": "rect", x: number, y: number, w: number, h: number, } | { "type": "arrow", from: [number, number], to: [number, number], } | { "type": "text", x: number, y: number, text: string, scale: number, };
+
 export type SpatialPositionDto = { x: number, y: number, z: number, };
 
 export type ActiveAudioSessionDto = { session_id: string, peer_id: string, 

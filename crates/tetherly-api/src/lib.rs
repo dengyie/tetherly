@@ -4552,6 +4552,2230 @@ pub struct DisplayDetachRequest {
     pub reason: Option<String>,
 }
 
+// ---- §167: screen streaming domain ----
+
+/// Screen v1 contract: `ScreenStatus` (legacy `ScreenStatusReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenStatus {
+    pub state: String,
+    pub channel_open: bool,
+    pub allowed: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dropped: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub refused: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rx_bytes: u64,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub p95_frame_interval_us: Option<u64>,
+    #[cfg_attr(test, ts(optional))]
+    pub active_peer: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub acked: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub in_flight: u64,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub rtt_latest_us: Option<u64>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub rtt_p95_us: Option<u64>,
+    pub is_congested: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub keyframes_requested: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub gaps: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bitrate_bps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fps_target: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub scale_pct: u32,
+    pub profile: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub qp_min: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub qp_max: u8,
+    pub matrix_mode: String,
+    pub network_health: String,
+    pub playout_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub playout_delay_ms: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub playout_jitter_ms: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub playout_buffered: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub playout_dropped_late: u64,
+    pub cursor_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cursor_x: i32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cursor_y: i32,
+    pub cursor_visible: bool,
+    pub cursor_shape: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cursor_updates_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cursor_updates_received: u64,
+    pub squelch_mode: String,
+    pub is_squelched: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub squelched_frames: u64,
+    pub fec_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fec_redundancy_pct: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fec_recovered_shards: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fec_unrecoverable_blocks: u64,
+    pub pacer_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pacer_packets_paced: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pacer_bursts_smoothed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pacer_avg_delay_us: u64,
+    pub trendline_mode: String,
+    pub trendline_state: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub trendline_slope_us: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub trendline_overuse_count: u64,
+    pub harq_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub harq_nacks_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub harq_nacks_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub harq_shards_retransmitted: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub harq_recovered_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub harq_retransmit_timeouts: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub harq_buffer_occupancy: usize,
+    pub twcc_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub twcc_feedbacks_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub twcc_feedbacks_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub twcc_delivery_rate_bps: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub twcc_delay_gradient_us: i64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub twcc_loss_ratio: f32,
+    pub probe_mode: String,
+    pub probe_state: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probes_triggered: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probes_completed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probes_failed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probe_target_bps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probe_measured_bps: u64,
+    pub sync_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sync_beacons_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sync_beacons_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sync_skew_us: i64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sync_clock_drift_ppm: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sync_adjustments_applied: u64,
+    pub in_sync: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub active_display_id: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub display_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub display_switches_count: u64,
+    pub privacy_enabled: bool,
+    pub privacy_input_locked: bool,
+    pub privacy_blanking_method: String,
+    pub latency_mode: String,
+    pub latency_bottleneck: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub latency_total_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub latency_p95_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub latency_frames_profiled: u64,
+    pub tuning_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tuning_actions_total: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tuning_recoveries: u64,
+    pub tuning_last_stage: String,
+    pub tuning_last_action: String,
+    pub recording_active: bool,
+    pub peer_recording: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub recording_frames: u64,
+    pub playback_active: bool,
+    pub playback_state: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub playback_frame: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub snapshot_count: u64,
+    pub watermark_enabled: bool,
+    pub watermark_enforced: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub watermark_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub annotations_count: usize,
+    pub laser_active: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub annotations_total: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub laser_updates_total: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub whiteboard_undo_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub whiteboard_redo_count: u64,
+    pub whiteboard_read_only: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub whiteboard_max_items: u16,
+    pub roi_active: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub roi_x: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub roi_y: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub roi_w: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub roi_h: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub roi_zoom_percent: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub roi_updates: u64,
+    pub color_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub color_threshold: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub color_updates: u64,
+    pub delta_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_keyframe_interval: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_keyframes_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_frames_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_keyframes_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_saved_bytes: u64,
+    pub metric_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub metric_sample_interval: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub metric_evaluated_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub metric_psnr_db: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub metric_ssim: f64,
+    pub metric_quality_warning: bool,
+    pub qoe_enabled: bool,
+    pub qoe_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub qoe_target_psnr_db: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub qoe_target_ssim_pct: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub qoe_actions_total: u64,
+    pub qoe_last_action: String,
+    pub pir_enabled: bool,
+    pub pir_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pir_bands: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pir_sweeps_completed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pir_slices_sent: u64,
+    pub ltr_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub ltr_auto_interval: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub ltr_current_seq: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub ltr_anchors_established: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub ltr_recoveries_completed: u64,
+    pub svc_enabled: bool,
+    pub svc_mode: String,
+    pub svc_drop_t1: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub svc_t0_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub svc_t1_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub svc_t1_dropped: u64,
+    pub motion_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub motion_max_displacement: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub motion_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub motion_fallback_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub motion_saved_bytes: u64,
+    pub tile_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_size: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dirty_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub skipped_tiles_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_saved_bytes: u64,
+    pub tile_cache_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_cache_max_entries: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_cache_entries: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_cache_hits: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_cache_misses: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_cache_hit_ratio_pct: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_cache_saved_bytes: u64,
+    pub focus_enabled: bool,
+    pub focus_mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_radius: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_peripheral_skip_ratio: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_box_x: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_box_y: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_box_w: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_box_h: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub peripheral_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub peripheral_tiles_skipped: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_saved_bandwidth_bytes: u64,
+    pub tile_palette_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_palette_max_colors: u8,
+    pub tile_palette_enable_rle: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_palette_solid_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_palette_bilevel_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_palette_palette_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_palette_truecolor_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_palette_saved_bytes: u64,
+    pub tile_predict_enabled: bool,
+    pub tile_predict_filter_mode: String,
+    pub tile_predict_enable_rct: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_predict_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_predict_saved_bytes: u64,
+    pub tile_present_enabled: bool,
+    pub tile_present_vsync_mode: String,
+    pub tile_present_double_buffer: bool,
+    pub tile_present_tear_prevention: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_present_committed_transactions: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_present_swapped_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_present_torn_frames_prevented: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_present_avg_swap_latency_us: u64,
+    pub tile_nack_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_nack_timeout_ms: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_nack_max_retries: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_nack_requests_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_nack_tiles_retransmitted: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_nack_degraded_commits: u64,
+    pub tile_saliency_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_saliency_high_threshold: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_saliency_low_threshold: u8,
+    pub tile_saliency_drop_background_on_congestion: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_saliency_critical_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_saliency_normal_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_saliency_background_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_saliency_background_skipped: u64,
+    pub tile_lod_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_lod_max_lod: u8,
+    pub tile_lod_auto_lod_on_congestion: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_lod0_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_lod1_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_lod2_tiles: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_lod_bytes_saved: u64,
+    pub tile_batch_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_batch_target_chunk_bytes: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_batch_pacing_interval_us: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_batches_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_chunks_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_batch_avg_chunk_bytes: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_batch_pacing_pauses: u64,
+    pub tile_motion_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_motion_max_displacement: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_motion_min_match_ratio: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_motion_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_motion_fallback_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_motion_bytes_saved: u64,
+}
+
+/// Screen v1 contract: `ScreenControl` (legacy `ScreenControlReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenControl {
+    pub action: String,
+    pub state: String,
+    pub allowed: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenDisplays` (legacy `ScreenDisplayReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenDisplays {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub active_display_id: u8,
+    pub displays: Vec<ScreenDisplayInfoDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub switches_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_switch_us: u64,
+}
+
+/// Screen v1 contract: `ScreenDisplayInfoDto` (legacy `ScreenDisplayInfo` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenDisplayInfoDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub display_id: u8,
+    pub title: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub height: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub scale_factor_pct: u32,
+    pub is_primary: bool,
+    pub is_virtual: bool,
+}
+
+/// Screen v1 contract: `ScreenPrivacy` (legacy `ScreenPrivacyReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenPrivacy {
+    pub enabled: bool,
+    pub lock_input: bool,
+    pub blanking_method: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_change_us: u64,
+}
+
+/// Screen v1 contract: `ScreenRecording` (legacy `ScreenRecordingReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenRecording {
+    pub active: bool,
+    pub path: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_recorded: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_recorded: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub duration_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_frame_seq: u64,
+    pub peer_recording: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub height: u32,
+}
+
+/// Screen v1 contract: `ScreenRecordingReplay` (legacy `ScreenRecordingReplayReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenRecordingReplay {
+    pub path: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub height: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub format_tag: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub codec_tag: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at_us: u64,
+    pub records: Vec<ScreenReplayRecordDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub records_returned: usize,
+    pub truncated: bool,
+}
+
+/// Screen v1 contract: `ScreenReplayRecordDto` (legacy `ScreenRecordingReplayRecord` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenReplayRecordDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub seq: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pts_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub len: usize,
+}
+
+/// Screen v1 contract: `ScreenPlayback` (legacy `ScreenPlaybackReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenPlayback {
+    pub state: String,
+    pub path: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub speed: f32,
+    pub loop_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_frame: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub elapsed_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub duration_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub width: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub height: u16,
+    pub format: String,
+    pub codec: String,
+}
+
+/// Screen v1 contract: `ScreenSnapshot` (legacy `ScreenSnapshotReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenSnapshot {
+    pub source: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frame_seq: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pts_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub height: u32,
+    pub format: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_len: usize,
+    pub privacy_blanked: bool,
+    pub watermarked: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub data_base64: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenPir` (legacy `ScreenPirReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenPir {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bands: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sweeps_completed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub slices_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_band: u8,
+    pub active_sweep: bool,
+}
+
+/// Screen v1 contract: `ScreenLtr` (legacy `ScreenLtrReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenLtr {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub auto_interval: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_ltr_seq: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub anchors_established: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub recoveries_requested: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub recoveries_completed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_burst_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenSvc` (legacy `ScreenSvcReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenSvc {
+    pub enabled: bool,
+    pub mode: String,
+    pub drop_t1: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub t0_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub t1_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub t1_frames_dropped: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_bandwidth_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenCursor` (legacy `ScreenCursorReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenCursor {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub x: i32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub y: i32,
+    pub visible: bool,
+    pub shape: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub updates_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub updates_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub updates_dropped_dedup: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub updates_dropped_rate: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenTrendline` (legacy `ScreenTrendlineReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTrendline {
+    pub mode: String,
+    pub state: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub samples_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_slope_us_per_frame: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub threshold_us_per_frame: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub overuse_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub underuse_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub accumulated_delay_us: i64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenProbe` (legacy `ScreenProbeReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenProbe {
+    pub mode: String,
+    pub state: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probes_triggered: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probes_completed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probes_failed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_target_bps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_measured_bps: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_rtt_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_loss_ratio: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_delay_gradient_us: i64,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub active_cluster_id: Option<u8>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenSquelch` (legacy `ScreenSquelchReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenSquelch {
+    pub mode: String,
+    pub is_squelched: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_evaluated: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_passed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_squelched: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub keepalive_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_dirty_ratio: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub consecutive_static_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenFec` (legacy `ScreenFecReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenFec {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub redundancy_pct: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub blocks_encoded: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub data_shards_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub parity_shards_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub blocks_decoded: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub recovered_shards: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub unrecoverable_blocks: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenPacer` (legacy `ScreenPacerReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenPacer {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub packets_paced: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bursts_smoothed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_delay_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_delay_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenHarq` (legacy `ScreenHarqReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenHarq {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub nacks_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub nacks_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub shards_retransmitted: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub recovered_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub retransmit_timeouts: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub buffer_occupancy: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub buffer_capacity: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenTwcc` (legacy `ScreenTwccReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTwcc {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub feedbacks_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub feedbacks_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub packets_tracked: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub packets_acknowledged: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub packets_lost: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub loss_ratio: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delivery_rate_bps: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delay_gradient_us: i64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub smoothed_rtt_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenSync` (legacy `ScreenAudioSyncReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenSync {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub beacons_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub beacons_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_skew_us: i64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub clock_drift_ppm: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub adjustments_applied: u64,
+    pub in_sync: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenLatency` (legacy `ScreenLatencyReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenLatency {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_profiled: u64,
+    pub bottleneck: String,
+    pub current: ScreenLatencyBreakdownDto,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub p50_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub p90_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub p95_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub p99_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub min_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_e2e_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_capture_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_encode_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_pacer_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_network_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_jitter_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_decode_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_render_us: u32,
+}
+
+/// Screen v1 contract: `ScreenLatencyBreakdownDto` (legacy `ScreenLatencyBreakdown` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenLatencyBreakdownDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frame_seq: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub capture_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub encode_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pacer_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub network_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub jitter_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub decode_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub render_us: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_e2e_us: u64,
+}
+
+/// Screen v1 contract: `ScreenTuning` (legacy `ScreenTuningReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTuning {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub actions_applied: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub recoveries_applied: u64,
+    pub last_stage: String,
+    pub last_action: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bottleneck_streak: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub balanced_streak: u32,
+    #[cfg_attr(test, ts(optional))]
+    pub last_decision: Option<ScreenTuningDecisionDto>,
+}
+
+/// Screen v1 contract: `ScreenTuningDecisionDto` (legacy `ScreenTuningDecision` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTuningDecisionDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frame_seq: u64,
+    pub stage: String,
+    pub action: String,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub new_bitrate_bps: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub new_fps: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub new_scale_pct: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub new_qp_max: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub new_playout_delay_us: Option<u32>,
+    pub recovered: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub at_us: u64,
+}
+
+/// Screen v1 contract: `ScreenPlayout` (legacy `ScreenPlayoutReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenPlayout {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_delay_ms: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_jitter_ms: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_delay_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_jitter_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub buffered_frames: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub played_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dropped_late_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dropped_overflow_frames: u64,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub custom_delay_us: Option<u64>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenMatrix` (legacy `ScreenMatrixReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenMatrix {
+    pub mode: String,
+    pub health: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bitrate_bps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fps_target: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub scale_pct: u32,
+    pub profile: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub qp_min: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub qp_max: u8,
+    pub auto_fps: bool,
+    pub auto_scale: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub consecutive_healthy_acks: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub consecutive_drops: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub in_flight: u64,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub rtt_us: Option<u64>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenProfile` (legacy `ScreenProfileReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenProfile {
+    pub profile: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub min_qp: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_qp: u8,
+    pub is_custom_qp: bool,
+    pub auto_profile: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenScale` (legacy `ScreenScaleReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenScale {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub scale_pct: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub min_scale_pct: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_scale_pct: u32,
+    pub auto_profile: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenFps` (legacy `ScreenFpsReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenFps {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub min_fps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_fps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub interval_us: u64,
+    pub auto_profile: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenBitrate` (legacy `ScreenBitrateReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenBitrate {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bitrate_bps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bitrate_kbps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub min_bps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_bps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenColor` (legacy `ScreenColorReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenColor {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub threshold: u8,
+    pub is_active: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub update_count: u64,
+}
+
+/// Screen v1 contract: `ScreenDelta` (legacy `ScreenDeltaReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenDelta {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub keyframe_interval: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub keyframes_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_frames_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub keyframes_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenQualityMetric` (legacy `ScreenQualityMetricReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenQualityMetric {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sample_interval: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub evaluated_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_mse: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_psnr_db: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_ssim: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_psnr_db: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_ssim: f64,
+    pub quality_warning: bool,
+}
+
+/// Screen v1 contract: `ScreenQoe` (legacy `ScreenQoeReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenQoe {
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_psnr_db: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_ssim_pct: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub actions_total: u64,
+    pub last_action: String,
+    pub last_action_reason: String,
+    pub in_cooldown: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub active_boosts: u32,
+}
+
+/// Screen v1 contract: `ScreenMotion` (legacy `ScreenMotionReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenMotion {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_displacement: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub motion_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fallback_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_bandwidth_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenRoi` (legacy `ScreenRoiReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenRoi {
+    pub active: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub x: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub y: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub w: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub h: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub zoom_percent: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub source_w: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub source_h: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub effective_w: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub effective_h: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub update_count: u64,
+}
+
+/// Screen v1 contract: `ScreenWatermark` (legacy `ScreenWatermarkReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenWatermark {
+    pub enabled: bool,
+    pub host_enforced: bool,
+    pub text_template: String,
+    pub rendered_text: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub opacity: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub opacity_pct: u8,
+    pub color_rgb: [u8; 3],
+    pub color_hex: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub scale: u8,
+    pub pattern: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub spacing_x: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub spacing_y: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_watermarked: u64,
+}
+
+/// Screen v1 contract: `ScreenAnnotations` (legacy `ScreenAnnotationReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenAnnotations {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub annotations_count: usize,
+    pub annotations: Vec<AnnotationItemDto>,
+    pub laser_active: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub laser: Option<LaserPointerDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_annotations_added: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub laser_updates_total: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+    pub whiteboard_policy: WhiteboardPolicyDto,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub redo_count: usize,
+}
+
+/// Screen v1 contract: `LaserPointerDto` (legacy `LaserPointerState` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaserPointerDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub x: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub y: u16,
+    pub active: bool,
+    pub color_rgb: [u8; 3],
+    #[cfg_attr(test, ts(type = "number"))]
+    pub radius: u8,
+}
+
+/// Screen v1 contract: `WhiteboardPolicyDto` (legacy `WhiteboardPolicy` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct WhiteboardPolicyDto {
+    pub read_only: bool,
+    pub allow_peer_clear: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_items: u16,
+}
+
+/// Screen v1 contract: `WhiteboardSnapshotDto` (legacy `WhiteboardSnapshot` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct WhiteboardSnapshotDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub version: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub created_at_ms: u64,
+    pub session_id: String,
+    pub active_items: Vec<AnnotationItemDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_added_counter: u64,
+}
+
+/// Screen v1 contract: `ScreenTile` (legacy `ScreenTileReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTile {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tile_size: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub grid_frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dirty_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub skipped_tiles_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_bandwidth_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenTileCache` (legacy `ScreenTileCacheReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTileCache {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_entries: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_entries: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cache_hits: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cache_misses: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub hit_ratio_pct: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_bandwidth_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenFocus` (legacy `ScreenFocusReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenFocus {
+    pub enabled: bool,
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub radius: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub peripheral_skip_ratio: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub box_x: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub box_y: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub box_w: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub box_h: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub focus_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub peripheral_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub peripheral_tiles_skipped: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_bandwidth_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenTilePalette` (legacy `ScreenTilePaletteReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTilePalette {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_colors: u8,
+    pub enable_rle: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub solid_tiles_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bilevel_tiles_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub palette_tiles_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub truecolor_tiles_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_bandwidth_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenTilePredict` (legacy `ScreenTilePredictReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTilePredict {
+    pub enabled: bool,
+    pub filter_mode: String,
+    pub enable_rct: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub predict_tiles_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub saved_bandwidth_bytes: u64,
+}
+
+/// Screen v1 contract: `ScreenTilePresent` (legacy `ScreenTilePresentReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTilePresent {
+    pub enabled: bool,
+    pub vsync_mode: String,
+    pub double_buffer: bool,
+    pub tear_prevention: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub committed_transactions: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub swapped_frames: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub torn_frames_prevented: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_swap_latency_us: u64,
+}
+
+/// Screen v1 contract: `ScreenTileNack` (legacy `ScreenTileNackReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTileNack {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timeout_ms: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_retries: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub nack_requests_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tiles_retransmitted: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub degraded_commits: u64,
+}
+
+/// Screen v1 contract: `ScreenTileSaliency` (legacy `ScreenTileSaliencyReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTileSaliency {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub high_threshold: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub low_threshold: u8,
+    pub drop_background_on_congestion: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub critical_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub normal_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub background_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub background_tiles_skipped: u64,
+}
+
+/// Screen v1 contract: `ScreenTileLod` (legacy `ScreenTileLodReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTileLod {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_lod: u8,
+    pub auto_lod_on_congestion: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub lod0_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub lod1_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub lod2_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_saved: u64,
+}
+
+/// Screen v1 contract: `ScreenTileBatch` (legacy `ScreenTileBatchReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTileBatch {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_chunk_bytes: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pacing_interval_us: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub batches_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunks_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_chunk_bytes: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pacing_pauses: u64,
+}
+
+/// Screen v1 contract: `ScreenTileMotion` (legacy `ScreenTileMotionReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenTileMotion {
+    pub enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_displacement: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub min_match_ratio: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub motion_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fallback_tiles_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_saved: u64,
+}
+
+/// Screen v1 contract: `AnnotationItemDto` (legacy core `AnnotationItem`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AnnotationItemDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub id: u32,
+    pub author: String,
+    pub kind: AnnotationKindDto,
+    pub color_rgb: [u8; 3],
+    #[cfg_attr(test, ts(type = "number"))]
+    pub thickness: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub alpha: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub ttl_ms: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub created_at_ms: u64,
+}
+
+/// Screen v1 contract: `AnnotationKindDto` (legacy core `AnnotationKind`, tagged mirror).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnnotationKindDto {
+    Stroke {
+        points: Vec<(u16, u16)>,
+    },
+    Rect {
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+    },
+    Arrow {
+        from: (u16, u16),
+        to: (u16, u16),
+    },
+    Text {
+        x: u16,
+        y: u16,
+        text: String,
+        scale: u8,
+    },
+}
+
+/// `POST /screen/annotation` report (§167).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenAnnotationAdded {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub id: u32,
+    pub report: ScreenAnnotations,
+}
+
+/// `POST /screen/whiteboard/undo` report (§167).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenWhiteboardUndoReport {
+    #[cfg_attr(test, ts(optional))]
+    pub undone: Option<AnnotationItemDto>,
+    pub report: ScreenAnnotations,
+}
+
+/// `POST /screen/whiteboard/redo` report (§167).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenWhiteboardRedoReport {
+    #[cfg_attr(test, ts(optional))]
+    pub redone: Option<AnnotationItemDto>,
+    pub report: ScreenAnnotations,
+}
+
+/// `GET /screen/whiteboard/export` report (§167).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenWhiteboardExportReport {
+    pub export: WhiteboardSnapshotDto,
+    pub report: ScreenAnnotations,
+}
+
+/// `POST /screen/whiteboard/import` report (§167).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenWhiteboardImportReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub imported_count: usize,
+    pub report: ScreenAnnotations,
+}
+
+/// `GET|PATCH /screen/whiteboard/policy` report (§167).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenWhiteboardPolicyView {
+    pub policy: WhiteboardPolicyDto,
+}
+
+/// `GET|POST /screen/laser` report (§167, legacy ad-hoc object named).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ScreenLaserReport {
+    pub laser_active: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub laser: Option<LaserPointerDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub laser_updates_total: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// Screen v1 contract: `ScreenStartRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenStartRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenSwitchRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenSwitchRequest {
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub display_id: Option<u8>,
+}
+
+/// Screen v1 contract: `ScreenPrivacyPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenPrivacyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub lock_input: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenRecordingStartRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenRecordingStartRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenPlaybackStartRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenPlaybackStartRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub speed: Option<f32>,
+    #[cfg_attr(test, ts(optional))]
+    #[serde(rename = "loop")]
+    pub loop_enabled: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenRecordingSnapshotRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenRecordingSnapshotRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub frame: Option<u64>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub pts: Option<u64>,
+    #[cfg_attr(test, ts(optional))]
+    pub out: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub format: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenCursorPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenCursorPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenTrendlinePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTrendlinePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenProbePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenProbePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub target_bps: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub trigger: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenSquelchPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenSquelchPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenFecPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenFecPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenPacerPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenPacerPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenHarqPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenHarqPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenTwccPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTwccPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenSyncPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenSyncPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub trigger: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenLatencyPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenLatencyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub reset: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenTuningPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTuningPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub reset: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenPlayoutPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenPlayoutPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenMatrixModePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenMatrixModePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenProfilePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenProfilePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub profile: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub min_qp: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_qp: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub qp: Option<u8>,
+}
+
+/// Screen v1 contract: `ScreenScalePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenScalePatch {
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub scale_pct: Option<u32>,
+}
+
+/// Screen v1 contract: `ScreenFpsPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenFpsPatch {
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub fps: Option<u32>,
+}
+
+/// Screen v1 contract: `ScreenBitratePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenBitratePatch {
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub kbps: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub bps: Option<u32>,
+}
+
+/// Screen v1 contract: `ScreenColorPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenColorPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub threshold: Option<u8>,
+}
+
+/// Screen v1 contract: `ScreenDeltaPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenDeltaPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub keyframe_interval: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenQualityMetricPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenQualityMetricPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub sample_interval: Option<u8>,
+}
+
+/// Screen v1 contract: `ScreenQoePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenQoePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub target_psnr_db: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub target_ssim_pct: Option<u8>,
+}
+
+/// Screen v1 contract: `ScreenPirPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenPirPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub bands: Option<u8>,
+}
+
+/// Screen v1 contract: `ScreenMotionPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenMotionPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_displacement: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenRoiPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenRoiPatch {
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub x: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub y: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub w: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub h: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub zoom_percent: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenLtrPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenLtrPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub auto_interval: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenSvcPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenSvcPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub drop_t1: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenSvcDropT1Request` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenSvcDropT1Request {
+    #[cfg_attr(test, ts(optional))]
+    pub drop_t1: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenWatermarkPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenWatermarkPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub host_enforced: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub text: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub opacity: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub color: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub color_rgb: Option<[u8; 3]>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub scale: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub pattern: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub spacing_x: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub spacing_y: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenWatermarkEnableRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenWatermarkEnableRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub host_enforced: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenLaserPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenLaserPatch {
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub x: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub y: Option<u16>,
+    #[cfg_attr(test, ts(optional))]
+    pub active: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub color: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub color_rgb: Option<[u8; 3]>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub radius: Option<u8>,
+}
+
+/// Screen v1 contract: `ScreenAnnotationCreateRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenAnnotationCreateRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub author: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub kind: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub points: Option<Vec<(u16, u16)>>,
+    #[cfg_attr(test, ts(optional))]
+    pub points_str: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub x: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub y: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub w: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub h: Option<u16>,
+    #[cfg_attr(test, ts(optional))]
+    pub from: Option<(u16, u16)>,
+    #[cfg_attr(test, ts(optional))]
+    pub to: Option<(u16, u16)>,
+    /// `"x,y"` string form (legacy alias).
+    #[cfg_attr(test, ts(optional))]
+    pub from_str: Option<String>,
+    /// `"x,y"` string form (legacy alias).
+    #[cfg_attr(test, ts(optional))]
+    pub to_str: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub text: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub scale: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub color: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub color_rgb: Option<[u8; 3]>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub thickness: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub alpha: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub ttl_ms: Option<u32>,
+}
+
+/// Screen v1 contract: `ScreenAuthorRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenAuthorRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub author: Option<String>,
+}
+
+/// Screen v1 contract: `ScreenWhiteboardImportRequest` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenWhiteboardImportRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub snapshot: Option<WhiteboardSnapshotDto>,
+    #[cfg_attr(test, ts(optional))]
+    pub items: Option<Vec<AnnotationItemDto>>,
+    #[cfg_attr(test, ts(optional))]
+    pub file: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub replace: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenWhiteboardPolicyPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenWhiteboardPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub read_only: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_peer_clear: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_items: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenTilePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTilePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub tile_size: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenTileCachePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTileCachePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_entries: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenFocusPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenFocusPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub radius: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub peripheral_skip_ratio: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub box_x: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub box_y: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub box_w: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub box_h: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenTilePalettePatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTilePalettePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_colors: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub enable_rle: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenTilePredictPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTilePredictPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub filter_mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub enable_rct: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenTilePresentPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTilePresentPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub vsync_mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub double_buffer: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub tear_prevention: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenTileNackPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTileNackPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub timeout_ms: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_retries: Option<u8>,
+}
+
+/// Screen v1 contract: `ScreenTileSaliencyPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTileSaliencyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub high_threshold: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub low_threshold: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub drop_background_on_congestion: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenTileLodPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTileLodPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_lod: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub auto_lod_on_congestion: Option<bool>,
+}
+
+/// Screen v1 contract: `ScreenTileBatchPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTileBatchPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub target_chunk_bytes: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub pacing_interval_us: Option<u16>,
+}
+
+/// Screen v1 contract: `ScreenTileMotionPatch` (sparse, deny_unknown_fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenTileMotionPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_displacement: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub min_match_ratio: Option<u8>,
+}
+
 // ---- §165a: ANCS domain ----
 
 /// One ANCS open-rule allowlist entry.
@@ -5010,6 +7234,120 @@ mod bindings {
             decl::<MicPolicyPatch>(&cfg),
             decl::<MicAttachRequest>(&cfg),
             decl::<MicDetachRequest>(&cfg),
+            decl::<ScreenStatus>(&cfg),
+            decl::<ScreenControl>(&cfg),
+            decl::<ScreenDisplays>(&cfg),
+            decl::<ScreenDisplayInfoDto>(&cfg),
+            decl::<ScreenPrivacy>(&cfg),
+            decl::<ScreenRecording>(&cfg),
+            decl::<ScreenRecordingReplay>(&cfg),
+            decl::<ScreenReplayRecordDto>(&cfg),
+            decl::<ScreenPlayback>(&cfg),
+            decl::<ScreenSnapshot>(&cfg),
+            decl::<ScreenPir>(&cfg),
+            decl::<ScreenLtr>(&cfg),
+            decl::<ScreenSvc>(&cfg),
+            decl::<ScreenCursor>(&cfg),
+            decl::<ScreenTrendline>(&cfg),
+            decl::<ScreenProbe>(&cfg),
+            decl::<ScreenSquelch>(&cfg),
+            decl::<ScreenFec>(&cfg),
+            decl::<ScreenPacer>(&cfg),
+            decl::<ScreenHarq>(&cfg),
+            decl::<ScreenTwcc>(&cfg),
+            decl::<ScreenSync>(&cfg),
+            decl::<ScreenLatency>(&cfg),
+            decl::<ScreenLatencyBreakdownDto>(&cfg),
+            decl::<ScreenTuning>(&cfg),
+            decl::<ScreenTuningDecisionDto>(&cfg),
+            decl::<ScreenPlayout>(&cfg),
+            decl::<ScreenMatrix>(&cfg),
+            decl::<ScreenProfile>(&cfg),
+            decl::<ScreenScale>(&cfg),
+            decl::<ScreenFps>(&cfg),
+            decl::<ScreenBitrate>(&cfg),
+            decl::<ScreenColor>(&cfg),
+            decl::<ScreenDelta>(&cfg),
+            decl::<ScreenQualityMetric>(&cfg),
+            decl::<ScreenQoe>(&cfg),
+            decl::<ScreenMotion>(&cfg),
+            decl::<ScreenRoi>(&cfg),
+            decl::<ScreenWatermark>(&cfg),
+            decl::<ScreenAnnotations>(&cfg),
+            decl::<LaserPointerDto>(&cfg),
+            decl::<WhiteboardPolicyDto>(&cfg),
+            decl::<WhiteboardSnapshotDto>(&cfg),
+            decl::<ScreenTile>(&cfg),
+            decl::<ScreenTileCache>(&cfg),
+            decl::<ScreenFocus>(&cfg),
+            decl::<ScreenTilePalette>(&cfg),
+            decl::<ScreenTilePredict>(&cfg),
+            decl::<ScreenTilePresent>(&cfg),
+            decl::<ScreenTileNack>(&cfg),
+            decl::<ScreenTileSaliency>(&cfg),
+            decl::<ScreenTileLod>(&cfg),
+            decl::<ScreenTileBatch>(&cfg),
+            decl::<ScreenTileMotion>(&cfg),
+            decl::<ScreenAnnotationAdded>(&cfg),
+            decl::<ScreenWhiteboardUndoReport>(&cfg),
+            decl::<ScreenWhiteboardRedoReport>(&cfg),
+            decl::<ScreenWhiteboardExportReport>(&cfg),
+            decl::<ScreenWhiteboardImportReport>(&cfg),
+            decl::<ScreenWhiteboardPolicyView>(&cfg),
+            decl::<ScreenLaserReport>(&cfg),
+            decl::<ScreenStartRequest>(&cfg),
+            decl::<ScreenSwitchRequest>(&cfg),
+            decl::<ScreenPrivacyPatch>(&cfg),
+            decl::<ScreenRecordingStartRequest>(&cfg),
+            decl::<ScreenPlaybackStartRequest>(&cfg),
+            decl::<ScreenRecordingSnapshotRequest>(&cfg),
+            decl::<ScreenCursorPatch>(&cfg),
+            decl::<ScreenTrendlinePatch>(&cfg),
+            decl::<ScreenProbePatch>(&cfg),
+            decl::<ScreenSquelchPatch>(&cfg),
+            decl::<ScreenFecPatch>(&cfg),
+            decl::<ScreenPacerPatch>(&cfg),
+            decl::<ScreenHarqPatch>(&cfg),
+            decl::<ScreenTwccPatch>(&cfg),
+            decl::<ScreenSyncPatch>(&cfg),
+            decl::<ScreenLatencyPatch>(&cfg),
+            decl::<ScreenTuningPatch>(&cfg),
+            decl::<ScreenPlayoutPatch>(&cfg),
+            decl::<ScreenMatrixModePatch>(&cfg),
+            decl::<ScreenProfilePatch>(&cfg),
+            decl::<ScreenScalePatch>(&cfg),
+            decl::<ScreenFpsPatch>(&cfg),
+            decl::<ScreenBitratePatch>(&cfg),
+            decl::<ScreenColorPatch>(&cfg),
+            decl::<ScreenDeltaPatch>(&cfg),
+            decl::<ScreenQualityMetricPatch>(&cfg),
+            decl::<ScreenQoePatch>(&cfg),
+            decl::<ScreenPirPatch>(&cfg),
+            decl::<ScreenMotionPatch>(&cfg),
+            decl::<ScreenRoiPatch>(&cfg),
+            decl::<ScreenLtrPatch>(&cfg),
+            decl::<ScreenSvcPatch>(&cfg),
+            decl::<ScreenSvcDropT1Request>(&cfg),
+            decl::<ScreenWatermarkPatch>(&cfg),
+            decl::<ScreenWatermarkEnableRequest>(&cfg),
+            decl::<ScreenLaserPatch>(&cfg),
+            decl::<ScreenAnnotationCreateRequest>(&cfg),
+            decl::<ScreenAuthorRequest>(&cfg),
+            decl::<ScreenWhiteboardImportRequest>(&cfg),
+            decl::<ScreenWhiteboardPolicyPatch>(&cfg),
+            decl::<ScreenTilePatch>(&cfg),
+            decl::<ScreenTileCachePatch>(&cfg),
+            decl::<ScreenFocusPatch>(&cfg),
+            decl::<ScreenTilePalettePatch>(&cfg),
+            decl::<ScreenTilePredictPatch>(&cfg),
+            decl::<ScreenTilePresentPatch>(&cfg),
+            decl::<ScreenTileNackPatch>(&cfg),
+            decl::<ScreenTileSaliencyPatch>(&cfg),
+            decl::<ScreenTileLodPatch>(&cfg),
+            decl::<ScreenTileBatchPatch>(&cfg),
+            decl::<ScreenTileMotionPatch>(&cfg),
+            decl::<AnnotationItemDto>(&cfg),
+            decl::<AnnotationKindDto>(&cfg),
             decl::<SpatialPositionDto>(&cfg),
             decl::<ActiveAudioSessionDto>(&cfg),
             decl::<AudioStatus>(&cfg),

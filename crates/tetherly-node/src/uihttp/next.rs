@@ -27,11 +27,6 @@ const NEXT_APP_CSS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../client/dist/assets/index.css"
 ));
-/// `ui/index.html` — the legacy single-file console (inline styles/scripts,
-/// no external assets).
-const LEGACY_INDEX: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
-
 /// `GET /`: the new SPA's entry document (the default console since M4).
 pub(super) fn get_entry() -> UiResponse {
     UiResponse::new(
@@ -58,23 +53,6 @@ pub(super) fn get_asset(path: &str) -> UiResponse {
         ),
         _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
-}
-
-/// `GET /legacy` or `GET /legacy/`: the legacy entry document.
-pub(super) fn get_legacy_entry() -> UiResponse {
-    UiResponse::new(
-        200,
-        "text/html; charset=utf-8",
-        LEGACY_INDEX.as_bytes().to_vec(),
-    )
-}
-
-/// `GET /legacy/<asset>`: the legacy console is a single file with inline
-/// styles and scripts — any sub-path falls back to its entry (its API calls
-/// are same-origin absolute paths, so sub-resource resolution never happens).
-pub(super) fn get_legacy_asset(path: &str) -> UiResponse {
-    let _ = path;
-    get_legacy_entry()
 }
 
 #[cfg(test)]
@@ -117,23 +95,6 @@ mod tests {
             let r = get_asset(p);
             assert_eq!(r.code, 404, "GET {p}");
         }
-    }
-
-    #[test]
-    fn legacy_entry_is_the_single_file_console() {
-        let r = get_legacy_entry();
-        assert_eq!(r.code, 200);
-        let body = String::from_utf8(r.body).unwrap();
-        assert!(body.starts_with("<!DOCTYPE html>"), "legacy doctype");
-        assert!(
-            !body.contains("src="),
-            "legacy console carries no external scripts"
-        );
-        // Sub-paths fold back to the same entry.
-        assert_eq!(
-            get_legacy_asset("/legacy/whatever").body,
-            LEGACY_INDEX.as_bytes()
-        );
     }
 
     #[test]

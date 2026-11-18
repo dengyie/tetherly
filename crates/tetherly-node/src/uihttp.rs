@@ -659,14 +659,10 @@ async fn route(
         return v1::route(method, path_only, query_str, body, node, hub).await;
     }
     match (method, path_only) {
-        // ADR-139 M4: the new SPA is the default console at `/`; the legacy
-        // console moved to /legacy/ and stays there until M5 deletes it.
-        // GET-only; unknown /legacy/* paths fall back to the legacy entry so
-        // its hash-free asset references keep resolving.
+        // ADR-139 M4/M5: the new SPA is the default console at `/`; the
+        // legacy single-file console was deleted with the M5 convergence.
         ("GET", "/") | ("GET", "/index.html") => next::get_entry(),
         ("GET", p) if p.starts_with("/assets/") => next::get_asset(p),
-        ("GET", "/legacy") | ("GET", "/legacy/") => next::get_legacy_entry(),
-        ("GET", p) if p.starts_with("/legacy/") => next::get_legacy_asset(p),
         ("GET", "/api/state") => api_core::get_state(method, query_str, body, node).await,
         ("GET", "/api/config") => api_core::get_config(method, query_str, body, node).await,
         ("POST", "/api/config") | ("PUT", "/api/config") => {
@@ -2991,8 +2987,7 @@ mod tests {
     }
 
     /// ADR-139 M4 switch: `/` serves the new SPA entry, `/assets/*` the
-    /// embedded bundle, `/legacy/` the old single-file console — all over
-    /// real HTTP against the live listener.
+    /// embedded bundle — over real HTTP against the live listener.
     #[tokio::test]
     async fn m4_root_serves_spa_legacy_and_assets() {
         let (node, dir) = temp_test_node("v1_m4_switch");
@@ -3020,13 +3015,10 @@ mod tests {
         let (code, _) = raw_request(port, "GET", "/assets/nope.js", None, b"").await;
         assert_eq!(code, 404);
 
-        // /legacy/ serves the old single-file console (inline scripts only).
+        // /legacy/ was deleted with the M5 convergence; the old console 404s.
         for p in ["/legacy", "/legacy/", "/legacy/deep/link"] {
-            let (code, body) = raw_request(port, "GET", p, None, b"").await;
-            assert_eq!(code, 200, "GET {p}");
-            let html = String::from_utf8(body).unwrap();
-            assert!(html.contains("Tetherly"), "GET {p}");
-            assert!(!html.contains("<script src="), "GET {p} no external js");
+            let (code, _) = raw_request(port, "GET", p, None, b"").await;
+            assert_eq!(code, 404, "GET {p}");
         }
 
         // Non-GET on the consoles falls through the GET-only arms to the
