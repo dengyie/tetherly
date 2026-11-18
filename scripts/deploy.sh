@@ -129,9 +129,11 @@ deploy_mac() {
     "$SCRIPT_DIR/package-macos-app.sh" --binary "$MAC_BIN" --restart
 
     echo "==> Verifying local macOS health (this is a gate, not a print)..."
+    # §169: the legacy `/api/*` surface is gone as of v0.2.64 — the open
+    # `GET /api/v1/health` is the health gate (no token needed by design).
     health_ok=""
     for _ in $(seq 1 20); do
-        if curl -fsS "http://127.0.0.1:${LOCAL_PORT}/api/health" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+        if curl -fsS "http://127.0.0.1:${LOCAL_PORT}/api/v1/health" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
             health_ok=1
             break
         fi
@@ -142,7 +144,7 @@ deploy_mac() {
         echo "       The app bundle may have failed to launch (codesign/TCC). Aborting before Windows deploy." >&2
         exit 1
     fi
-    curl -s "http://127.0.0.1:${LOCAL_PORT}/api/health" | jq .
+    curl -s "http://127.0.0.1:${LOCAL_PORT}/api/v1/health" | jq .
     echo "==> macOS deployment complete."
 }
 
@@ -215,19 +217,20 @@ deploy_windows() {
     echo "==> Mirroring staged binary into daemon update staging dir (C:)..."
     ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path 'C:\Users\mango\AppData\Local\tetherly\updates' | Out-Null; Copy-Item 'E:\code\tetherly\data\updates\\${REMOTE_STAGING_NAME}' 'C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}' -Force\""
 
-    echo "==> Initiating NTFS in-use atomic hot-restart via /api/daemon/restart..."
-    # v0.2.52 (P0-1): /api/daemon/restart requires the daemon's per-start API
-    # token. The file is SYSTEM/Administrators-only; the ssh session is an
-    # elevated Administrator, so it can read it. Daemons before v0.2.52 ignore
-    # the header, so this stays compatible across the upgrade.
-    RESTART_RESP=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$h=@{}; \$tf='C:\Users\mango\AppData\Local\tetherly\api.token'; if (Test-Path \$tf) { \$h['X-Tetherly-Token']=(Get-Content -Raw \$tf).Trim() }; Invoke-RestMethod -Uri http://127.0.0.1:45716/api/daemon/restart -Method Post -Headers \$h -Body (ConvertTo-Json @{replacement_path='C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}'}) -ContentType 'application/json' | ConvertTo-Json -Compress\"")
+    echo "==> Initiating NTFS in-use atomic hot-restart via /api/v1/system/restart..."
+    # v0.2.52 (P0-1): restart requires the daemon's per-start API token.
+    # §169: the endpoint lives at `/api/v1/system/restart` (Admin tier) since
+    # v0.2.64; the legacy `/api/daemon/restart` alias is gone. The file is
+    # SYSTEM/Administrators-only; the ssh session is an elevated
+    # Administrator, so it can read it.
+    RESTART_RESP=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$h=@{}; \$tf='C:\Users\mango\AppData\Local\tetherly\api.token'; if (Test-Path \$tf) { \$h['X-Tetherly-Token']=(Get-Content -Raw \$tf).Trim() }; Invoke-RestMethod -Uri http://127.0.0.1:45716/api/v1/system/restart -Method Post -Headers \$h -Body (ConvertTo-Json @{replacement_path='C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}'}) -ContentType 'application/json' | ConvertTo-Json -Compress\"")
     echo "Restart response: $RESTART_RESP"
 
     echo "==> Waiting 3s for daemon handoff..."
     sleep 3
 
     echo "==> Verifying Windows node health (version gate)..."
-    HEALTH_JSON=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/health | ConvertTo-Json -Compress\"")
+    HEALTH_JSON=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health | ConvertTo-Json -Compress\"")
     echo "$HEALTH_JSON"
     if [ -n "${TAG}" ] && ! echo "$HEALTH_JSON" | grep -q "\"version\":\"${TAG#v}\""; then
         echo "FATAL: deployed version does not match ${TAG}!" >&2
@@ -243,7 +246,7 @@ deploy_windows() {
         fi
     done
     echo "Protected processes 100% intact: $WIN_POST_AUDIT"
-    # Privilege-drift guard (v0.2.20): the /api/daemon/restart hot-restart
+    # Privilege-drift guard (v0.2.20): the /api/v1/system/restart hot-restart
     # inherits the running daemon's token, so privilege only degrades when a
     # non-SYSTEM chain (TetherlyApp/autostart) was last used. A mango-owned
     # daemon cannot inject into UAC/secure windows (UIPI) — warn, don't block.

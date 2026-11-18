@@ -53,8 +53,8 @@ trap cleanup EXIT
 
 echo "Waiting for daemons to listen..."
 for i in $(seq 1 30); do
-  if curl -s -H 'Host: 127.0.0.1:45716' http://127.0.0.1:45716/api/health >/dev/null && \
-     curl -s -H 'Host: 127.0.0.1:45726' http://127.0.0.1:45726/api/health >/dev/null; then
+  if curl -s -H 'Host: 127.0.0.1:45716' http://127.0.0.1:45716/api/v1/health >/dev/null && \
+     curl -s -H 'Host: 127.0.0.1:45726' http://127.0.0.1:45726/api/v1/health >/dev/null; then
     echo "Both nodes healthy on loopback ports!"
     break
   fi
@@ -79,7 +79,7 @@ echo "Dial response: $DIAL_RESP"
 
 echo "Waiting for trust/peering..."
 for i in $(seq 1 30); do
-  PEERS_A=$(curl -s -H 'Host: 127.0.0.1:45716' http://127.0.0.1:45716/api/peers)
+  PEERS_A=$(curl -s -H 'Host: 127.0.0.1:45716' http://127.0.0.1:45716/api/v1/devices)
   if echo "$PEERS_A" | grep -q "$VISITOR_ID"; then
     echo "Peering established successfully!"
     break
@@ -89,18 +89,18 @@ done
 
 echo "=== [5/8] 3-Phase Consent Protocol: Connect -> Allow -> Start ==="
 echo "Phase 1: Visitor initiates screen connection..."
-curl -s -H 'Host: 127.0.0.1:45726' -X POST http://127.0.0.1:45726/api/screen/start \
+curl -s -H 'Host: 127.0.0.1:45726' -X POST http://127.0.0.1:45726/api/v1/screen/start \
   -H 'Content-Type: application/json' \
   -d "{\"peer\":\"$HOST_ID\"}" || true
 sleep 1
 
 echo "Phase 2: Host gives consent..."
-ALLOW_RESP=$(curl -s -H 'Host: 127.0.0.1:45716' -X POST http://127.0.0.1:45716/api/screen/allow)
+ALLOW_RESP=$(curl -s -H 'Host: 127.0.0.1:45716' -X POST http://127.0.0.1:45716/api/v1/screen/allow)
 echo "Host allow response: $ALLOW_RESP"
 sleep 1
 
 echo "Phase 3: Visitor starts stream..."
-START_RESP=$(curl -s -H 'Host: 127.0.0.1:45726' -X POST http://127.0.0.1:45726/api/screen/start \
+START_RESP=$(curl -s -H 'Host: 127.0.0.1:45726' -X POST http://127.0.0.1:45726/api/v1/screen/start \
   -H 'Content-Type: application/json' \
   -d "{\"peer\":\"$HOST_ID\"}")
 echo "Visitor start response: $START_RESP"
@@ -110,8 +110,8 @@ echo "=== [6/8] Polling Telemetry for Streaming, Ack & TWCC Verification ==="
 INITIAL_OK=false
 for i in $(seq 1 30); do
   sleep 1
-  HOST_SCREEN=$(curl -s -H 'Host: 127.0.0.1:45716' http://127.0.0.1:45716/api/screen)
-  VISITOR_SCREEN=$(curl -s -H 'Host: 127.0.0.1:45726' http://127.0.0.1:45726/api/screen)
+  HOST_SCREEN=$(curl -s -H 'Host: 127.0.0.1:45716' http://127.0.0.1:45716/api/v1/screen)
+  VISITOR_SCREEN=$(curl -s -H 'Host: 127.0.0.1:45726' http://127.0.0.1:45726/api/v1/screen)
   
   STATE=$(echo "$HOST_SCREEN" | grep -o '"state":"[^"]*' | head -n1 | cut -d'"' -f4 || echo "unknown")
   SENT=$(echo "$HOST_SCREEN" | grep -o '"sent":[0-9]*' | head -n1 | cut -d: -f2 || echo 0)
@@ -139,11 +139,11 @@ fi
 
 echo "=== [7/8] Testing Live Screen TWCC Mode Transitions and Dual-CLI Parity ==="
 echo "Querying Host TWCC Report via REST API:"
-TWCC_JSON=$(curl -s -H 'Host: 127.0.0.1:45716' http://127.0.0.1:45716/api/screen/twcc)
+TWCC_JSON=$(curl -s -H 'Host: 127.0.0.1:45716' http://127.0.0.1:45716/api/v1/screen/twcc)
 echo "REST response: $TWCC_JSON"
 
 echo "Mutating mode to Aggressive via REST POST:"
-curl -s -H 'Host: 127.0.0.1:45716' -X POST "http://127.0.0.1:45716/api/screen/twcc?mode=aggressive"
+curl -s -H 'Host: 127.0.0.1:45716' -X POST "http://127.0.0.1:45716/api/v1/screen/twcc?mode=aggressive"
 echo ""
 
 echo "Verifying mode with tetherly-cli screen twcc:"

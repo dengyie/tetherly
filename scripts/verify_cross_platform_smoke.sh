@@ -68,7 +68,7 @@ echo ""
 echo -e "${BOLD}--- [1/7] Core Health & Daemon Process Integrity ---${NC}"
 
 # 1.1 Local Mac Health
-LOCAL_HEALTH=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/health" 2>/dev/null || true)
+LOCAL_HEALTH=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/v1/health" 2>/dev/null || true)
 if echo "$LOCAL_HEALTH" | grep -q '"ok":true'; then
     LOCAL_DEVICE_ID=$(echo "$LOCAL_HEALTH" | jq -r '.device_id // .id // "unknown"')
     log_pass "Local macOS node healthy (device_id=${LOCAL_DEVICE_ID})"
@@ -77,7 +77,10 @@ else
 fi
 
 # 1.2 Local macOS Accessibility & Capture Hooks
-LOCAL_CAPTURE=$(curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/api/input/ensure" 2>/dev/null || true)
+# §169: legacy /api/input/ensure is gone; GET /api/v1/input is the v1
+# engine report (Read tier via per-start api.token).
+TOKEN_FILE="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}/api.token"
+LOCAL_CAPTURE=$(curl -s -H "X-Tetherly-Token: $(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null)" "http://127.0.0.1:${LOCAL_PORT}/api/v1/input" 2>/dev/null || true)
 if echo "$LOCAL_CAPTURE" | grep -q '"accessibility_trusted":true'; then
     log_pass "macOS Accessibility TCC permissions verified (Trusted & Capture Active)"
 else
@@ -85,7 +88,7 @@ else
 fi
 
 # 1.3 Remote Windows Health
-REMOTE_HEALTH=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/health | ConvertTo-Json -Compress\"" 2>/dev/null || true)
+REMOTE_HEALTH=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health | ConvertTo-Json -Compress\"" 2>/dev/null || true)
 if echo "$REMOTE_HEALTH" | grep -q '"ok":true'; then
     REMOTE_DEVICE_ID=$(echo "$REMOTE_HEALTH" | jq -r '.device_id // .id // "unknown"')
     log_pass "Remote Windows node healthy (device_id=${REMOTE_DEVICE_ID})"
@@ -152,16 +155,17 @@ echo ""
 # ------------------------------------------------------------------------------
 echo -e "${BOLD}--- [3/7] Peer Discovery, Noise Handshake & RTT Latency ---${NC}"
 
-PEERS_RESP=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/peers" 2>/dev/null || true)
-LIVE_COUNT=$(echo "$PEERS_RESP" | jq -r '.live_count // 0')
-if [ "$LIVE_COUNT" -ge 1 ]; then
-    PEER_NAME=$(echo "$PEERS_RESP" | jq -r '.live[0].name // "unknown"')
-    PEER_ADDR=$(echo "$PEERS_RESP" | jq -r '.live[0].addr // "unknown"')
-    PEER_RTT=$(echo "$PEERS_RESP" | jq -r '.live[0].rtt_ms // "N/A"')
-    PEER_CAPS=$(echo "$PEERS_RESP" | jq -r '.live[0].caps | length')
-    log_pass "Active Noise peer session established with ${PEER_NAME} (${PEER_ADDR}), RTT=${PEER_RTT}ms, Caps=${PEER_CAPS}"
+# §169: legacy /api/peers is gone; GET /api/v1/devices returns the typed
+# device array (Read tier via per-start api.token).
+TOKEN_FILE="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}/api.token"
+DEVICES_RESP=$(curl -s -H "X-Tetherly-Token: $(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null)" "http://127.0.0.1:${LOCAL_PORT}/api/v1/devices" 2>/dev/null || true)
+ONLINE_COUNT=$(echo "$DEVICES_RESP" | jq '[.[] | select(.online == true)] | length' 2>/dev/null || echo 0)
+if [ "${ONLINE_COUNT:-0}" -ge 1 ]; then
+    PEER_NAME=$(echo "$DEVICES_RESP" | jq -r '[.[] | select(.online == true)][0].name // "unknown"')
+    PEER_ADDR=$(echo "$DEVICES_RESP" | jq -r '[.[] | select(.online == true)][0].addr // "unknown"')
+    log_pass "Active Noise peer session established with ${PEER_NAME} (${PEER_ADDR}), online peers=${ONLINE_COUNT}"
 else
-    log_fail "No active live peer sessions found in /api/peers: $PEERS_RESP"
+    log_fail "No active live peer sessions found in /api/v1/devices: $DEVICES_RESP"
 fi
 
 echo ""

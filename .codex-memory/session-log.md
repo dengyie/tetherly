@@ -1510,3 +1510,9 @@
 - 删除：429 route arms + 27 api_*.rs + dto.rs 1308→46 + requires_token + seed_trusted_peer + 107 个纯 legacy 集成测试 + uihttp mod tests 57 个。保留 hub.legacy 计数器（外部旧客户端迁移观测）。
 - 坑：批量删 fn 后孤儿 doc 注释/impl/尾括号成串（phase1 mod tracing_capture 差点被误删——OTP 日志泄漏测试依赖，从 git 抢救）；CORS 测试改 v1 路径（health POST 先 403，Origin gate 先于 route 分发）。
 - 门禁：fmt 绿 / clippy 3 crates 0 错 0 警 / node lib 300 绿 / 契约 42 绿 / bins 0 错。phase 全量交 CI。
+
+## v0.2.64 release（2026-11-19）：§170 flake 根治 + legacy 生效
+- §170 两件套（fdf069e）：m3_2 宽限窗测试预算 5s→8s（慢 runner 两次偶发的证据链写进注释）；m3_12 取证埋点——`receive_input_tunnel_resp` ACCEPTED 分支补决策环 `takeover` 条目、target pump peer-session-gone teardown 在 release 前补 `pump_exit` 条目，下次 windows CI 红灯可区分「pump 见通道死亡」vs「release 竞态」。零行为变更。
+- **§169 生效时点勘误**：legacy 删除落在 main 晚于 v0.2.63 tag，故 v0.2.63 产物仍含 legacy 路由（双端实测 /api/peers 200 属预期）；v0.2.64 起 legacy 404 真生效（双端已验证）。hub.legacy 观测从本版起才是有效窗口。
+- 发布链顺利：四文件 bump（28b4f28）→ tag → release 44406288837 全 7 job success → 11 assets（dmg/msi 名 0.2.64 正确）。部署：Mac package-macos-app.sh + Windows deploy.sh 双端 0.2.64，保护进程 3/3、SYSTEM、live_peers 1。
+- **连锁修复（本轮发现）**：deploy.sh / package-macos-app.sh / 三个 verify_*.sh 全部还在打 legacy 端点——deploy.sh 版本门 /api/health→/api/v1/health、restart→/api/v1/system/restart（Admin tier）、package-macos-app shutdown→/api/v1/system/shutdown、ensure→GET /api/v1/input、peers→/api/v1/devices（响应形状 live[]→typed array，jq 断言同步改）、screen/start|allow|twcc→/api/v1/screen/*。本次 Windows 部署版本门是手工绕过验证的，脚本已修，下轮部署即走新链。
