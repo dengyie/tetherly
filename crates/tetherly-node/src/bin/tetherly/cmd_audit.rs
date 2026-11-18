@@ -130,7 +130,7 @@ pub(crate) async fn handle_audit_list(
     } else {
         format!("?{}", query_params.join("&"))
     };
-    let path = format!("/api/audit{qs}");
+    let path = format!("/api/v1/audit{qs}");
     let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
         .await
         .map_err(|e| {
@@ -156,7 +156,7 @@ pub(crate) async fn handle_audit_list(
 }
 
 pub(crate) async fn handle_audit_clear(json: bool, ui_port: u16) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/audit/clear", b"{}")
+    let (code, resp) = tetherly_node::loopback_delete(ui_port, "/api/v1/audit")
         .await
         .map_err(|e| {
             anyhow::anyhow!(

@@ -2679,6 +2679,121 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// §163: clipboard sync + audit trail v1 resources — status/policy/audit
+    /// shapes, sparse patches, error classes, tier gates.
+    #[tokio::test]
+    async fn v1_clip_audit_serve_and_gate() {
+        let (node, dir) = temp_test_node("v1_clip_audit");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("daemon token");
+        let auth = format!("Authorization: Bearer {token}");
+
+        // Status on a fresh headless test node: no text, counters zeroed.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/clip/status", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["has_text"], false, "{body}");
+        assert_eq!(body["last_seq"], 0, "{body}");
+
+        // The plaintext readback: has_text / clipboard_available present.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/clip", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["has_text"], false, "{body}");
+        assert!(body["clipboard_available"].is_boolean(), "{body}");
+
+        // Empty history is 200 with total 0.
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/clip/history?limit=3", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["total"], 0, "{body}");
+        assert_eq!(body["entries"], serde_json::json!([]), "{body}");
+
+        // Policy readback (flat resource) + sparse PATCH.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/clip/policy", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["mode"], "bidirectional_auto", "{body}");
+        assert!(body["policy"].is_null(), "nested legacy policy folded off");
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/clip/policy",
+            Some(&auth),
+            br#"{"mode":"send_only","sensitive_guard":false,"auto_clear_timeout_secs":0}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["mode"], "send_only", "{body}");
+        assert_eq!(body["sensitive_guard"], false, "{body}");
+        assert!(body["auto_clear_timeout_secs"].is_null(), "{body}");
+        // Bad mode is 400.
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/clip/policy",
+            Some(&auth),
+            br#"{"mode":"bogus"}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+
+        // Poll: one manual sweep tick (dispatch count + flat policy).
+        let (code, resp) = raw_request(port, "POST", "/api/v1/clip/poll", Some(&auth), b"").await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["dispatched_peers"], 0, "{body}");
+        assert!(body["policy"]["mode"].is_string(), "{body}");
+
+        // Sync with an explicit bogus peer is 400.
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/clip/sync",
+            Some(&auth),
+            br#"{"peer":"nope"}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+
+        // Clear with DELETE (history reset even headless).
+        let (code, resp) = raw_request(port, "DELETE", "/api/v1/clip", Some(&auth), b"").await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+
+        // Audit trail: the policy PATCH above was itself audited (the ring
+        // is shared state), so far exactly one entry; capacity is known.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/audit", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["total"], 1, "{body}");
+        assert!(body["capacity"].as_u64().unwrap_or(0) > 0, "{body}");
+        assert_eq!(body["entries"][0]["category"], "clipboard", "{body}");
+        // Category/severity filters parse: `peer` excludes the clipboard
+        // entry (returned 0; total tracks the engine ring, not the filter).
+        let (_, code, body) = raw_with_head(
+            port,
+            "GET",
+            "/api/v1/audit?category=peer&severity=alert&limit=5",
+            Some(&auth),
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["returned"], 0, "{body}");
+        // Unknown category is 400 (typed envelope).
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/audit?category=bogus", Some(&auth)).await;
+        assert_eq!(code, 400, "{body}");
+        assert_eq!(body["error"]["code"], "bad_request", "{body}");
+        // DELETE drains the ring.
+        let (code, resp) = raw_request(port, "DELETE", "/api/v1/audit", Some(&auth), b"").await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["cleared_count"], 1, "{body}");
+
+        // Unknown method on a clip resource is 405.
+        let (code, resp) = raw_request(port, "POST", "/api/v1/clip", Some(&auth), b"").await;
+        assert_eq!(code, 405, "{}", String::from_utf8_lossy(&resp));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// ADR-139 M4 switch: `/` serves the new SPA entry, `/assets/*` the
     /// embedded bundle, `/legacy/` the old single-file console — all over
     /// real HTTP against the live listener.

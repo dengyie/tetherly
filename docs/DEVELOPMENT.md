@@ -9565,3 +9565,14 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **测试**：集成测试 `v1_file_domains_serve_and_gate`（空资源形状 / outbox status 别名 + 未知 400 / storage+resume 读 / clean 缺省体 / policy 默认+PATCH 三态+null 清 / 决策无参 400+未知 id 404 / inbox 内容往返+穿越拒绝 / client token Read+Write 门禁 / 405 包络）；契约测试 +3（file 域 report 往返 / outbox+storage+resume 往返 / policy patch 三态）。
 - **坑**：Option 字段序列化是显式 `null` 而非键缺失（无 skip_serializing_if）——CLI 打印机和测试断言都按 null 判；`Patch` 枚举 Deserialize-only，PATCH 请求体不能 derive Serialize。
 - **门禁**：fmt --all 绿；clippy -p node -p api --all-targets 0 错；契约 34 / uihttp 78 / apiv1 28 全绿。全量与冒烟交 CI。
+
+## 163. M5 第十二批：clip + audit 域迁移 v1
+
+接 §162。剪贴板同步策略/状态/历史/明文读取 + 安全审计环，CLI 全部 11 处调用点切换，SPA legacy 路径不动。勘察修正：cmd_core/cmd_peers/cmd_profile 的"存量"经字面扫描证实全为测试守卫断言与注释——此三个文件实际早已全 v1。
+
+- **契约扩展 ×14**（tetherly-api）：clip 域 `ClipPolicyDto`（legacy ClipboardPolicyReport 折 `ok`、嵌套 policy 展平进资源、DeviceType 折 as_str 字符串、max_payload_bytes usize→u64）/`ClipPolicyPatch`（稀疏 + clear_filters 扫除，Deserialize-only）/`ClipPollReport`（dispatched_peers 保持 legacy 的**数字**而非列表）/`ClipStatus`/`ClipHistoryEntry`/`ClipHistory`/`ClipClearReport`/`ClipContent`（唯一明文读回）/`ClipSyncRequest`（deny_unknown_fields）/`ClipSyncReport`；audit 域 `AuditEntryDto`（category/severity 折 snake_case 字符串）/`AuditTrail`/`AuditQuery`/`AuditClearReport`。契约测试 +2（36）+ bindings 再生。
+- **v1 端点 ×9**：`GET /api/v1/clip`（明文读回，headless 报 clipboard_available:false+reason 不 500）、`DELETE /api/v1/clip`（clear 动词修正：legacy POST /api/clip/clear 折一）、`GET /clip/status`、`GET /clip/history?limit=`、`POST /clip/sync`（peer 歧义规则镜像 legacy：显式 peer 必须已连接否则 400；1 MiB 上限）、`POST /clip/poll`（manual sweep tick）、`GET|PATCH /clip/policy`（PATCH body+query 兼容折叠 body 胜出、auto_clear 0→None、clear_filters、坏 mode/type→400；PATCH 显式 api_token_for）、`GET /audit?category=&severity=&limit=&since=`（body 镜像可折叠；坏 category/severity→400）+ `DELETE /audit`。错误全走 `core_error`。
+- **CLI 迁移 ×11**（cmd_clip 9 + cmd_audit 2）：status/history/get 路径换 v1、clear→DELETE /v1/clip、sync/send→POST /v1/clip/sync、policy 读 GET / 写 PATCH（loopback_request 显式 token）、poll→POST /v1/clip/poll；audit list→GET /v1/audit、clear→DELETE /v1/audit。打印机适配：print_clipboard_policy 改读扁平资源（legacy 嵌套 v["policy"] 折掉）；do_clip_poll 的 stats 改读 policy[计数]（嵌套 stats 折掉）。watch 的 SSE 不动（M6）。
+- **测试**：集成 `v1_clip_audit_serve_and_gate`——状态形状/明文读回/空历史/策略默认+PATCH（嵌套折叠断言、0 清 auto-clear、坏 mode 400）/poll 形状/显式 bogus peer 400/DELETE clear/审计共享态（policy PATCH 自身被审计——total=1 不是 0；过滤 returned=0 而 total 是环计数）、未知 category 400、DELETE 后 cleared_count=1、405 包络。
+- **坑**：审计环与策略共享 runtime 态，测试断言必须按"哪些操作留痕"推演而非假设空环；parse_query_map 每调返回新 HashMap，闭包里借用临时值必然 E0515——先取 qmap 再用。
+- **门禁**：fmt --all 绿；clippy -p node -p api --all-targets 0 错；契约 36 / bin 16 / uihttp 79 / apiv1 28 全绿。全量与冒烟交 CI。

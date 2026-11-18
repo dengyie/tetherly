@@ -2367,6 +2367,226 @@ pub struct MessageClearReport {
     pub message: String,
 }
 
+// ---- §163: clipboard sync domain ----
+
+/// The clipboard auto-sync policy + sync statistics in one flat resource
+/// (legacy `ClipboardPolicyReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ClipPolicyDto {
+    /// Sync mode, as the snake_case `ClipSyncMode` string.
+    pub mode: String,
+    pub sensitive_guard: bool,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// Allowed device form factors, as the `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_payload_bytes: u64,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub auto_clear_timeout_secs: Option<u64>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub auto_synced_out_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub auto_synced_in_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sensitive_blocked_count: u64,
+}
+
+/// `PATCH /clip/policy` body: sparse policy fields (absent stays; the
+/// `clear_filters` sweep wipes all three allow-lists in one call).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ClipPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub sensitive_guard: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_payload_bytes: Option<u64>,
+    /// JSON `0` also clears the countdown (legacy parity).
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub auto_clear_timeout_secs: Option<u64>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /clip/auto-sync/poll` report: one manual poll tick of the
+/// policy engine, with the count of peers the sweep dispatched to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ClipPollReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dispatched_peers: u64,
+    pub policy: ClipPolicyDto,
+}
+
+/// Clipboard state snapshot without leaking plaintext.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ClipStatus {
+    pub has_text: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes: u64,
+    #[cfg_attr(test, ts(optional))]
+    pub hash: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_seq: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub inbound_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub outbound_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub history_count: u64,
+    /// False on hosts with no display server (headless Linux).
+    pub clipboard_available: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+/// One clipboard sync event in the bounded history (no plaintext).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ClipHistoryEntry {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub seq: u64,
+    pub source: String,
+    /// `"inbound"` or `"outbound"`.
+    pub direction: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes: u64,
+    pub hash: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `GET /clip/history` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ClipHistory {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total: usize,
+    pub entries: Vec<ClipHistoryEntry>,
+}
+
+/// `DELETE /clip` report (clear history + optionally the OS clipboard).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ClipClearReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cleared_history_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+    pub clipboard_available: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+/// `GET /clip` report: the raw clipboard text (the one plaintext readback).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ClipContent {
+    pub has_text: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes: u64,
+    #[cfg_attr(test, ts(optional))]
+    pub hash: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub text: Option<String>,
+    pub clipboard_available: bool,
+    /// Present only when the OS clipboard port is absent.
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+/// `POST /clip/sync` body: explicit text, or empty to push the current
+/// local clipboard; `peer` narrows the single-live-peer implication.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ClipSyncRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub text: Option<String>,
+}
+
+/// `POST /clip/sync` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ClipSyncReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes: u64,
+    pub hash: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sent_peers: u64,
+}
+
+// ---- §163: audit trail domain ----
+
+/// One structured audit entry, zero-plaintext.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AuditEntryDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub id: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+    /// `AuditCategory` snake_case string.
+    pub category: String,
+    /// `AuditSeverity` snake_case string.
+    pub severity: String,
+    pub action: String,
+    #[cfg_attr(test, ts(optional))]
+    pub target: Option<String>,
+    pub summary: String,
+    pub success: bool,
+}
+
+/// `GET /audit` report: the filtered audit trail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AuditTrail {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub returned: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub capacity: usize,
+    pub entries: Vec<AuditEntryDto>,
+}
+
+/// `GET /audit` query body variant (mirror of the query params).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct AuditQuery {
+    #[cfg_attr(test, ts(optional))]
+    pub category: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub severity: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub limit: Option<u64>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub since: Option<u64>,
+}
+
+/// `DELETE /audit` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AuditClearReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cleared_count: u64,
+    pub message: String,
+}
+
 // ---- M2e: activity feed ----
 
 /// Direction of a peer direct message relative to this node.
@@ -2620,6 +2840,20 @@ mod bindings {
             decl::<ActivityMessage>(&cfg),
             decl::<ActivityHandoff>(&cfg),
             decl::<Activity>(&cfg),
+            decl::<ClipPolicyDto>(&cfg),
+            decl::<ClipPolicyPatch>(&cfg),
+            decl::<ClipPollReport>(&cfg),
+            decl::<ClipStatus>(&cfg),
+            decl::<ClipHistoryEntry>(&cfg),
+            decl::<ClipHistory>(&cfg),
+            decl::<ClipClearReport>(&cfg),
+            decl::<ClipContent>(&cfg),
+            decl::<ClipSyncRequest>(&cfg),
+            decl::<ClipSyncReport>(&cfg),
+            decl::<AuditEntryDto>(&cfg),
+            decl::<AuditTrail>(&cfg),
+            decl::<AuditQuery>(&cfg),
+            decl::<AuditClearReport>(&cfg),
         ] {
             out.push_str(&d);
             out.push('\n');

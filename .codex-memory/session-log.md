@@ -1456,3 +1456,11 @@
 - 资源语义取舍：GET /transfers 返回全量，id/active/terminal/direction 过滤留 CLI 客户端侧；GET /inbox search/limit 服务端（count 镜像 legacy=过滤后截断前）。
 - 坑：Option 字段序列化是显式 null 而非键缺失（无 skip_serializing_if）——测试断言按 null 判；OutboxStatus 无 Display 用 as_str()；FileDecisionRequest 空 {} 是 400（缺 id/all/peer）非 404。
 - 测试：集成 v1_file_domains_serve_and_gate（空资源/status 别名/policy 三态/决策 400+404/inbox 内容往返+穿越拒绝/client token 门禁/405）；门禁 fmt/clippy --all-targets 绿；契约 34 / uihttp 78 / apiv1 28 全绿。全量交 CI。
+
+## §163 M5 第十二批 (2026-11-18) — clip + audit 域迁移 v1
+- 勘察修正：字面扫描否定旧估计——cmd_core/cmd_peers/cmd_profile 的 legacy "存量"全为测试守卫断言与注释，实际为 0；真实存量 = clip 9 + audit 2 + 小命令域 ~110 + screen 165。
+- 契约 ×14：clip 10（ClipPolicyDto 平铺 + Patch Deserialize-only + ClipPollReport dispatched_peers 保持 legacy 数字）+ audit 4（AuditTrail/Query/Clear + EntryDto 枚举折字符串）；契约测试 +2（36）+ bindings 再生。
+- v1 ×9：GET/DELETE /clip + status + history + sync（peer 已连接校验 + 1 MiB 上限）+ poll + GET/PATCH policy（body+query 折叠 body 胜出）+ GET/DELETE /audit（坏枚举 400）。
+- CLI ×11：cmd_clip 9 + cmd_audit 2；print_clipboard_policy 改读扁平资源（嵌套 policy/stats 折掉）；policy 写 PATCH 显式 api_token_for；clear 双域动词修正为 DELETE。watch SSE 不动（M6）。
+- 坑：审计环与策略共享 runtime 态——policy PATCH 自身留审计痕迹，集成测试按 total=1 断言而非空环；u64/usize 边界（max_payload_bytes）用 try_from 饱和；parse_query_map 临时值借用 E0515——先落 qmap。
+- 门禁：fmt/clippy --all-targets 0 错（bool_comparison 1 处修）；契约 36 / bin 16 / uihttp 79 / apiv1 28 全绿。全量交 CI。

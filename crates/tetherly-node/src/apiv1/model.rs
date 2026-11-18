@@ -7,15 +7,17 @@ use crate::store::BlockedPeer;
 use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
-    Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, ChannelTraffic,
-    Device, FileBatchItem, FileBatchReport, FileDecision, FileDecisionReport, FileDispatchItem,
-    FileDispatchReport, FileOffer, FileOffers, HandoffStatus, HeartbeatConfig, Inbox, InboxFile,
-    Input, Layout, LayoutEdge, LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, LocalCaps,
-    MessageDirection, Outbox, OutboxClearReport, OutboxEntryDto, OutboxResendReport, Pairing,
-    PeerCaps, PeerCounts, PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, ResumeMarker,
-    ResumeMarkers, Settings, SettingsGeneral, SettingsTransfer, Snapshot, Storage,
-    StorageCleanReport, System, TrafficTelemetry, Transfer, TransferDirection, TransferPhase,
-    TransferStats, Transfers, API_VERSION,
+    Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, AuditClearReport,
+    AuditEntryDto, AuditTrail, ChannelTraffic, ClipClearReport, ClipContent, ClipHistory,
+    ClipHistoryEntry, ClipPolicyDto, ClipPollReport, ClipStatus, Device, FileBatchItem,
+    FileBatchReport, FileDecision, FileDecisionReport, FileDispatchItem, FileDispatchReport,
+    FileOffer, FileOffers, HandoffStatus, HeartbeatConfig, Inbox, InboxFile, Input, Layout,
+    LayoutEdge, LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, LocalCaps, MessageDirection,
+    Outbox, OutboxClearReport, OutboxEntryDto, OutboxResendReport, Pairing, PeerCaps, PeerCounts,
+    PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, ResumeMarker, ResumeMarkers, Settings,
+    SettingsGeneral, SettingsTransfer, Snapshot, Storage, StorageCleanReport, System,
+    TrafficTelemetry, Transfer, TransferDirection, TransferPhase, TransferStats, Transfers,
+    API_VERSION,
 };
 use tetherly_core::{CoreError, DisplayEdge, PathKind, TrustedPeer};
 
@@ -1023,6 +1025,156 @@ pub fn activity(node: &Node) -> Activity {
             .collect(),
         messages,
         handoffs,
+    }
+}
+
+/// The flat clipboard-policy resource: policy + session sync counters
+/// (legacy `/api/clip/policy` report with the `ok` envelope folded off and
+/// the nested `policy` flattened into the resource).
+pub fn clip_policy(node: &Node) -> ClipPolicyDto {
+    let rep = node.clipboard_policy_report();
+    ClipPolicyDto {
+        mode: rep.policy.mode.as_str().to_string(),
+        sensitive_guard: rep.policy.sensitive_guard,
+        allowed_groups: rep.policy.allowed_groups,
+        allowed_tags: rep.policy.allowed_tags,
+        allowed_types: rep
+            .policy
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+        max_payload_bytes: rep.policy.max_payload_bytes as u64,
+        auto_clear_timeout_secs: rep.policy.auto_clear_timeout_secs,
+        auto_synced_out_count: rep.auto_synced_out_count,
+        auto_synced_in_count: rep.auto_synced_in_count,
+        sensitive_blocked_count: rep.sensitive_blocked_count,
+    }
+}
+
+/// `POST /clip/poll` — one manual auto-sync sweep tick, readback included.
+pub fn clip_poll(node: &Node, dispatched_peers: u64) -> ClipPollReport {
+    ClipPollReport {
+        dispatched_peers,
+        policy: clip_policy(node),
+    }
+}
+
+/// The clipboard status snapshot (no plaintext).
+pub fn clip_status(node: &Node) -> Result<ClipStatus, CoreError> {
+    let r = node.clipboard_status()?;
+    Ok(ClipStatus {
+        has_text: r.has_text,
+        bytes: r.bytes as u64,
+        hash: r.hash,
+        last_seq: r.last_seq,
+        inbound_count: r.inbound_count,
+        outbound_count: r.outbound_count,
+        history_count: r.history_count as u64,
+        clipboard_available: r.clipboard_available,
+        reason: r.reason,
+    })
+}
+
+/// The clipboard sync history (bounded, no plaintext).
+pub fn clip_history(node: &Node, limit: Option<usize>) -> ClipHistory {
+    let r = node.clipboard_history(limit);
+    ClipHistory {
+        total: r.total,
+        entries: r
+            .entries
+            .into_iter()
+            .map(|e| ClipHistoryEntry {
+                seq: e.seq,
+                source: e.source,
+                direction: e.direction,
+                bytes: e.bytes as u64,
+                hash: e.hash,
+                timestamp_ms: e.timestamp_ms,
+            })
+            .collect(),
+    }
+}
+
+/// `DELETE /clip` — history reset + (where available) OS clipboard clear.
+pub fn clip_clear(node: &Node) -> Result<ClipClearReport, CoreError> {
+    let r = node.clear_clipboard()?;
+    Ok(ClipClearReport {
+        cleared_history_count: r.cleared_history_count as u64,
+        timestamp_ms: r.timestamp_ms,
+        clipboard_available: r.clipboard_available,
+        reason: r.reason,
+    })
+}
+
+/// `GET /clip` — the one plaintext readback (legacy shape, `ok` folded off).
+pub fn clip_content(node: &Node) -> ClipContent {
+    match node.get_clipboard_text() {
+        Ok(Some(text)) => ClipContent {
+            has_text: true,
+            bytes: text.len() as u64,
+            hash: Some(tetherly_core::hex_sha256(text.as_bytes())),
+            text: Some(text),
+            clipboard_available: true,
+            reason: None,
+        },
+        Ok(None) => ClipContent {
+            has_text: false,
+            bytes: 0,
+            hash: None,
+            text: None,
+            clipboard_available: true,
+            reason: None,
+        },
+        // A host with no display server has no clipboard to read: report
+        // the absence instead of answering 500 (legacy v1.87 semantics).
+        Err(e) => ClipContent {
+            has_text: false,
+            bytes: 0,
+            hash: None,
+            text: None,
+            clipboard_available: false,
+            reason: Some(e.to_string()),
+        },
+    }
+}
+
+/// The filtered audit trail resource.
+pub fn audit_trail(
+    node: &Node,
+    category: Option<crate::runtime::AuditCategory>,
+    severity: Option<crate::runtime::AuditSeverity>,
+    limit: Option<u64>,
+    since_ms: Option<u64>,
+) -> AuditTrail {
+    let r = node.audit_report(category, severity, limit.map(|l| l as usize), since_ms);
+    AuditTrail {
+        total: r.total,
+        returned: r.returned,
+        capacity: r.capacity,
+        entries: r
+            .entries
+            .into_iter()
+            .map(|e| AuditEntryDto {
+                id: e.id,
+                timestamp_ms: e.timestamp_ms,
+                category: e.category.to_string(),
+                severity: e.severity.to_string(),
+                action: e.action,
+                target: e.target,
+                summary: e.summary,
+                success: e.success,
+            })
+            .collect(),
+    }
+}
+
+/// `DELETE /audit` — drain the audit ring.
+pub fn audit_clear(node: &Node) -> AuditClearReport {
+    let r = node.clear_audit_log();
+    AuditClearReport {
+        cleared_count: r.cleared_count as u64,
+        message: r.message,
     }
 }
 

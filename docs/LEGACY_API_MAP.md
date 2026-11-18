@@ -206,3 +206,18 @@
 | `GET /api/file/resume` | `GET /resume` | `ok` 折掉；progress_percent f64；source_alias null 显式 |
 | `GET /api/file/policy/auto-accept` | `GET /policy/auto-accept` | 平铺资源（legacy 嵌套 policy 折掉）；cumulative_auto_accepted_count→auto_accepted_count（会话计数） |
 | `POST /api/file/policy/auto-accept` | `PATCH /policy/auto-accept` | PATCH 语义修正；三态 patch（absent=不动 / null=清 / 值=设）；空 patch→400 |
+
+## 已迁移第十二批（§163，clip + audit 域）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `GET /api/clip/status` | `GET /clip/status` | `ok` 折掉；其余字段同形（bytes usize→number） |
+| `GET /api/clip/history` | `GET /clip/history?limit=` | `ok` 折掉；query body 变体折掉（只留 query） |
+| `POST /api/clip/clear` | `DELETE /clip` | 动词修正（DELETE）；`ok` 折掉 |
+| `GET /api/clip` | `GET /clip` | `ok` 折掉；headless 仍 200 + clipboard_available:false + reason（不 500） |
+| `POST /api/clip/sync` | `POST /clip/sync` | `ok` 折掉；显式 peer 必须已连接（否则 400）；text 超 1 MiB→400 |
+| `GET /api/clip/policy` | `GET /clip/policy` | `ok` 折掉；**嵌套 policy 展平**进资源（mode/sensitive_guard/... 直读） |
+| `POST /api/clip/policy` | `PATCH /clip/policy` | PATCH 语义修正；body 稀疏 + query 兼容折叠（body 胜出）；auto_clear 0 仍含清零义 |
+| `POST /api/clip/auto-sync/poll` | `POST /clip/poll` | `ok` 折掉；嵌套 stats 展平进 policy；dispatched_peers 保持数字 |
+| `GET /api/audit` | `GET /audit` | `ok` 折掉；query category/severity/limit/since + body 镜像（body 胜出）；坏枚举→400 |
+| `POST /api/audit/clear` | `DELETE /audit` | 动词修正（DELETE）；`ok` 折掉 |

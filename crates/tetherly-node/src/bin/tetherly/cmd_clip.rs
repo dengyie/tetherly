@@ -7,7 +7,7 @@ use super::*;
 pub(crate) async fn clip(action: ClipCmd) -> Result<()> {
     match action {
         ClipCmd::Status { json, ui_port } => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip/status")
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/clip/status")
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -55,9 +55,9 @@ pub(crate) async fn clip(action: ClipCmd) -> Result<()> {
             ui_port,
         } => {
             let path = if let Some(n) = limit {
-                format!("/api/clip/history?limit={n}")
+                format!("/api/v1/clip/history?limit={n}")
             } else {
-                "/api/clip/history".to_string()
+                "/api/v1/clip/history".to_string()
             };
             let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
                 .await
@@ -104,7 +104,7 @@ pub(crate) async fn clip(action: ClipCmd) -> Result<()> {
             }
         }
         ClipCmd::Clear { json, ui_port } => {
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/clip/clear", b"{}")
+            let (code, resp) = tetherly_node::loopback_delete(ui_port, "/api/v1/clip")
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -130,7 +130,7 @@ pub(crate) async fn clip(action: ClipCmd) -> Result<()> {
         ClipCmd::Sync { peer, ui_port } => {
             let payload = serde_json::json!({ "peer": peer });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/clip/sync", &bytes)
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/clip/sync", &bytes)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -173,7 +173,7 @@ pub(crate) async fn clip(action: ClipCmd) -> Result<()> {
                 "peer": peer,
             });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/clip/sync", &bytes)
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/clip/sync", &bytes)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -196,7 +196,7 @@ pub(crate) async fn clip(action: ClipCmd) -> Result<()> {
             println!("sent {bytes} bytes to {sent_peers} peer(s) (sha256:{short_hash}...)");
         }
         ClipCmd::Get { ui_port } => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip")
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/clip")
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -321,14 +321,21 @@ pub(crate) async fn do_clip_policy(
             payload.insert("clear_filters".into(), serde_json::Value::Bool(true));
         }
         let body_bytes = serde_json::to_vec(&payload)?;
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/clip/policy", &body_bytes)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+        // v1 PATCH needs the explicit token (non-GET, non-ambient method).
+        let (code, resp) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/clip/policy",
+            Some(&body_bytes),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+            )
+        })?;
         if code != 200 {
             anyhow::bail!(
                 "failed to update clipboard policy (HTTP {code}): {}",
@@ -342,7 +349,7 @@ pub(crate) async fn do_clip_policy(
             print_clipboard_policy(&v);
         }
     } else {
-        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip/policy")
+        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/clip/policy")
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -367,7 +374,8 @@ pub(crate) async fn do_clip_policy(
 }
 
 pub(crate) fn print_clipboard_policy(v: &serde_json::Value) {
-    let p = &v["policy"];
+    // v1 folds the policy flat into the resource (no nested "policy" key).
+    let p = v;
     let mode = p["mode"].as_str().unwrap_or("manual");
     let guard = p["sensitive_guard"].as_bool().unwrap_or(true);
     let max_bytes = p["max_payload_bytes"].as_u64().unwrap_or(65536);
@@ -503,7 +511,7 @@ pub(crate) async fn do_clip_watch(ui_port: u16, json: bool) -> Result<()> {
 }
 
 pub(crate) async fn do_clip_poll(ui_port: u16, json: bool) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/clip/auto-sync/poll", b"{}")
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/v1/clip/poll", b"{}")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -522,8 +530,8 @@ pub(crate) async fn do_clip_poll(ui_port: u16, json: bool) -> Result<()> {
     } else {
         let v: serde_json::Value = serde_json::from_slice(&resp)?;
         let dispatched = v["dispatched_peers"].as_u64().unwrap_or(0);
-        let blocked = v["stats"]["sensitive_blocked_count"].as_u64().unwrap_or(0);
-        let out = v["stats"]["auto_synced_out_count"].as_u64().unwrap_or(0);
+        let blocked = v["policy"]["sensitive_blocked_count"].as_u64().unwrap_or(0);
+        let out = v["policy"]["auto_synced_out_count"].as_u64().unwrap_or(0);
         println!("Clipboard Auto-Sync Poll Result:");
         println!("  Dispatched Peers:    {dispatched}");
         println!("  Total Auto-Synced:   {out}");

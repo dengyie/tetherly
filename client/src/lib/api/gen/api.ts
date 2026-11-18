@@ -442,3 +442,63 @@ export type ActivityHandoff = { id: string, sender_id: string, sender_alias: str
 
 export type Activity = { candidates: Array<ActivityCandidate>, replies: Array<ActivityReply>, messages: Array<ActivityMessage>, handoffs: Array<ActivityHandoff>, };
 
+export type ClipPolicyDto = { 
+/**
+ * Sync mode, as the snake_case `ClipSyncMode` string.
+ */
+mode: string, sensitive_guard: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * Allowed device form factors, as the `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, max_payload_bytes: number, auto_clear_timeout_secs?: number, auto_synced_out_count: number, auto_synced_in_count: number, sensitive_blocked_count: number, };
+
+export type ClipPolicyPatch = { mode?: string, sensitive_guard?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, max_payload_bytes?: number, 
+/**
+ * JSON `0` also clears the countdown (legacy parity).
+ */
+auto_clear_timeout_secs?: number, clear_filters?: boolean, };
+
+export type ClipPollReport = { dispatched_peers: number, policy: ClipPolicyDto, };
+
+export type ClipStatus = { has_text: boolean, bytes: number, hash?: string, last_seq: number, inbound_count: number, outbound_count: number, history_count: number, 
+/**
+ * False on hosts with no display server (headless Linux).
+ */
+clipboard_available: boolean, reason?: string, };
+
+export type ClipHistoryEntry = { seq: number, source: string, 
+/**
+ * `"inbound"` or `"outbound"`.
+ */
+direction: string, bytes: number, hash: string, timestamp_ms: number, };
+
+export type ClipHistory = { total: number, entries: Array<ClipHistoryEntry>, };
+
+export type ClipClearReport = { cleared_history_count: number, timestamp_ms: number, clipboard_available: boolean, reason?: string, };
+
+export type ClipContent = { has_text: boolean, bytes: number, hash?: string, text?: string, clipboard_available: boolean, 
+/**
+ * Present only when the OS clipboard port is absent.
+ */
+reason?: string, };
+
+export type ClipSyncRequest = { peer?: string, text?: string, };
+
+export type ClipSyncReport = { bytes: number, hash: string, sent_peers: number, };
+
+export type AuditEntryDto = { id: number, timestamp_ms: number, 
+/**
+ * `AuditCategory` snake_case string.
+ */
+category: string, 
+/**
+ * `AuditSeverity` snake_case string.
+ */
+severity: string, action: string, target?: string, summary: string, success: boolean, };
+
+export type AuditTrail = { total: number, returned: number, capacity: number, entries: Array<AuditEntryDto>, };
+
+export type AuditQuery = { category?: string, severity?: string, limit?: number, since?: number, };
+
+export type AuditClearReport = { cleared_count: number, message: string, };
+

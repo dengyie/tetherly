@@ -168,6 +168,12 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/storage/clean" => Some(&["POST"]),
         "/api/v1/resume" => Some(&["GET"]),
         "/api/v1/policy/auto-accept" => Some(&["GET", "PATCH"]),
+        // §163: clipboard sync + audit trail domains.
+        "/api/v1/clip" => Some(&["GET", "DELETE"]),
+        "/api/v1/clip/status" | "/api/v1/clip/history" => Some(&["GET"]),
+        "/api/v1/clip/sync" | "/api/v1/clip/poll" => Some(&["POST"]),
+        "/api/v1/clip/policy" => Some(&["GET", "PATCH"]),
+        "/api/v1/audit" => Some(&["GET", "DELETE"]),
         p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
         p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -481,6 +487,36 @@ pub(super) async fn route(
             Ok(json(200, &crate::apiv1::model::auto_accept_policy(node)))
         }
         ("PATCH", "/api/v1/policy/auto-accept") => patch_auto_accept_policy(node, body),
+        // §163: clipboard sync domain. `GET /clip` is the one plaintext
+        // readback; the rest are metadata-only (zero-plaintext rule).
+        ("GET", "/api/v1/clip") => Ok(json(200, &crate::apiv1::model::clip_content(node))),
+        ("DELETE", "/api/v1/clip") => match crate::apiv1::model::clip_clear(node) {
+            Ok(rep) => Ok(json(200, &rep)),
+            Err(e) => Err(core_error(e)),
+        },
+        ("GET", "/api/v1/clip/status") => match crate::apiv1::model::clip_status(node) {
+            Ok(rep) => Ok(json(200, &rep)),
+            Err(e) => Err(core_error(e)),
+        },
+        ("GET", "/api/v1/clip/history") => {
+            let limit = query.and_then(|q| {
+                profile_filter(Some(q), "limit").and_then(|s| s.parse::<usize>().ok())
+            });
+            Ok(json(200, &crate::apiv1::model::clip_history(node, limit)))
+        }
+        ("POST", "/api/v1/clip/sync") => post_clip_sync(node, body).await,
+        ("POST", "/api/v1/clip/poll") => match node.poll_clipboard_auto_sync().await {
+            Ok(count) => Ok(json(
+                200,
+                &crate::apiv1::model::clip_poll(node, count as u64),
+            )),
+            Err(e) => Err(core_error(e)),
+        },
+        ("GET", "/api/v1/clip/policy") => Ok(json(200, &crate::apiv1::model::clip_policy(node))),
+        ("PATCH", "/api/v1/clip/policy") => patch_clip_policy(node, query, body).await,
+        // §163: audit trail domain (clear reuses the DELETE verb).
+        ("GET", "/api/v1/audit") => get_audit_v1(node, query, body),
+        ("DELETE", "/api/v1/audit") => Ok(json(200, &crate::apiv1::model::audit_clear(node))),
         ("GET", "/api/v1/profiles") => Ok(json(
             200,
             &crate::apiv1::model::peer_profiles(
@@ -987,6 +1023,227 @@ fn patch_auto_accept_policy(node: &Node, body: &[u8]) -> Handled {
     }
     node.set_auto_accept_policy(policy).map_err(core_error)?;
     Ok(json(200, &crate::apiv1::model::auto_accept_policy(node)))
+}
+
+/// `POST /clip/sync` (§163): push explicit `text` or the current local
+/// clipboard to one peer (explicit, connected) or the single live peer.
+async fn post_clip_sync(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::ClipSyncRequest = parse_body(body)?;
+    let peers = node.live_peers();
+    let target_peer = match req.peer.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let id = node
+                .resolve_peer(raw)
+                .map_err(|e| error(ErrorCode::BadRequest, format!("bad peer id: {e}")))?;
+            if !peers.iter().any(|p| p.device_id == id) {
+                return Err(error(ErrorCode::BadRequest, "peer is not connected"));
+            }
+            Some(id)
+        }
+        None => None,
+    };
+    if let Some(text) = req.text {
+        if text.len() > tetherly_core::CLIP_TEXT_MAX {
+            return Err(error(
+                ErrorCode::BadRequest,
+                "clipboard text exceeds 1 MiB limit",
+            ));
+        }
+        let hash = tetherly_core::hex_sha256(text.as_bytes());
+        let bytes = text.len() as u64;
+        let sent = node
+            .send_clipboard_text(&text, target_peer.as_ref())
+            .await
+            .map_err(core_error)?;
+        Ok(json(
+            200,
+            &tetherly_api::ClipSyncReport {
+                bytes,
+                hash,
+                sent_peers: sent as u64,
+            },
+        ))
+    } else {
+        let cur = match node.get_clipboard_text() {
+            Ok(Some(t)) => t,
+            Ok(None) => return Err(error(ErrorCode::BadRequest, "local clipboard is empty")),
+            Err(e) => return Err(core_error(e)),
+        };
+        if cur.len() > tetherly_core::CLIP_TEXT_MAX {
+            return Err(error(
+                ErrorCode::BadRequest,
+                "clipboard text exceeds 1 MiB limit",
+            ));
+        }
+        let hash = tetherly_core::hex_sha256(cur.as_bytes());
+        let bytes = cur.len() as u64;
+        let sent = node
+            .send_clipboard_to(target_peer.as_ref())
+            .await
+            .map_err(core_error)?;
+        Ok(json(
+            200,
+            &tetherly_api::ClipSyncReport {
+                bytes,
+                hash,
+                sent_peers: sent as u64,
+            },
+        ))
+    }
+}
+
+/// `PATCH /clip/policy` (§163): sparse policy patch with the legacy
+/// query-object fallback (body wins) and the `clear_filters` sweep.
+async fn patch_clip_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let patch: tetherly_api::ClipPolicyPatch = if body.iter().all(u8::is_ascii_whitespace) {
+        tetherly_api::ClipPolicyPatch::default()
+    } else {
+        parse_body(body)?
+    };
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |key: &str| qmap.get(key).cloned();
+    let mut policy = node.clipboard_policy();
+
+    if let Some(m) = patch.mode.clone().or_else(|| q_str("mode")) {
+        match m.parse::<tetherly_core::ClipSyncMode>() {
+            Ok(mode) => policy.mode = mode,
+            Err(e) => {
+                return Err(error(
+                    ErrorCode::BadRequest,
+                    format!("invalid clip sync mode '{m}': {e}"),
+                ))
+            }
+        }
+    }
+    if let Some(sg) = patch
+        .sensitive_guard
+        .or_else(|| q_str("sensitive_guard").map(|s| s == "true" || s == "1"))
+    {
+        policy.sensitive_guard = sg;
+    }
+    let groups = patch
+        .allowed_groups
+        .clone()
+        .or_else(|| q_list(&qmap, "group").or_else(|| q_list(&qmap, "groups")));
+    if let Some(groups) = groups {
+        policy.allowed_groups = groups;
+    }
+    let tags = patch
+        .allowed_tags
+        .clone()
+        .or_else(|| q_list(&qmap, "tag").or_else(|| q_list(&qmap, "tags")));
+    if let Some(tags) = tags {
+        policy.allowed_tags = tags;
+    }
+    if let Some(types) = patch.allowed_types.clone().or_else(|| {
+        q_str("type")
+            .or_else(|| q_str("types"))
+            .map(|raw| split_csv(&raw))
+    }) {
+        let mut dtypes = Vec::new();
+        for t in types {
+            match t.parse::<crate::store::DeviceType>() {
+                Ok(dt) => dtypes.push(dt),
+                Err(e) => {
+                    return Err(error(
+                        ErrorCode::BadRequest,
+                        format!("invalid device type '{t}': {e}"),
+                    ))
+                }
+            }
+        }
+        policy.allowed_types = dtypes;
+    }
+    let bytes = patch.max_payload_bytes.or_else(|| {
+        q_str("max_payload_bytes")
+            .or_else(|| q_str("max_bytes"))
+            .and_then(|s| s.parse::<u64>().ok())
+    });
+    if let Some(bytes) = bytes {
+        policy.max_payload_bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
+    }
+    if let Some(secs) = patch.auto_clear_timeout_secs.or_else(|| {
+        q_str("auto_clear_timeout_secs")
+            .or_else(|| q_str("auto_clear"))
+            .and_then(|s| s.parse::<u64>().ok())
+    }) {
+        policy.auto_clear_timeout_secs = if secs == 0 { None } else { Some(secs) };
+    }
+    let clear_filters = patch.clear_filters.unwrap_or(false)
+        || q_str("clear_filters")
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false);
+    if clear_filters {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    node.set_clipboard_policy(policy).map_err(core_error)?;
+    Ok(json(200, &crate::apiv1::model::clip_policy(node)))
+}
+
+/// Comma-separated query list (legacy group/tag folding).
+fn q_list(qmap: &std::collections::HashMap<String, String>, key: &str) -> Option<Vec<String>> {
+    let raw = qmap.get(key)?;
+    Some(
+        raw.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// Comma-separated list to trimmed non-empty strings.
+fn split_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// `GET /audit` (§163): filtered trail; query params or a JSON body mirror.
+fn get_audit_v1(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let mut cat = qmap.get("category").or_else(|| qmap.get("cat")).cloned();
+    let mut sev = qmap.get("severity").or_else(|| qmap.get("sev")).cloned();
+    let mut lim = qmap.get("limit").and_then(|s| s.parse::<u64>().ok());
+    let mut since = qmap
+        .get("since")
+        .or_else(|| qmap.get("since_ms"))
+        .and_then(|s| s.parse::<u64>().ok());
+    if !body.iter().all(u8::is_ascii_whitespace) {
+        let b: tetherly_api::AuditQuery = parse_body(body)?;
+        if b.category.is_some() {
+            cat = b.category;
+        }
+        if b.severity.is_some() {
+            sev = b.severity;
+        }
+        if b.limit.is_some() {
+            lim = b.limit;
+        }
+        if b.since.is_some() {
+            since = b.since;
+        }
+    }
+    let cat = match cat.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(c) => match c.parse::<crate::runtime::AuditCategory>() {
+            Ok(cat) => Some(cat),
+            Err(e) => return Err(error(ErrorCode::BadRequest, e)),
+        },
+        None => None,
+    };
+    let sev = match sev.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(s) => match s.parse::<crate::runtime::AuditSeverity>() {
+            Ok(sev) => Some(sev),
+            Err(e) => return Err(error(ErrorCode::BadRequest, e)),
+        },
+        None => None,
+    };
+    Ok(json(
+        200,
+        &crate::apiv1::model::audit_trail(node, cat, sev, lim, since),
+    ))
 }
 
 /// `GET /inbox/{name}/content`: the raw file bytes with the sniffed mime

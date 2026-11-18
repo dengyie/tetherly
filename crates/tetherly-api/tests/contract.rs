@@ -1444,4 +1444,160 @@ mod commands {
         assert_eq!(b.orphaned_only, None);
         assert!(serde_json::from_value::<StorageCleanBody>(json!({"z": 1})).is_err());
     }
+
+    #[test]
+    fn clip_domain_reports_round_trip() {
+        // §163: clipboard resources fold the legacy `ok` envelope off and
+        // flatten the nested policy; the CLI printers read the flat shape.
+        let pol = ClipPolicyDto {
+            mode: "bidirectional_auto".into(),
+            sensitive_guard: true,
+            allowed_groups: vec!["lab".into()],
+            allowed_tags: Vec::new(),
+            allowed_types: vec!["desktop".into()],
+            max_payload_bytes: 65536,
+            auto_clear_timeout_secs: Some(30),
+            auto_synced_out_count: 4,
+            auto_synced_in_count: 2,
+            sensitive_blocked_count: 1,
+        };
+        let v = serde_json::to_value(&pol).unwrap();
+        assert_eq!(v["mode"], "bidirectional_auto");
+        assert_eq!(v["max_payload_bytes"], 65536);
+        let back: ClipPolicyDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back, pol);
+
+        // Patch is sparse and strict.
+        let p: ClipPolicyPatch = serde_json::from_value(json!({"mode": "send_only"})).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("send_only"));
+        assert_eq!(p.sensitive_guard, None);
+        assert!(serde_json::from_value::<ClipPolicyPatch>(json!({"z": 1})).is_err());
+
+        // Poll report nests the same flat policy (count, not a list).
+        let poll = ClipPollReport {
+            dispatched_peers: 1,
+            policy: pol.clone(),
+        };
+        let back_p: ClipPollReport =
+            serde_json::from_value(serde_json::to_value(&poll).unwrap()).unwrap();
+        assert_eq!(back_p, poll);
+
+        // Status: hash nulls when the clipboard is empty.
+        let st = ClipStatus {
+            has_text: false,
+            bytes: 0,
+            hash: None,
+            last_seq: 9,
+            inbound_count: 3,
+            outbound_count: 6,
+            history_count: 5,
+            clipboard_available: true,
+            reason: None,
+        };
+        assert!(serde_json::to_value(&st).unwrap()["hash"].is_null());
+        let back_s: ClipStatus =
+            serde_json::from_value(serde_json::to_value(&st).unwrap()).unwrap();
+        assert_eq!(back_s, st);
+
+        // History entry + report.
+        let e = ClipHistoryEntry {
+            seq: 1,
+            source: "local".into(),
+            direction: "outbound".into(),
+            bytes: 12,
+            hash: "abc".into(),
+            timestamp_ms: 1000,
+        };
+        let hist = ClipHistory {
+            total: 1,
+            entries: vec![e],
+        };
+        let back_h: ClipHistory =
+            serde_json::from_value(serde_json::to_value(&hist).unwrap()).unwrap();
+        assert_eq!(back_h, hist);
+
+        // Clear report: reason nulls when a display server exists.
+        let clr = ClipClearReport {
+            cleared_history_count: 5,
+            timestamp_ms: 2000,
+            clipboard_available: true,
+            reason: None,
+        };
+        let back_c: ClipClearReport =
+            serde_json::from_value(serde_json::to_value(&clr).unwrap()).unwrap();
+        assert_eq!(back_c, clr);
+
+        // Content: the one plaintext readback; reason only on headless.
+        let content = ClipContent {
+            has_text: true,
+            bytes: 12,
+            hash: Some("abc".into()),
+            text: Some("hello clipboard".into()),
+            clipboard_available: false,
+            reason: Some("no display server".into()),
+        };
+        let back_g: ClipContent =
+            serde_json::from_value(serde_json::to_value(&content).unwrap()).unwrap();
+        assert_eq!(back_g, content);
+
+        // Sync request + report.
+        let q: ClipSyncRequest = serde_json::from_value(json!({"text": "hi"})).unwrap();
+        assert_eq!(q.peer, None);
+        assert!(serde_json::from_value::<ClipSyncRequest>(json!({"z": 1})).is_err());
+        let rep = ClipSyncReport {
+            bytes: 2,
+            hash: "def".into(),
+            sent_peers: 1,
+        };
+        let back_r: ClipSyncReport =
+            serde_json::from_value(serde_json::to_value(&rep).unwrap()).unwrap();
+        assert_eq!(back_r, rep);
+    }
+
+    #[test]
+    fn audit_domain_reports_round_trip() {
+        // §163: the audit trail is a filtered view over the ring; entries
+        // carry the category/severity as snake_case strings.
+        let e = AuditEntryDto {
+            id: 7,
+            timestamp_ms: 1000,
+            category: "peer".into(),
+            severity: "warning".into(),
+            action: "pair.rejected".into(),
+            target: Some("peer-a".into()),
+            summary: "pin mismatch".into(),
+            success: false,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["category"], "peer");
+        assert_eq!(v["severity"], "warning");
+        assert!(!v["target"].is_null());
+        let back_e: AuditEntryDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_e, e);
+
+        let trail = AuditTrail {
+            total: 1,
+            returned: 1,
+            capacity: 256,
+            entries: vec![e],
+        };
+        let back_t: AuditTrail =
+            serde_json::from_value(serde_json::to_value(&trail).unwrap()).unwrap();
+        assert_eq!(back_t, trail);
+
+        // Query body mirrors the query params, strict.
+        let q: AuditQuery =
+            serde_json::from_value(json!({"severity": "alert", "limit": 5})).unwrap();
+        assert_eq!(q.severity.as_deref(), Some("alert"));
+        assert_eq!(q.limit, Some(5));
+        assert!(serde_json::from_value::<AuditQuery>(json!({"z": 1})).is_err());
+
+        let clr = AuditClearReport {
+            cleared_count: 9,
+            message: "audit log cleared".into(),
+        };
+        let back_c: AuditClearReport =
+            serde_json::from_value(serde_json::to_value(&clr).unwrap()).unwrap();
+        assert_eq!(back_c, clr);
+    }
 }
