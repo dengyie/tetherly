@@ -1494,3 +1494,10 @@
 - 迁移器两坑：GET 路径透传未重写（全局字面量二次替换补刀）；变量路径 `&uri` 进 resolve 字符串拼接被破坏（undo/redo 误指根路径——index 定位修复）。
 - 契约细节：`pts` alias `pts_us`、`loop` rename、annotation `from_str`/`to_str` canonical 化；AnnotationKind tagged 镜像；`wire_enum` 泛型保证枚举 wire 串与 legacy 逐字节一致。
 - 门禁：fmt check 绿 / clippy --all-targets 0 错 0 警 / apiv1 28 + 契约 42 + uihttp 79 绿 / bins 0 错。legacy /api/* 路由面（~900 arms + 27 文件）成死代码 → §169 收敛删除。
+
+## v0.2.63 release（2026-11-19）：§168 发版 + 部署本机
+
+- CI 44708af ubuntu 首轮红：phase3 m3_2_peer_gone_returns_cursor 超时（cursor did not return home）。取证：input.rs/phase3.rs 在 §168 零改动、该 job 整体慢 8 分钟 → runner 时序抖动；rerun 全绿。与 §164 同款抖动，第二次出现——后续可考虑把 5s 上限放宽到 8s 一劳永逸。
+- release 流程教训：tag 前置 bump 必须四文件齐（Cargo.toml + Cargo.lock `cargo update -w --offline` + client/package.json + client/src-tauri/tauri.conf.json）。首版只 bump 了 Cargo 侧，dmg/msi 文件名仍 0.2.62 → 撤 tag 重打（tag 移交 0ea60eb），第二轮 release 44374655160 全平台 0.2.63。
+- 撤销错 tag 的顺序：`git push origin :refs/tags/v0.2.63` → `git tag -d` → `gh run cancel <run-id>`（release.yml publish 有 `if tag` 守卫，取消 run 即不会发布半成品）。
+- 部署链路（本机 Mac）：`scripts/package-macos-app.sh --tag v0.2.63 --restart`——下载 release 产物 → 暂存 bundle ad-hoc 签名（DR 锚 bundle id，TCC 辅助功能权限跨版本保留）→ 原子替换 /Applications/Tetherly.app → API token 优雅 shutdown 旧守护 → LaunchServices 重启。Windows 侧产物 tetherly-windows-x86_64.exe / tetherly-cli-windows-x86_64.exe / .msi 已在 release assets，按需分发。
