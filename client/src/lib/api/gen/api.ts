@@ -502,3 +502,125 @@ export type AuditQuery = { category?: string, severity?: string, limit?: number,
 
 export type AuditClearReport = { cleared_count: number, message: string, };
 
+export type LocalActionDto = { id: string, name: string, description?: string, icon?: string, command: string, args: Array<string>, timeout_secs: number, enabled: boolean, };
+
+export type LocalActions = { count: number, actions: Array<LocalActionDto>, };
+
+export type RemoteActionDto = { id: string, name: string, description?: string, icon?: string, };
+
+export type RemoteActions = { peer: string, count: number, actions: Array<RemoteActionDto>, };
+
+export type LocalActionRequest = { id: string, name: string, description?: string, icon?: string, command: string, args: Array<string>, timeout_secs?: number, enabled?: boolean, };
+
+export type RemoteActionRefreshRequest = { peer?: string, };
+
+export type ActionTriggerRequest = { peer: string, action_id: string, };
+
+export type ActionTriggerReport = { trigger_id: string, action_id: string, target_peer: string, status: string, };
+
+export type ActionHistoryEntry = { trigger_id: string, action_id: string, success: boolean, exit_code?: number, output_summary?: string, error_message?: string, duration_ms: number, timestamp_ms: number, };
+
+export type ActionHistory = { count: number, results: Array<ActionHistoryEntry>, };
+
+export type ActionPolicyDto = { 
+/**
+ * Access mode, as the snake_case `ActionAccessMode` string.
+ */
+mode: string, max_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * Allowed device form factors, as the `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, expose_action_list: boolean, };
+
+export type ActionPolicyPatch = { mode?: string, max_timeout_secs?: number, expose_action_list?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type ActiveBenchSessionDto = { session_id: string, peer_id: string, 
+/**
+ * `BenchRole` lowercase string (`initiator`/`responder`).
+ */
+role: string, 
+/**
+ * `BenchDirection` lowercase string (`push`/`pull`).
+ */
+direction: string, duration_secs: number, chunk_size: number, chunks_processed: number, bytes_transferred: number, started_at_ms: number, last_activity_ms: number, };
+
+export type BenchReportDto = { session_id: string, 
+/**
+ * `BenchDirection` lowercase string (`push`/`pull`).
+ */
+direction: string, duration_ms: number, bytes_transferred: number, chunks: number, throughput_mbps: number, avg_chunk_latency_us: number, jitter_us: number, stopped_early?: boolean, timestamp_ms: number, };
+
+export type BenchStatus = { active: boolean, session?: ActiveBenchSessionDto, policy: BenchPolicyDto, last_report?: BenchReportDto, timestamp_ms: number, };
+
+export type BenchDecision = { 
+/**
+ * `"start"` or `"stop"`.
+ */
+action: string, session_id?: string, peer_id?: string, message: string, timestamp_ms: number, };
+
+export type BenchStartRequest = { peer: string, 
+/**
+ * `push` (default) or `pull`.
+ */
+direction: string, duration_secs?: number, chunk_size?: number, };
+
+export type BenchPolicyDto = { enabled: boolean, allow_inbound_bench: boolean, max_duration_secs: number, 
+/**
+ * Soft outbound pacing ceiling (Mbps).
+ */
+max_bandwidth_mbps: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+/**
+ * Allowed device form factors, as the `DeviceType` snake_case strings.
+ */
+allowed_types: Array<string>, };
+
+export type BenchPolicyPatch = { enabled?: boolean, allow_inbound_bench?: boolean, max_duration_secs?: number, max_bandwidth_mbps?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type StreamingRecommendationDto = { 
+/**
+ * Receiver-side measured throughput the tiers were derived from (Mbps).
+ */
+measured_mbps: number, 
+/**
+ * Human-readable tier band (flagship / high / standard / basic / minimal).
+ */
+tier: string, display: DisplayTierDto, camera: CameraTierDto, audio: AudioTierDto, mic: MicTierDto, };
+
+export type DisplayTierDto = { width: number, height: number, fps: number, };
+
+export type CameraTierDto = { width: number, height: number, fps: number, 
+/**
+ * `CameraCodec` string.
+ */
+codec: string, };
+
+export type AudioTierDto = { sample_rate: number, channels: number, 
+/**
+ * `AudioStreamCodec` string.
+ */
+codec: string, };
+
+export type MicTierDto = { sample_rate: number, channels: number, 
+/**
+ * `MicCodec` string.
+ */
+codec: string, };
+
+export type RecommendationDto = { peer_id: string, peer_alias: string, 
+/**
+ * False when no measurement exists yet (conservative fallback tiers).
+ */
+has_profile: boolean, measured_mbps: number, 
+/**
+ * `BenchDirection` lowercase string (`push`/`pull`).
+ */
+direction: string, measured_at_ms: number, recommendation: StreamingRecommendationDto, timestamp_ms: number, };
+
+export type RecommendationSummaryDto = { peer_id: string, peer_alias: string, measured_mbps: number, 
+/**
+ * `BenchDirection` lowercase string (`push`/`pull`).
+ */
+direction: string, measured_at_ms: number, tier: string, };
+
+export type RecommendationStatus = { peers: Array<RecommendationSummaryDto>, timestamp_ms: number, };
+

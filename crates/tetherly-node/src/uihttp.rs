@@ -2794,6 +2794,202 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// §164: remote action + link benchmark domains over real HTTP —
+    /// local-action CRUD, policy GET/PATCH, bench policy + decision paths,
+    /// recommendation aggregate, and the method-not-allowed gate.
+    #[tokio::test]
+    async fn v1_action_bench_serve_and_gate() {
+        let (node, dir) = temp_test_node("v1_action_bench");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("daemon token");
+        let auth = format!("Authorization: Bearer {token}");
+
+        // Local actions start empty.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/action/local", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["count"], 0, "{body}");
+        assert_eq!(body["actions"], serde_json::json!([]), "{body}");
+
+        // Register one action (strict body, optional fields default).
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/action/local",
+            Some(&auth),
+            br#"{"id":"backup","name":"Run backup","command":"/usr/local/bin/backup","args":["--full"]}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["count"], 1, "{body}");
+        assert_eq!(body["actions"][0]["id"], "backup", "{body}");
+        assert_eq!(body["actions"][0]["timeout_secs"], 10, "{body}");
+        assert_eq!(body["actions"][0]["enabled"], true, "{body}");
+        assert!(body["actions"][0]["description"].is_null(), "{body}");
+
+        // Missing command is 400.
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/action/local",
+            Some(&auth),
+            br#"{"id":"x","name":"x"}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+
+        // Unknown-method gate: PATCH on a POST route is 405.
+        let (code, resp) =
+            raw_request(port, "PATCH", "/api/v1/action/local", Some(&auth), b"{}").await;
+        assert_eq!(code, 405, "{}", String::from_utf8_lossy(&resp));
+
+        // Remote actions for a bogus peer is 404 (peer not found).
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/action/remote?peer=nope", Some(&auth)).await;
+        assert_eq!(code, 404, "{body}");
+        assert_eq!(body["error"]["code"], "not_found", "{body}");
+
+        // Missing peer is 400.
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/action/remote", Some(&auth)).await;
+        assert_eq!(code, 400, "{body}");
+
+        // Trigger with an unknown peer is 404.
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/action/trigger",
+            Some(&auth),
+            br#"{"peer":"nope","action_id":"backup"}"#,
+        )
+        .await;
+        assert_eq!(code, 404, "{}", String::from_utf8_lossy(&resp));
+
+        // History is empty on a fresh node.
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/action/history", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["count"], 0, "{body}");
+
+        // Policy readback (flat) + sparse PATCH.
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/action/policy", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["mode"], "allow", "{body}");
+        assert!(body["policy"].is_null(), "nested legacy policy folded off");
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/action/policy",
+            Some(&auth),
+            br#"{"mode":"prompt_only","max_timeout_secs":30}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["mode"], "prompt_only", "{body}");
+        assert_eq!(body["max_timeout_secs"], 30, "{body}");
+        // Bad mode is 400.
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/action/policy",
+            Some(&auth),
+            br#"{"mode":"bogus"}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+
+        // Remove the action by id.
+        let (code, resp) = raw_request(
+            port,
+            "DELETE",
+            "/api/v1/action/local/backup",
+            Some(&auth),
+            b"",
+        )
+        .await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["count"], 0, "{body}");
+        // Removing again is 400 (not found).
+        let (code, resp) = raw_request(
+            port,
+            "DELETE",
+            "/api/v1/action/local/backup",
+            Some(&auth),
+            b"",
+        )
+        .await;
+        assert_eq!(code, 400, "{}", String::from_utf8_lossy(&resp));
+
+        // Bench status on a fresh node: inactive, flat policy.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/bench", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["active"], false, "{body}");
+        assert!(body["session"].is_null(), "{body}");
+        assert!(body["last_report"].is_null(), "{body}");
+        assert_eq!(body["policy"]["enabled"], true, "{body}");
+
+        // Bench start with a bogus peer is 404.
+        let (code, resp) = raw_request(
+            port,
+            "POST",
+            "/api/v1/bench/start",
+            Some(&auth),
+            br#"{"peer":"nope"}"#,
+        )
+        .await;
+        assert_eq!(code, 404, "{}", String::from_utf8_lossy(&resp));
+
+        // Bench stop with nothing active: still a 200 decision report.
+        let (code, resp) = raw_request(port, "POST", "/api/v1/bench/stop", Some(&auth), b"").await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+
+        // Bench policy readback + sparse PATCH.
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/bench/policy", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert!(body["policy"].is_null(), "nested legacy policy folded off");
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/bench/policy",
+            Some(&auth),
+            br#"{"enabled":false,"allow_inbound_bench":false}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+        let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(body["enabled"], false, "{body}");
+        assert_eq!(body["allow_inbound_bench"], false, "{body}");
+        // Restore defaults.
+        let (code, resp) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/bench/policy",
+            Some(&auth),
+            br#"{"enabled":true,"allow_inbound_bench":true}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&resp));
+
+        // Aggregate recommendation (no peers measured).
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/recommendation", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["peers"], serde_json::json!([]), "{body}");
+        // Per-peer recommendation for a bogus peer is 404.
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/recommendation?peer=nope", Some(&auth)).await;
+        assert_eq!(code, 404, "{body}");
+
+        // Unknown method on a bench resource is 405.
+        let (code, resp) = raw_request(port, "DELETE", "/api/v1/bench", Some(&auth), b"").await;
+        assert_eq!(code, 405, "{}", String::from_utf8_lossy(&resp));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// ADR-139 M4 switch: `/` serves the new SPA entry, `/assets/*` the
     /// embedded bundle, `/legacy/` the old single-file console — all over
     /// real HTTP against the live listener.

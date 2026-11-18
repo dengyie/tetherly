@@ -2587,6 +2587,423 @@ pub struct AuditClearReport {
     pub message: String,
 }
 
+// ---- §164: remote action domain ----
+
+/// One locally registered quick-action definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LocalActionDto {
+    pub id: String,
+    pub name: String,
+    #[cfg_attr(test, ts(optional))]
+    pub description: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub icon: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timeout_secs: u32,
+    pub enabled: bool,
+}
+
+/// `GET /action/local` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LocalActions {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: usize,
+    pub actions: Vec<LocalActionDto>,
+}
+
+/// One peer-advertised action (metadata only, no command details).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RemoteActionDto {
+    pub id: String,
+    pub name: String,
+    #[cfg_attr(test, ts(optional))]
+    pub description: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub icon: Option<String>,
+}
+
+/// `GET /action/remote` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RemoteActions {
+    pub peer: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: usize,
+    pub actions: Vec<RemoteActionDto>,
+}
+
+/// `POST /action/local` body: register or replace a local action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct LocalActionRequest {
+    pub id: String,
+    pub name: String,
+    #[cfg_attr(test, ts(optional))]
+    pub description: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub icon: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub timeout_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+}
+
+/// `POST /action/remote/refresh` body: ask a connected peer to re-advertise.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct RemoteActionRefreshRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+}
+
+/// `POST /action/trigger` body: trigger one remote action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ActionTriggerRequest {
+    pub peer: String,
+    pub action_id: String,
+}
+
+/// `POST /action/trigger` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActionTriggerReport {
+    pub trigger_id: String,
+    pub action_id: String,
+    pub target_peer: String,
+    pub status: String,
+}
+
+/// One recorded remote-action execution result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActionHistoryEntry {
+    pub trigger_id: String,
+    pub action_id: String,
+    pub success: bool,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub exit_code: Option<i32>,
+    #[cfg_attr(test, ts(optional))]
+    pub output_summary: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub error_message: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub duration_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `GET /action/history` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActionHistory {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub count: usize,
+    pub results: Vec<ActionHistoryEntry>,
+}
+
+/// The inbound remote-action governance policy as one flat resource
+/// (legacy `ActionPolicyReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActionPolicyDto {
+    /// Access mode, as the snake_case `ActionAccessMode` string.
+    pub mode: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_timeout_secs: u32,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// Allowed device form factors, as the `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+    pub expose_action_list: bool,
+}
+
+/// `PATCH /action/policy` body: sparse policy fields (absent stays; the
+/// `clear_filters` sweep wipes all three allow-lists in one call).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ActionPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_timeout_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub expose_action_list: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+// ---- §164: link benchmark domain ----
+
+/// One active benchmark session's live metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActiveBenchSessionDto {
+    pub session_id: String,
+    pub peer_id: String,
+    /// `BenchRole` lowercase string (`initiator`/`responder`).
+    pub role: String,
+    /// `BenchDirection` lowercase string (`push`/`pull`).
+    pub direction: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub duration_secs: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunk_size: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunks_processed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_transferred: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_activity_ms: u64,
+}
+
+/// The final/last benchmark measurement frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BenchReportDto {
+    pub session_id: String,
+    /// `BenchDirection` lowercase string (`push`/`pull`).
+    pub direction: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub duration_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_transferred: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunks: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub throughput_mbps: f64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub avg_chunk_latency_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub jitter_us: u64,
+    #[cfg_attr(test, ts(optional))]
+    pub stopped_early: Option<bool>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `GET /bench` report: engine status + policy + last measurement
+/// (legacy `BenchStatusReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BenchStatus {
+    pub active: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub session: Option<ActiveBenchSessionDto>,
+    pub policy: BenchPolicyDto,
+    #[cfg_attr(test, ts(optional))]
+    pub last_report: Option<BenchReportDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /bench/start` and `POST /bench/stop` decision report
+/// (legacy `BenchDecisionReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BenchDecision {
+    /// `"start"` or `"stop"`.
+    pub action: String,
+    #[cfg_attr(test, ts(optional))]
+    pub session_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_id: Option<String>,
+    pub message: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /bench/start` body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct BenchStartRequest {
+    pub peer: String,
+    /// `push` (default) or `pull`.
+    #[serde(default = "default_bench_direction")]
+    pub direction: String,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub duration_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub chunk_size: Option<u32>,
+}
+
+fn default_bench_direction() -> String {
+    "push".to_string()
+}
+
+/// The link benchmark governance policy as one flat resource
+/// (legacy `BenchPolicyReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BenchPolicyDto {
+    pub enabled: bool,
+    pub allow_inbound_bench: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_duration_secs: u32,
+    /// Soft outbound pacing ceiling (Mbps).
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_bandwidth_mbps: u32,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// Allowed device form factors, as the `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /bench/policy` body: sparse policy fields (absent stays; the
+/// `clear_filters` sweep wipes all three allow-lists in one call).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct BenchPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_inbound_bench: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_duration_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_bandwidth_mbps: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// Recommended per-channel streaming tiers for one peer link (ADR-073..076).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StreamingRecommendationDto {
+    /// Receiver-side measured throughput the tiers were derived from (Mbps).
+    #[cfg_attr(test, ts(type = "number"))]
+    pub measured_mbps: f64,
+    /// Human-readable tier band (flagship / high / standard / basic / minimal).
+    pub tier: String,
+    pub display: DisplayTierDto,
+    pub camera: CameraTierDto,
+    pub audio: AudioTierDto,
+    pub mic: MicTierDto,
+}
+
+/// Recommended virtual display mode (ADR-073).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DisplayTierDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub height: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fps: u32,
+}
+
+/// Recommended virtual camera capture profile (ADR-075).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct CameraTierDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub height: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub fps: u32,
+    /// `CameraCodec` string.
+    pub codec: String,
+}
+
+/// Recommended spatial audio routing profile (ADR-074).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AudioTierDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sample_rate: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub channels: u32,
+    /// `AudioStreamCodec` string.
+    pub codec: String,
+}
+
+/// Recommended virtual microphone profile (ADR-076).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MicTierDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sample_rate: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub channels: u32,
+    /// `MicCodec` string.
+    pub codec: String,
+}
+
+/// `GET /recommendation?peer=` report: one peer's measured link + tiers
+/// (legacy `StreamingRecommendationReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RecommendationDto {
+    pub peer_id: String,
+    pub peer_alias: String,
+    /// False when no measurement exists yet (conservative fallback tiers).
+    pub has_profile: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub measured_mbps: f64,
+    /// `BenchDirection` lowercase string (`push`/`pull`).
+    pub direction: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub measured_at_ms: u64,
+    pub recommendation: StreamingRecommendationDto,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// One peer's recommendation summary line for the aggregate status view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RecommendationSummaryDto {
+    pub peer_id: String,
+    pub peer_alias: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub measured_mbps: f64,
+    /// `BenchDirection` lowercase string (`push`/`pull`).
+    pub direction: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub measured_at_ms: u64,
+    pub tier: String,
+}
+
+/// `GET /recommendation` report: aggregate across all measured peers
+/// (legacy `RecommendationStatusReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RecommendationStatus {
+    pub peers: Vec<RecommendationSummaryDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
 // ---- M2e: activity feed ----
 
 /// Direction of a peer direct message relative to this node.
@@ -2854,6 +3271,33 @@ mod bindings {
             decl::<AuditTrail>(&cfg),
             decl::<AuditQuery>(&cfg),
             decl::<AuditClearReport>(&cfg),
+            decl::<LocalActionDto>(&cfg),
+            decl::<LocalActions>(&cfg),
+            decl::<RemoteActionDto>(&cfg),
+            decl::<RemoteActions>(&cfg),
+            decl::<LocalActionRequest>(&cfg),
+            decl::<RemoteActionRefreshRequest>(&cfg),
+            decl::<ActionTriggerRequest>(&cfg),
+            decl::<ActionTriggerReport>(&cfg),
+            decl::<ActionHistoryEntry>(&cfg),
+            decl::<ActionHistory>(&cfg),
+            decl::<ActionPolicyDto>(&cfg),
+            decl::<ActionPolicyPatch>(&cfg),
+            decl::<ActiveBenchSessionDto>(&cfg),
+            decl::<BenchReportDto>(&cfg),
+            decl::<BenchStatus>(&cfg),
+            decl::<BenchDecision>(&cfg),
+            decl::<BenchStartRequest>(&cfg),
+            decl::<BenchPolicyDto>(&cfg),
+            decl::<BenchPolicyPatch>(&cfg),
+            decl::<StreamingRecommendationDto>(&cfg),
+            decl::<DisplayTierDto>(&cfg),
+            decl::<CameraTierDto>(&cfg),
+            decl::<AudioTierDto>(&cfg),
+            decl::<MicTierDto>(&cfg),
+            decl::<RecommendationDto>(&cfg),
+            decl::<RecommendationSummaryDto>(&cfg),
+            decl::<RecommendationStatus>(&cfg),
         ] {
             out.push_str(&d);
             out.push('\n');

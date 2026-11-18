@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Benchmark and recommendation commands.
 
-use super::util::format_bytes;
+use super::util::{format_bytes, url_encode};
 use super::*;
 
 /// `tetherly bench` -- Bench arm of the top-level dispatch.
@@ -65,7 +65,7 @@ pub(crate) async fn recommend(peer: Option<String>, json: bool, ui_port: u16) ->
 }
 
 pub(crate) async fn do_bench_status(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/bench").await?;
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/v1/bench").await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query link benchmark status (HTTP {code}): {err_msg}");
@@ -150,9 +150,15 @@ pub(crate) async fn do_bench_start(
     if let Some(c) = chunk {
         req["chunk_size"] = serde_json::json!(c);
     }
-    let (code, body) =
-        tetherly_node::loopback_post(ui_port, "/api/bench/start", &serde_json::to_vec(&req)?)
-            .await?;
+    // v1 POST needs the explicit token (non-GET, non-ambient method).
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/bench/start",
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to start link benchmark (HTTP {code}): {err_msg}");
@@ -174,10 +180,13 @@ pub(crate) async fn do_bench_start(
 }
 
 pub(crate) async fn do_bench_stop(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_post(
+    // v1 POST needs the explicit token (non-GET, non-ambient method).
+    let (code, body) = tetherly_node::loopback_request(
         ui_port,
-        "/api/bench/stop",
-        &serde_json::to_vec(&serde_json::json!({}))?,
+        "POST",
+        "/api/v1/bench/stop",
+        Some(&serde_json::to_vec(&serde_json::json!({}))?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await?;
     if code != 200 {
@@ -217,7 +226,7 @@ pub(crate) async fn do_bench_policy(
                 json: j,
                 ui_port: p,
             } => {
-                let (code, body) = tetherly_node::loopback_get(p, "/api/bench/policy").await?;
+                let (code, body) = tetherly_node::loopback_get(p, "/api/v1/bench/policy").await?;
                 if code != 200 {
                     let err_msg = String::from_utf8_lossy(&body);
                     anyhow::bail!("failed to query bench policy (HTTP {code}): {err_msg}");
@@ -280,9 +289,15 @@ pub(crate) async fn do_bench_policy(
     }
 
     if update_needed {
-        let (code, body) =
-            tetherly_node::loopback_post(ui_port, "/api/bench/policy", &serde_json::to_vec(&req)?)
-                .await?;
+        // v1 PATCH needs the explicit token (non-GET, non-ambient method).
+        let (code, body) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/bench/policy",
+            Some(&serde_json::to_vec(&req)?),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await?;
         if code != 200 {
             let err_msg = String::from_utf8_lossy(&body);
             anyhow::bail!("failed to update bench policy (HTTP {code}): {err_msg}");
@@ -293,7 +308,7 @@ pub(crate) async fn do_bench_policy(
         }
     }
 
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/bench/policy").await?;
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/v1/bench/policy").await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query bench policy (HTTP {code}): {err_msg}");
@@ -422,8 +437,8 @@ pub(crate) async fn do_bench_watch(ui_port: u16, json: bool) -> Result<()> {
 
 pub(crate) async fn do_recommend(ui_port: u16, peer: Option<&str>, json: bool) -> Result<()> {
     let path = match peer {
-        Some(p) => format!("/api/recommendation?peer={p}"),
-        None => "/api/recommendation".to_string(),
+        Some(p) => format!("/api/v1/recommendation?peer={}", url_encode(p)),
+        None => "/api/v1/recommendation".to_string(),
     };
     let (code, body) = tetherly_node::loopback_get(ui_port, &path).await?;
     if code != 200 {

@@ -29,14 +29,14 @@
 | ~~`api/topology/*`~~ | — | — | — | §156b 已迁 v1（/topology、/topology/peers、/topology/policy、links/unlinks/sync/config） |
 | `api/input/*` | 7 | ~8 | cmd_input | 待契约扩展 / 分批迁移 |
 | `api/clip/*` | 7 | ~10 | cmd_clip | 待契约扩展 / 分批迁移 |
-| `api/action/*` | 6 | ~9 | cmd_action | 待契约扩展 / 分批迁移 |
+| `api/action/*` | 6 | ~9 | cmd_action | 已迁移 §164 |
 | `api/notify/*` | 6 | ~7 | cmd_notify | 待契约扩展 / 分批迁移 |
 | `api/ancs/*` | 6 | ~6 | cmd_ancs | 待契约扩展 / 分批迁移 |
 | `api/handoff/*` | 5 | ~7 | cmd_handoff | 待契约扩展 / 分批迁移 |
 | `api/mic/*` | 4 | ~6 | cmd_mic | 待契约扩展 / 分批迁移 |
 | `api/focus/*` | 4 | ~7 | cmd_focus | 待契约扩展 / 分批迁移 |
 | `api/camera/*` | 4 | ~7 | cmd_camera | 待契约扩展 / 分批迁移 |
-| `api/bench/*` | 4 | ~6 | cmd_bench | 待契约扩展 / 分批迁移 |
+| `api/bench/*` | 4 | ~6 | cmd_bench | 已迁移 §164 |
 | `api/audio/*` | 4 | ~6 | cmd_audio | 待契约扩展 / 分批迁移 |
 | `api/locate/*` | 4 | ~5 | cmd_locate | 待契约扩展 / 分批迁移 |
 | `api/display/*` | 4 | ~5 | cmd_display | 待契约扩展 / 分批迁移 |
@@ -51,7 +51,7 @@
 | `api/daemon/*` | 2 | ~2 | cmd_core | 待契约扩展 / 分批迁移 |
 | ~~`api/routes/*`~~ | — | — | — | §156b 已迁 v1（GET/POST/DELETE /routes） |
 | `api/state/*` | 1 | ~2 | — | 待契约扩展 / 分批迁移 |
-| `api/recommendation/*` | 1 | ~2 | cmd_notify | 待契约扩展 / 分批迁移 |
+| `api/recommendation/*` | 1 | ~2 | cmd_notify | 已迁移 §164 |
 | `api/health/*` | 1 | ~2 | — | 待契约扩展 / 分批迁移 |
 | ~~`api/caps/*`~~ | — | — | — | §156a 已迁 v1（GET/PATCH /caps、/caps/peers、/devices/{id}/caps） |
 | `api/sys/*` | 1 | ~1 | — | 待契约扩展 / 分批迁移 |
@@ -221,3 +221,24 @@
 | `POST /api/clip/auto-sync/poll` | `POST /clip/poll` | `ok` 折掉；嵌套 stats 展平进 policy；dispatched_peers 保持数字 |
 | `GET /api/audit` | `GET /audit` | `ok` 折掉；query category/severity/limit/since + body 镜像（body 胜出）；坏枚举→400 |
 | `POST /api/audit/clear` | `DELETE /audit` | 动词修正（DELETE）；`ok` 折掉 |
+
+## 已迁移第十三批（§164，action + bench + recommendation 域）
+
+| 旧路由 | v1 | 语义差异（明示） |
+|---|---|---|
+| `GET /api/action/local` | `GET /action/local` | `ok`/`message` 折掉；字段同形（timeout_secs/enabled 直读） |
+| `POST /api/action/local` | `POST /action/local` | strict body（deny_unknown_fields）；timeout 缺省 10、enabled 缺省 true |
+| `DELETE /api/action/local?id=` | `DELETE /action/local/{id}` | id 上路径；未找到→400（CoreError InvalidPayload 镜像） |
+| `GET /api/action/remote?peer=` | `GET /action/remote?peer=` | `ok`/`message` 折掉；缺 peer→400、未知 peer→404 |
+| `POST /api/action/remote/refresh?peer=` | `POST /action/remote/refresh` | body `{peer}`（query 兼容）；显式 token |
+| `POST /api/action/trigger` | `POST /action/trigger` | body strict；query 兼容 id 别名；显式 token |
+| `GET /api/action/history` | `GET /action/history` | `ok`/`message` 折掉；运行时帧无 direction/peer 字段（CLI 兜底列保留空） |
+| `GET /api/action/policy` | `GET /action/policy` | `ok` 折掉；**嵌套 policy 展平**；mode 折 as_str 字符串 |
+| `POST /api/action/policy` | `PATCH /action/policy` | PATCH 语义修正；body 稀疏 + query 兼容（body 胜出）；legacy query 对 allow-list 是追加去重；max_timeout 过 clamp |
+| `GET /api/bench` | `GET /bench` | `ok` 折掉；session/last_report null 显式 |
+| `POST /api/bench/start` | `POST /bench/start` | direction lenient（pull/download/rx/recv）；未知 peer→404；显式 token |
+| `POST /api/bench/stop` | `POST /bench/stop` | 无活动会话仍 200 决策报告；显式 token |
+| `GET /api/bench/policy` | `GET /bench/policy` | `ok` 折掉；**嵌套 policy 展平** |
+| `POST /api/bench/policy` | `PATCH /bench/policy` | PATCH 语义修正；body 稀疏 + query 兼容（body 胜出）；legacy query 对 allow-list 是追加去重 |
+| `GET /api/recommendation?peer=` | `GET /recommendation?peer=` | `ok` 折掉；tier DTO 展开（codec 折 as_str 字符串）；未知 peer→404 |
+| `GET /api/recommendation` | `GET /recommendation` | 聚合视图（peers 数组 + timestamp） |

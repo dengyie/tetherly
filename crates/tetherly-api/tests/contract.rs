@@ -1600,4 +1600,267 @@ mod commands {
             serde_json::from_value(serde_json::to_value(&clr).unwrap()).unwrap();
         assert_eq!(back_c, clr);
     }
+    #[test]
+    fn action_domain_reports_round_trip() {
+        // §164: action resources mirror the legacy /api/action reports
+        // field-for-field; CLI printers depend on the exact shapes.
+
+        let def = LocalActionDto {
+            id: "backup".into(),
+            name: "Run backup".into(),
+            description: Some("nightly backup".into()),
+            icon: None,
+            command: "/usr/local/bin/backup".into(),
+            args: vec!["--full".into()],
+            timeout_secs: 30,
+            enabled: true,
+        };
+        let v = serde_json::to_value(&def).unwrap();
+        assert_eq!(v["command"], "/usr/local/bin/backup");
+        assert!(v["icon"].is_null());
+        let back_d: LocalActionDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_d, def);
+
+        let local = LocalActions {
+            count: 1,
+            actions: vec![def],
+        };
+        let back_l: LocalActions =
+            serde_json::from_value(serde_json::to_value(&local).unwrap()).unwrap();
+        assert_eq!(back_l, local);
+
+        let item = RemoteActionDto {
+            id: "screenshot".into(),
+            name: "Screenshot".into(),
+            description: None,
+            icon: Some("camera".into()),
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert!(v["description"].is_null());
+        let remote = RemoteActions {
+            peer: "peer-a".into(),
+            count: 1,
+            actions: vec![item],
+        };
+        let back_r: RemoteActions =
+            serde_json::from_value(serde_json::to_value(&remote).unwrap()).unwrap();
+        assert_eq!(back_r, remote);
+
+        // Registration request is strict; optional fields stay sparse.
+        let req: LocalActionRequest = serde_json::from_value(json!({
+            "id": "backup",
+            "name": "Run backup",
+            "command": "/usr/local/bin/backup",
+        }))
+        .unwrap();
+        assert_eq!(req.timeout_secs, None);
+        assert!(serde_json::from_value::<LocalActionRequest>(json!({"z": 1})).is_err());
+
+        let trig_req: ActionTriggerRequest =
+            serde_json::from_value(json!({"peer": "peer-a", "action_id": "screenshot"})).unwrap();
+        assert_eq!(trig_req.action_id, "screenshot");
+        assert!(serde_json::from_value::<ActionTriggerRequest>(json!({"peer": "p"})).is_err());
+
+        let trig = ActionTriggerReport {
+            trigger_id: "tg-1".into(),
+            action_id: "screenshot".into(),
+            target_peer: "peer-a".into(),
+            status: "dispatched".into(),
+        };
+        let back_t: ActionTriggerReport =
+            serde_json::from_value(serde_json::to_value(&trig).unwrap()).unwrap();
+        assert_eq!(back_t, trig);
+
+        let entry = ActionHistoryEntry {
+            trigger_id: "tg-1".into(),
+            action_id: "screenshot".into(),
+            success: true,
+            exit_code: Some(0),
+            output_summary: Some("ok".into()),
+            error_message: None,
+            duration_ms: 120,
+            timestamp_ms: 1000,
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert!(v["error_message"].is_null());
+        let history = ActionHistory {
+            count: 1,
+            results: vec![entry],
+        };
+        let back_h: ActionHistory =
+            serde_json::from_value(serde_json::to_value(&history).unwrap()).unwrap();
+        assert_eq!(back_h, history);
+
+        // Policy resource is flat; the patch is strict and sparse.
+        let pol = ActionPolicyDto {
+            mode: "prompt_only".into(),
+            max_timeout_secs: 30,
+            allowed_groups: vec!["ops".into()],
+            allowed_tags: vec![],
+            allowed_types: vec!["laptop".into()],
+            expose_action_list: true,
+        };
+        let v = serde_json::to_value(&pol).unwrap();
+        assert_eq!(v["mode"], "prompt_only");
+        assert_eq!(v["allowed_types"][0], "laptop");
+        let back_p: ActionPolicyDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_p, pol);
+
+        let patch: ActionPolicyPatch =
+            serde_json::from_value(json!({"mode": "allow", "clear_filters": true})).unwrap();
+        assert_eq!(patch.mode.as_deref(), Some("allow"));
+        assert_eq!(patch.clear_filters, Some(true));
+        assert_eq!(patch.max_timeout_secs, None);
+        assert!(serde_json::from_value::<ActionPolicyPatch>(json!({"z": 1})).is_err());
+    }
+
+    #[test]
+    fn bench_domain_reports_round_trip() {
+        // §164: bench resources mirror the legacy /api/bench + /api/recommendation
+        // reports field-for-field; CLI printers depend on the exact shapes.
+
+        let sess = ActiveBenchSessionDto {
+            session_id: "s1".into(),
+            peer_id: "peer-a".into(),
+            role: "initiator".into(),
+            direction: "push".into(),
+            duration_secs: 10,
+            chunk_size: 65536,
+            chunks_processed: 3,
+            bytes_transferred: 196608,
+            started_at_ms: 1000,
+            last_activity_ms: 2000,
+        };
+        let v = serde_json::to_value(&sess).unwrap();
+        assert_eq!(v["role"], "initiator");
+        assert_eq!(v["direction"], "push");
+        let back_s: ActiveBenchSessionDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_s, sess);
+
+        let rep = BenchReportDto {
+            session_id: "s1".into(),
+            direction: "pull".into(),
+            duration_ms: 10050,
+            bytes_transferred: 1048576,
+            chunks: 16,
+            throughput_mbps: 834.5,
+            avg_chunk_latency_us: 620,
+            jitter_us: 40,
+            stopped_early: Some(false),
+            timestamp_ms: 11000,
+        };
+        let v = serde_json::to_value(&rep).unwrap();
+        assert_eq!(v["throughput_mbps"], 834.5);
+        let back_r: BenchReportDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_r, rep);
+
+        let pol = BenchPolicyDto {
+            enabled: true,
+            allow_inbound_bench: false,
+            max_duration_secs: 30,
+            max_bandwidth_mbps: 1000,
+            allowed_groups: vec![],
+            allowed_tags: vec![],
+            allowed_types: vec!["desktop".into()],
+        };
+        let status = BenchStatus {
+            active: true,
+            session: Some(sess),
+            policy: pol.clone(),
+            last_report: Some(rep),
+            timestamp_ms: 11000,
+        };
+        let v = serde_json::to_value(&status).unwrap();
+        assert_eq!(v["active"], true);
+        assert_eq!(v["policy"]["max_bandwidth_mbps"], 1000);
+        let back_st: BenchStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back_st, status);
+
+        // start request defaults direction to push and is strict.
+        let req: BenchStartRequest = serde_json::from_value(json!({"peer": "peer-a"})).unwrap();
+        assert_eq!(req.direction, "push");
+        assert_eq!(req.duration_secs, None);
+        let req2: BenchStartRequest = serde_json::from_value(
+            json!({"peer": "peer-a", "direction": "pull", "duration_secs": 5, "chunk_size": 32768}),
+        )
+        .unwrap();
+        assert_eq!(req2.chunk_size, Some(32768));
+        assert!(serde_json::from_value::<BenchStartRequest>(json!({"z": 1})).is_err());
+
+        let dec = BenchDecision {
+            action: "stop".into(),
+            session_id: Some("s1".into()),
+            peer_id: None,
+            message: "benchmark stopped".into(),
+            timestamp_ms: 12000,
+        };
+        let v = serde_json::to_value(&dec).unwrap();
+        assert!(v["peer_id"].is_null());
+        let back_d: BenchDecision = serde_json::from_value(v).unwrap();
+        assert_eq!(back_d, dec);
+
+        // Policy patch is strict and sparse.
+        let patch: BenchPolicyPatch =
+            serde_json::from_value(json!({"enabled": false, "clear_filters": true})).unwrap();
+        assert_eq!(patch.enabled, Some(false));
+        assert_eq!(patch.max_duration_secs, None);
+        assert!(serde_json::from_value::<BenchPolicyPatch>(json!({"z": 1})).is_err());
+
+        // Recommendation tiers: nested DTOs with codec strings.
+        let rec = StreamingRecommendationDto {
+            measured_mbps: 940.0,
+            tier: "flagship".into(),
+            display: DisplayTierDto {
+                width: 3840,
+                height: 2160,
+                fps: 60,
+            },
+            camera: CameraTierDto {
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                codec: "h264".into(),
+            },
+            audio: AudioTierDto {
+                sample_rate: 48000,
+                channels: 2,
+                codec: "opus".into(),
+            },
+            mic: MicTierDto {
+                sample_rate: 48000,
+                channels: 1,
+                codec: "opus".into(),
+            },
+        };
+        let one = RecommendationDto {
+            peer_id: "peer-a".into(),
+            peer_alias: "Office Mac".into(),
+            has_profile: true,
+            measured_mbps: 940.0,
+            direction: "push".into(),
+            measured_at_ms: 9000,
+            recommendation: rec.clone(),
+            timestamp_ms: 9000,
+        };
+        let v = serde_json::to_value(&one).unwrap();
+        assert_eq!(v["recommendation"]["tier"], "flagship");
+        assert_eq!(v["recommendation"]["camera"]["codec"], "h264");
+        let back_o: RecommendationDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_o, one);
+
+        let agg = RecommendationStatus {
+            peers: vec![RecommendationSummaryDto {
+                peer_id: "peer-a".into(),
+                peer_alias: "Office Mac".into(),
+                measured_mbps: 940.0,
+                direction: "push".into(),
+                measured_at_ms: 9000,
+                tier: "flagship".into(),
+            }],
+            timestamp_ms: 9000,
+        };
+        let back_a: RecommendationStatus =
+            serde_json::from_value(serde_json::to_value(&agg).unwrap()).unwrap();
+        assert_eq!(back_a, agg);
+    }
 }

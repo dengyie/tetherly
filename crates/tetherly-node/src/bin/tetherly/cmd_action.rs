@@ -94,7 +94,7 @@ pub(crate) async fn action(action: ActionCmd) -> Result<()> {
 }
 
 pub(crate) async fn do_action_local_list(ui_port: u16, json: bool) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/action/local")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/action/local")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -188,15 +188,21 @@ pub(crate) async fn do_action_local_add(
         payload["enabled"] = serde_json::json!(en);
     }
 
-    let (code, resp) =
-        tetherly_node::loopback_post(ui_port, "/api/action/local", &serde_json::to_vec(&payload)?)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    // v1 POST needs the explicit token (non-GET, non-ambient method).
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/action/local",
+        Some(&serde_json::to_vec(&payload)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        )
+    })?;
 
     if code != 200 {
         anyhow::bail!(
@@ -217,7 +223,7 @@ pub(crate) async fn do_action_local_add(
 }
 
 pub(crate) async fn do_action_local_remove(ui_port: u16, id: &str, json: bool) -> Result<()> {
-    let path = format!("/api/action/local?id={}", url_encode(id));
+    let path = format!("/api/v1/action/local/{}", url_encode(id));
     let (code, resp) = tetherly_node::loopback_delete(ui_port, &path)
         .await
         .map_err(|e| {
@@ -249,15 +255,22 @@ pub(crate) async fn do_action_remote_list(
     json: bool,
 ) -> Result<()> {
     if refresh {
-        let refresh_path = format!("/api/action/remote/refresh?peer={}", url_encode(peer));
-        let (rcode, rresp) = tetherly_node::loopback_post(ui_port, &refresh_path, &[])
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+        let refresh_body = serde_json::to_vec(&serde_json::json!({"peer": peer}))?;
+        // v1 POST needs the explicit token (non-GET, non-ambient method).
+        let (rcode, rresp) = tetherly_node::loopback_request(
+            ui_port,
+            "POST",
+            "/api/v1/action/remote/refresh",
+            Some(&refresh_body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+            )
+        })?;
         if rcode != 200 {
             anyhow::bail!(
                 "failed to request remote actions refresh (HTTP {rcode}): {}",
@@ -266,7 +279,7 @@ pub(crate) async fn do_action_remote_list(
         }
     }
 
-    let path = format!("/api/action/remote?peer={}", url_encode(peer));
+    let path = format!("/api/v1/action/remote?peer={}", url_encode(peer));
     let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
         .await
         .map_err(|e| {
@@ -327,10 +340,13 @@ pub(crate) async fn do_action_run(
         "peer": peer,
         "action_id": action_id,
     });
-    let (code, resp) = tetherly_node::loopback_post(
+    // v1 POST needs the explicit token (non-GET, non-ambient method).
+    let (code, resp) = tetherly_node::loopback_request(
         ui_port,
-        "/api/action/trigger",
-        &serde_json::to_vec(&payload)?,
+        "POST",
+        "/api/v1/action/trigger",
+        Some(&serde_json::to_vec(&payload)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await
     .map_err(|e| {
@@ -368,7 +384,7 @@ pub(crate) async fn do_action_run(
 }
 
 pub(crate) async fn do_action_history(ui_port: u16, json: bool) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/action/history")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/action/history")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -480,10 +496,13 @@ pub(crate) async fn do_action_policy(
             payload["clear_filters"] = serde_json::json!(true);
         }
 
-        let (code, resp) = tetherly_node::loopback_post(
+        // v1 PATCH needs the explicit token (non-GET, non-ambient method).
+        let (code, resp) = tetherly_node::loopback_request(
             ui_port,
-            "/api/action/policy",
-            &serde_json::to_vec(&payload)?,
+            "PATCH",
+            "/api/v1/action/policy",
+            Some(&serde_json::to_vec(&payload)?),
+            tetherly_node::api_token_for(ui_port).as_deref(),
         )
         .await
         .map_err(|e| {
@@ -510,7 +529,7 @@ pub(crate) async fn do_action_policy(
         return Ok(());
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/action/policy")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/v1/action/policy")
         .await
         .map_err(|e| {
             anyhow::anyhow!(

@@ -1464,3 +1464,12 @@
 - CLI ×11：cmd_clip 9 + cmd_audit 2；print_clipboard_policy 改读扁平资源（嵌套 policy/stats 折掉）；policy 写 PATCH 显式 api_token_for；clear 双域动词修正为 DELETE。watch SSE 不动（M6）。
 - 坑：审计环与策略共享 runtime 态——policy PATCH 自身留审计痕迹，集成测试按 total=1 断言而非空环；u64/usize 边界（max_payload_bytes）用 try_from 饱和；parse_query_map 临时值借用 E0515——先落 qmap。
 - 门禁：fmt/clippy --all-targets 0 错（bool_comparison 1 处修）；契约 36 / bin 16 / uihttp 79 / apiv1 28 全绿。全量交 CI。
+
+## §164 M5 第十三批 (2026-11-18) — action + bench + recommendation 域迁移 v1
+- 历史帧建模修正：运行时 ActionResultFrame 无 direction/peer_id/peer_alias 字段（CLI 打印器同名读取全是 unwrap_or 兜底），契约按真实字段建模，不虚构数据。
+- 契约 ×16：action 12（LocalActions/RemoteActions/TriggerReport/History/PolicyDto 平铺 + 3 个 strict Request + ActionPolicyPatch）+ bench 7（BenchStatus/BenchDecision/BenchPolicyDto 平铺 + BenchStartRequest/Patch + Session/Report DTO）+ 推荐 8（StreamingRecommendationDto + 4 tier DTO codec 折字符串 + RecommendationDto/Summary/Status）；全部折 ok/message 信封；契约测试 +2（38）+ bindings +122 行。
+- v1 ×13：action local GET/POST + DELETE /local/{id}（legacy ?id= 折路径参数）+ remote GET/refresh/trigger（body+query 兼容）+ history + GET/PATCH policy；bench GET/start/stop/GET/PATCH policy；recommendation 单 peer/聚合。PATCH/POST 显式 api_token_for。
+- CLI ×17：cmd_action 9 + cmd_bench 8；POST/PATCH 全走 loopback_request 显式 token；打印机零改动（资源逐字段同形 + unwrap_or(v) 兜底天然兼容扁平资源）。
+- 语义细节：legacy query 变体对 action/bench policy allow-list 是「追加去重」语义（body 是替换）——PATCH handler 用 from_query 标记区分；max_timeout 过 ActionValidator::clamp_timeout；bench direction 长宽表 lenient 解析（pull/download/rx/recv）。
+- 坑：route() 是返回 UiResponse 的函数体而非闭包——dispatch arm 里 `?` 与 `return Err(...)` 不可用，arm 早退写 `return error(...)`、拆出的 async fn（返回 Handled）才用 `Ok/Err` 包裹；parse_body 有 `T: Default` 约束，strict DTO 用新增 parse_body_strict；clippy extend_with_drain 4 处（extend(drain)→append）。
+- 门禁：fmt/clippy --all-targets 0 错；契约 38 / uihttp 80（新增 v1_action_bench_serve_and_gate）全绿。全量交 CI。

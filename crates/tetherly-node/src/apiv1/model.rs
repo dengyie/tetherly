@@ -7,17 +7,21 @@ use crate::store::BlockedPeer;
 use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
-    Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, AuditClearReport,
-    AuditEntryDto, AuditTrail, ChannelTraffic, ClipClearReport, ClipContent, ClipHistory,
-    ClipHistoryEntry, ClipPolicyDto, ClipPollReport, ClipStatus, Device, FileBatchItem,
-    FileBatchReport, FileDecision, FileDecisionReport, FileDispatchItem, FileDispatchReport,
-    FileOffer, FileOffers, HandoffStatus, HeartbeatConfig, Inbox, InboxFile, Input, Layout,
-    LayoutEdge, LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, LocalCaps, MessageDirection,
-    Outbox, OutboxClearReport, OutboxEntryDto, OutboxResendReport, Pairing, PeerCaps, PeerCounts,
-    PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, ResumeMarker, ResumeMarkers, Settings,
-    SettingsGeneral, SettingsTransfer, Snapshot, Storage, StorageCleanReport, System,
-    TrafficTelemetry, Transfer, TransferDirection, TransferPhase, TransferStats, Transfers,
-    API_VERSION,
+    ActionHistory, ActionHistoryEntry, ActionPolicyDto, ActionTriggerReport, ActiveBenchSessionDto,
+    Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, AudioTierDto,
+    AuditClearReport, AuditEntryDto, AuditTrail, BenchDecision, BenchPolicyDto, BenchReportDto,
+    BenchStatus, CameraTierDto, ChannelTraffic, ClipClearReport, ClipContent, ClipHistory,
+    ClipHistoryEntry, ClipPolicyDto, ClipPollReport, ClipStatus, Device, DisplayTierDto,
+    FileBatchItem, FileBatchReport, FileDecision, FileDecisionReport, FileDispatchItem,
+    FileDispatchReport, FileOffer, FileOffers, HandoffStatus, HeartbeatConfig, Inbox, InboxFile,
+    Input, Layout, LayoutEdge, LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer,
+    LocalActionDto, LocalActions, LocalCaps, MessageDirection, MicTierDto, Outbox,
+    OutboxClearReport, OutboxEntryDto, OutboxResendReport, Pairing, PeerCaps, PeerCounts,
+    PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, RecommendationDto, RecommendationStatus,
+    RecommendationSummaryDto, RemoteActionDto, RemoteActions, ResumeMarker, ResumeMarkers,
+    Settings, SettingsGeneral, SettingsTransfer, Snapshot, Storage, StorageCleanReport,
+    StreamingRecommendationDto, System, TrafficTelemetry, Transfer, TransferDirection,
+    TransferPhase, TransferStats, Transfers, API_VERSION,
 };
 use tetherly_core::{CoreError, DisplayEdge, PathKind, TrustedPeer};
 
@@ -1175,6 +1179,281 @@ pub fn audit_clear(node: &Node) -> AuditClearReport {
     AuditClearReport {
         cleared_count: r.cleared_count as u64,
         message: r.message,
+    }
+}
+
+// ---- §164: remote action domain ----
+
+fn local_action_dto(a: crate::store::LocalActionDefinition) -> LocalActionDto {
+    LocalActionDto {
+        id: a.id,
+        name: a.name,
+        description: a.description,
+        icon: a.icon,
+        command: a.command,
+        args: a.args,
+        timeout_secs: a.timeout_secs,
+        enabled: a.enabled,
+    }
+}
+
+/// `GET /action/local` — registered local quick-actions.
+pub fn local_actions(node: &Node) -> LocalActions {
+    let r = node.local_action_report();
+    LocalActions {
+        count: r.count,
+        actions: r.actions.into_iter().map(local_action_dto).collect(),
+    }
+}
+
+/// `POST /action/local` — register or replace one local action.
+pub fn local_action_add(
+    node: &Node,
+    action: crate::store::LocalActionDefinition,
+) -> Result<LocalActions, CoreError> {
+    let r = node.add_local_action(action)?;
+    Ok(LocalActions {
+        count: r.count,
+        actions: r.actions.into_iter().map(local_action_dto).collect(),
+    })
+}
+
+/// `DELETE /action/local` — remove one local action by id.
+pub fn local_action_remove(node: &Node, id: &str) -> Result<LocalActions, CoreError> {
+    let r = node.remove_local_action(id)?;
+    Ok(LocalActions {
+        count: r.count,
+        actions: r.actions.into_iter().map(local_action_dto).collect(),
+    })
+}
+
+/// `GET /action/remote` — cached peer-advertised actions.
+pub fn remote_actions(node: &Node, peer: &str) -> Result<RemoteActions, CoreError> {
+    let r = node.remote_actions(peer)?;
+    Ok(remote_actions_report(r))
+}
+
+/// Map a runtime `RemoteActionReport` (also covers the refresh path).
+pub fn remote_actions_report(r: crate::runtime::RemoteActionReport) -> RemoteActions {
+    RemoteActions {
+        peer: r.peer,
+        count: r.count,
+        actions: r
+            .actions
+            .into_iter()
+            .map(|a| RemoteActionDto {
+                id: a.id,
+                name: a.name,
+                description: a.description,
+                icon: a.icon,
+            })
+            .collect(),
+    }
+}
+
+/// `POST /action/trigger` — dispatch one remote action.
+pub async fn action_trigger(
+    node: &Node,
+    peer: &str,
+    action_id: &str,
+) -> Result<ActionTriggerReport, CoreError> {
+    let r = node.trigger_remote_action(peer, action_id).await?;
+    Ok(ActionTriggerReport {
+        trigger_id: r.trigger_id,
+        action_id: r.action_id,
+        target_peer: r.target_peer,
+        status: r.status,
+    })
+}
+
+/// `GET /action/history` — recent remote-action executions.
+pub fn action_history(node: &Node) -> ActionHistory {
+    let r = node.action_history();
+    ActionHistory {
+        count: r.count,
+        results: r
+            .results
+            .into_iter()
+            .map(|e| ActionHistoryEntry {
+                trigger_id: e.trigger_id,
+                action_id: e.action_id,
+                success: e.success,
+                exit_code: e.exit_code,
+                output_summary: e.output_summary,
+                error_message: e.error_message,
+                duration_ms: e.duration_ms,
+                timestamp_ms: e.timestamp_ms,
+            })
+            .collect(),
+    }
+}
+
+fn action_policy_dto(p: crate::store::ActionPolicy) -> ActionPolicyDto {
+    ActionPolicyDto {
+        mode: p.mode.as_str().to_string(),
+        max_timeout_secs: p.max_timeout_secs,
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+        expose_action_list: p.expose_action_list,
+    }
+}
+
+/// `GET /action/policy` — inbound remote-action governance policy.
+pub fn action_policy(node: &Node) -> ActionPolicyDto {
+    action_policy_dto(node.action_policy())
+}
+
+/// `PATCH /action/policy` — sparse policy update.
+pub fn set_action_policy(node: &Node, policy: crate::store::ActionPolicy) -> ActionPolicyDto {
+    let r = node
+        .set_action_policy(policy)
+        .expect("validated action policy");
+    action_policy_dto(r.policy)
+}
+
+// ---- §164: link benchmark domain ----
+
+fn bench_policy_dto(p: crate::store::BenchPolicy) -> BenchPolicyDto {
+    BenchPolicyDto {
+        enabled: p.enabled,
+        allow_inbound_bench: p.allow_inbound_bench,
+        max_duration_secs: p.max_duration_secs,
+        max_bandwidth_mbps: p.max_bandwidth_mbps,
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+/// `GET /bench` — benchmark engine status + policy + last measurement.
+pub fn bench_status(node: &Node) -> BenchStatus {
+    let r = node.bench_status();
+    BenchStatus {
+        active: r.active,
+        session: r.session.map(|s| ActiveBenchSessionDto {
+            session_id: s.session_id,
+            peer_id: s.peer_id,
+            role: s.role.as_str().to_string(),
+            direction: s.direction.as_str().to_string(),
+            duration_secs: s.duration_secs,
+            chunk_size: s.chunk_size,
+            chunks_processed: s.chunks_processed,
+            bytes_transferred: s.bytes_transferred,
+            started_at_ms: s.started_at_ms,
+            last_activity_ms: s.last_activity_ms,
+        }),
+        policy: bench_policy_dto(r.policy),
+        last_report: r.last_report.map(|rep| BenchReportDto {
+            session_id: rep.session_id,
+            direction: rep.direction.as_str().to_string(),
+            duration_ms: rep.duration_ms,
+            bytes_transferred: rep.bytes_transferred,
+            chunks: rep.chunks,
+            throughput_mbps: rep.throughput_mbps,
+            avg_chunk_latency_us: rep.avg_chunk_latency_us,
+            jitter_us: rep.jitter_us,
+            stopped_early: rep.stopped_early,
+            timestamp_ms: rep.timestamp_ms,
+        }),
+        timestamp_ms: r.timestamp_ms,
+    }
+}
+
+/// `GET /bench/policy` — link benchmark governance policy.
+pub fn bench_policy(node: &Node) -> BenchPolicyDto {
+    bench_policy_dto(node.bench_policy())
+}
+
+/// `PATCH /bench/policy` — sparse policy update.
+pub fn set_bench_policy(node: &Node, policy: crate::store::BenchPolicy) -> BenchPolicyDto {
+    let r = node
+        .set_bench_policy(policy)
+        .expect("validated bench policy");
+    bench_policy_dto(r.policy)
+}
+
+/// `POST /bench/start` + `POST /bench/stop` decision report.
+pub fn bench_decision(r: crate::runtime::BenchDecisionReport) -> BenchDecision {
+    BenchDecision {
+        action: r.action,
+        session_id: r.session_id,
+        peer_id: r.peer_id,
+        message: r.message,
+        timestamp_ms: r.timestamp_ms,
+    }
+}
+
+/// `GET /recommendation?peer=` — one peer's measured link + streaming tiers.
+pub fn recommendation(node: &Node, peer: &str) -> Result<RecommendationDto, CoreError> {
+    let r = node.streaming_recommendation(peer)?;
+    Ok(RecommendationDto {
+        peer_id: r.peer_id,
+        peer_alias: r.peer_alias,
+        has_profile: r.has_profile,
+        measured_mbps: r.measured_mbps,
+        direction: r.direction,
+        measured_at_ms: r.measured_at_ms,
+        recommendation: recommendation_dto(r.recommendation),
+        timestamp_ms: r.timestamp_ms,
+    })
+}
+
+/// `GET /recommendation` — aggregate recommendation status across peers.
+pub fn recommendation_status(node: &Node) -> RecommendationStatus {
+    let r = node.recommendation_status();
+    RecommendationStatus {
+        peers: r
+            .peers
+            .into_iter()
+            .map(|p| RecommendationSummaryDto {
+                peer_id: p.peer_id,
+                peer_alias: p.peer_alias,
+                measured_mbps: p.measured_mbps,
+                direction: p.direction,
+                measured_at_ms: p.measured_at_ms,
+                tier: p.tier,
+            })
+            .collect(),
+        timestamp_ms: r.timestamp_ms,
+    }
+}
+
+fn recommendation_dto(
+    r: tetherly_core::recommend::StreamingRecommendation,
+) -> StreamingRecommendationDto {
+    StreamingRecommendationDto {
+        measured_mbps: r.measured_mbps,
+        tier: r.tier,
+        display: DisplayTierDto {
+            width: r.display.width,
+            height: r.display.height,
+            fps: r.display.fps,
+        },
+        camera: CameraTierDto {
+            width: r.camera.width,
+            height: r.camera.height,
+            fps: r.camera.fps,
+            codec: r.camera.codec.as_str().to_string(),
+        },
+        audio: AudioTierDto {
+            sample_rate: r.audio.sample_rate,
+            channels: r.audio.channels,
+            codec: r.audio.codec.as_str().to_string(),
+        },
+        mic: MicTierDto {
+            sample_rate: r.mic.sample_rate,
+            channels: r.mic.channels,
+            codec: r.mic.codec.as_str().to_string(),
+        },
     }
 }
 

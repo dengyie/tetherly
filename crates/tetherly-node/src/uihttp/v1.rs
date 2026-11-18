@@ -12,10 +12,12 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
 use tetherly_api::{
-    BlockRequest, CapsUpdate, ConnectRequest, DevicePatch, Diagnostics, DialReport, DialRequest,
-    ErrorBody, ErrorCode, Event, Health, HeartbeatPatch, LinkProbeRequest, LogLevel,
+    ActionPolicyPatch, ActionTriggerRequest, BenchPolicyPatch, BenchStartRequest, BlockRequest,
+    CapsUpdate, ConnectRequest, DevicePatch, Diagnostics, DialReport, DialRequest, ErrorBody,
+    ErrorCode, Event, Health, HeartbeatPatch, LinkProbeRequest, LocalActionRequest, LogLevel,
     LogLevelRequest, LogTail, Patch, PeerProfileDto, PeerProfilePatch, PeerProfileUpdated,
-    PinGrant, SettingsPatch, SysHost, SysProcess, SysTelemetry, Topic, API_VERSION,
+    PinGrant, RemoteActionRefreshRequest, SettingsPatch, SysHost, SysProcess, SysTelemetry, Topic,
+    API_VERSION,
 };
 use tetherly_core::CoreError;
 use tokio::io::AsyncWriteExt;
@@ -98,6 +100,13 @@ fn outbox_resend_action(path: &str) -> Option<String> {
     (action == "resend" && !id.is_empty()).then(|| super::util::percent_decode(id))
 }
 
+/// §164: `/api/v1/action/local/{id}` -> id (percent-decoded) — the
+/// remove-local-action route (legacy `DELETE /api/action/local?id=`).
+fn action_local_item(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/v1/action/local/")?;
+    (!rest.is_empty() && !rest.contains('/')).then(|| super::util::percent_decode(rest))
+}
+
 /// §162b: `/api/v1/inbox/{name}/content` -> name (percent-decoded) — the raw
 /// file-bytes download route (legacy `/api/file/inbox/download`).
 fn inbox_content_item(path: &str) -> Option<String> {
@@ -174,6 +183,17 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/clip/sync" | "/api/v1/clip/poll" => Some(&["POST"]),
         "/api/v1/clip/policy" => Some(&["GET", "PATCH"]),
         "/api/v1/audit" => Some(&["GET", "DELETE"]),
+        // §164: remote action + link benchmark domains.
+        "/api/v1/action/local" => Some(&["GET", "POST"]),
+        p if action_local_item(p).is_some() => Some(&["DELETE"]),
+        "/api/v1/action/remote" => Some(&["GET"]),
+        "/api/v1/action/remote/refresh" | "/api/v1/action/trigger" => Some(&["POST"]),
+        "/api/v1/action/history" => Some(&["GET"]),
+        "/api/v1/action/policy" => Some(&["GET", "PATCH"]),
+        "/api/v1/bench" => Some(&["GET"]),
+        "/api/v1/bench/start" | "/api/v1/bench/stop" => Some(&["POST"]),
+        "/api/v1/bench/policy" => Some(&["GET", "PATCH"]),
+        "/api/v1/recommendation" => Some(&["GET"]),
         p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
         p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -203,6 +223,12 @@ fn no_content() -> UiResponse {
         "application/json; charset=utf-8",
         Vec::new(),
     ))
+}
+
+/// Strict JSON body for non-Default DTOs (all fields required).
+fn parse_body_strict<T: DeserializeOwned>(body: &[u8]) -> Result<T, UiResponse> {
+    serde_json::from_slice(body)
+        .map_err(|e| error(ErrorCode::BadRequest, format!("invalid body: {e}")))
 }
 
 /// Strict JSON body; an empty body reads as `{}`.
@@ -517,6 +543,85 @@ pub(super) async fn route(
         // §163: audit trail domain (clear reuses the DELETE verb).
         ("GET", "/api/v1/audit") => get_audit_v1(node, query, body),
         ("DELETE", "/api/v1/audit") => Ok(json(200, &crate::apiv1::model::audit_clear(node))),
+        // §164: remote action domain.
+        ("GET", "/api/v1/action/local") => Ok(json(200, &crate::apiv1::model::local_actions(node))),
+        ("POST", "/api/v1/action/local") => post_action_local(node, body).await,
+        ("DELETE", p) if action_local_item(p).is_some() => {
+            let id = action_local_item(p).unwrap_or_default();
+            match crate::apiv1::model::local_action_remove(node, &id) {
+                Ok(rep) => Ok(json(200, &rep)),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("GET", "/api/v1/action/remote") => {
+            match query.and_then(|q| super::parse_query_map(q).get("peer").cloned()) {
+                Some(peer) => match crate::apiv1::model::remote_actions(node, &peer) {
+                    Ok(rep) => Ok(json(200, &rep)),
+                    Err(e) => Err(core_error(e)),
+                },
+                None => Err(error(ErrorCode::BadRequest, "missing peer")),
+            }
+        }
+        ("POST", "/api/v1/action/remote/refresh") => {
+            let req = parse_body::<RemoteActionRefreshRequest>(body);
+            let peer = match req
+                .ok()
+                .and_then(|r| r.peer)
+                .or_else(|| query.and_then(|q| super::parse_query_map(q).get("peer").cloned()))
+            {
+                Some(p) if !p.trim().is_empty() => p,
+                _ => return error(ErrorCode::BadRequest, "missing peer"),
+            };
+            match node.query_remote_actions(&peer).await {
+                Ok(rep) => Ok(json(200, &crate::apiv1::model::remote_actions_report(rep))),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("POST", "/api/v1/action/trigger") => {
+            let req: ActionTriggerRequest = if body.iter().all(u8::is_ascii_whitespace) {
+                let q = query.map(super::parse_query_map).unwrap_or_default();
+                let action_id = q.get("action_id").cloned().or_else(|| q.get("id").cloned());
+                match (q.get("peer").cloned(), action_id) {
+                    (Some(peer), Some(action_id)) => ActionTriggerRequest { peer, action_id },
+                    _ => return error(ErrorCode::BadRequest, "missing peer/action_id"),
+                }
+            } else {
+                match parse_body_strict::<ActionTriggerRequest>(body) {
+                    Ok(r) => r,
+                    Err(resp) => return resp,
+                }
+            };
+            match crate::apiv1::model::action_trigger(node, &req.peer, &req.action_id).await {
+                Ok(rep) => Ok(json(200, &rep)),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+        ("GET", "/api/v1/action/history") => {
+            Ok(json(200, &crate::apiv1::model::action_history(node)))
+        }
+        ("GET", "/api/v1/action/policy") => {
+            Ok(json(200, &crate::apiv1::model::action_policy(node)))
+        }
+        ("PATCH", "/api/v1/action/policy") => patch_action_policy(node, query, body).await,
+        // §164: link benchmark + recommendation domain.
+        ("GET", "/api/v1/bench") => Ok(json(200, &crate::apiv1::model::bench_status(node))),
+        ("POST", "/api/v1/bench/start") => post_bench_start(node, query, body).await,
+        ("POST", "/api/v1/bench/stop") => match node.bench_stop().await {
+            Ok(rep) => Ok(json(200, &crate::apiv1::model::bench_decision(rep))),
+            Err(e) => Err(core_error(e)),
+        },
+        ("GET", "/api/v1/bench/policy") => Ok(json(200, &crate::apiv1::model::bench_policy(node))),
+        ("PATCH", "/api/v1/bench/policy") => patch_bench_policy(node, query, body).await,
+        ("GET", "/api/v1/recommendation") => {
+            let peer = query.and_then(|q| super::parse_query_map(q).get("peer").cloned());
+            match peer {
+                Some(p) => match crate::apiv1::model::recommendation(node, &p) {
+                    Ok(rep) => Ok(json(200, &rep)),
+                    Err(e) => Err(core_error(e)),
+                },
+                None => Ok(json(200, &crate::apiv1::model::recommendation_status(node))),
+            }
+        }
         ("GET", "/api/v1/profiles") => Ok(json(
             200,
             &crate::apiv1::model::peer_profiles(
@@ -1243,6 +1348,255 @@ fn get_audit_v1(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
     Ok(json(
         200,
         &crate::apiv1::model::audit_trail(node, cat, sev, lim, since),
+    ))
+}
+
+/// Check how the legacy api_action/api_bench handlers were reached from
+/// dispatch to mirror their semantics in the §164 v1 handlers below.
+/// `POST /action/local` (§164): register or replace one local action.
+async fn post_action_local(node: &Node, body: &[u8]) -> Handled {
+    let req: LocalActionRequest = parse_body_strict(body)?;
+    if req.id.trim().is_empty() {
+        return Err(error(ErrorCode::BadRequest, "missing id"));
+    }
+    if req.command.trim().is_empty() {
+        return Err(error(ErrorCode::BadRequest, "missing command"));
+    }
+    let def = crate::store::LocalActionDefinition {
+        id: req.id,
+        name: req.name,
+        description: req.description,
+        icon: req.icon,
+        command: req.command,
+        args: req.args,
+        timeout_secs: req.timeout_secs.unwrap_or(10),
+        enabled: req.enabled.unwrap_or(true),
+    };
+    match crate::apiv1::model::local_action_add(node, def) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /action/policy` (§164): sparse update, body wins over legacy query.
+async fn patch_action_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<ActionPolicyPatch>(body)?;
+    if patch.mode.is_none() {
+        patch.mode = q_str("mode");
+    }
+    if patch.max_timeout_secs.is_none() {
+        patch.max_timeout_secs = q_str("max_timeout_secs")
+            .or_else(|| q_str("timeout"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.expose_action_list.is_none() {
+        patch.expose_action_list = q_str("expose_action_list")
+            .or_else(|| q_str("expose"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_list(&qmap, "allowed_groups").or_else(|| q_list(&qmap, "group"));
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_list(&qmap, "allowed_tags").or_else(|| q_list(&qmap, "tag"));
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_list(&qmap, "allowed_types").or_else(|| q_list(&qmap, "type"));
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.action_policy();
+    if let Some(m) = &patch.mode {
+        policy.mode = m
+            .parse()
+            .map_err(|e: CoreError| error(ErrorCode::BadRequest, e.to_string()))?;
+    }
+    if let Some(t) = patch.max_timeout_secs {
+        policy.max_timeout_secs = tetherly_core::ActionValidator::clamp_timeout(t);
+    }
+    if let Some(e) = patch.expose_action_list {
+        policy.expose_action_list = e;
+    }
+    // Legacy query variant *adds* to the allow-lists; body replaces.
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    Ok(json(
+        200,
+        &crate::apiv1::model::set_action_policy(node, policy),
+    ))
+}
+
+/// `POST /bench/start` (§164): body or legacy query params.
+async fn post_bench_start(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let req: BenchStartRequest = if !body.iter().all(u8::is_ascii_whitespace) {
+        parse_body_strict(body)?
+    } else {
+        let peer = qmap.get("peer").or_else(|| qmap.get("peer_id")).cloned();
+        let Some(peer) = peer else {
+            return Err(error(ErrorCode::BadRequest, "missing peer"));
+        };
+        let direction = qmap.get("direction").or_else(|| qmap.get("dir")).cloned();
+        let duration_secs = qmap
+            .get("duration_secs")
+            .or_else(|| qmap.get("duration"))
+            .and_then(|s| s.parse().ok());
+        let chunk_size = qmap
+            .get("chunk_size")
+            .or_else(|| qmap.get("chunk"))
+            .and_then(|s| s.parse().ok());
+        BenchStartRequest {
+            peer,
+            direction: direction.unwrap_or_else(|| "push".to_string()),
+            duration_secs,
+            chunk_size,
+        }
+    };
+    let direction = match req.direction.to_ascii_lowercase().as_str() {
+        "pull" | "download" | "rx" | "recv" => tetherly_core::BenchDirection::Pull,
+        _ => tetherly_core::BenchDirection::Push,
+    };
+    match node
+        .bench_start(&req.peer, direction, req.duration_secs, req.chunk_size)
+        .await
+    {
+        Ok(rep) => Ok(json(200, &crate::apiv1::model::bench_decision(rep))),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /bench/policy` (§164): sparse update, body wins over legacy query.
+async fn patch_bench_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<BenchPolicyPatch>(body)?;
+    if patch.enabled.is_none() {
+        patch.enabled = q_str("enabled").and_then(|s| s.parse().ok());
+    }
+    if patch.allow_inbound_bench.is_none() {
+        patch.allow_inbound_bench = q_str("allow_inbound_bench")
+            .or_else(|| q_str("inbound"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_duration_secs.is_none() {
+        patch.max_duration_secs = q_str("max_duration_secs")
+            .or_else(|| q_str("duration"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_bandwidth_mbps.is_none() {
+        patch.max_bandwidth_mbps = q_str("max_bandwidth_mbps")
+            .or_else(|| q_str("bandwidth"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_list(&qmap, "allowed_groups").or_else(|| q_list(&qmap, "group"));
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_list(&qmap, "allowed_tags").or_else(|| q_list(&qmap, "tag"));
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_list(&qmap, "allowed_types").or_else(|| q_list(&qmap, "type"));
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.bench_policy();
+    if let Some(e) = patch.enabled {
+        policy.enabled = e;
+    }
+    if let Some(a) = patch.allow_inbound_bench {
+        policy.allow_inbound_bench = a;
+    }
+    if let Some(d) = patch.max_duration_secs {
+        policy.max_duration_secs = d;
+    }
+    if let Some(b) = patch.max_bandwidth_mbps {
+        policy.max_bandwidth_mbps = b;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    Ok(json(
+        200,
+        &crate::apiv1::model::set_bench_policy(node, policy),
     ))
 }
 
