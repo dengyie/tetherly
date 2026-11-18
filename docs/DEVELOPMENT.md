@@ -3,7 +3,7 @@
 ## 当前接手基线（维护于 2026-11-16）
 
 - **代码基线：v0.2.60（tag 发版中，M4 已上线生产 + M5 进行中：`/legacy/` 退役横幅、CLI 六命令迁 `/api/v1`（pin/health/peers/status/sys/config）、契约扩展（Device.group / System.lan_only / Transfers.stats / diagnostics/sys）、spawn_ui per-port token、壳接管链三修复（Live 事件/监听器竞态/ping 喂窗）），最高 ADR-139。** 上一发布基线 v0.2.59（§140，已部署生产，M4 验收窗口 2026-11-17 起算）。 上一发布基线 v0.2.58（§129，未部署）。`Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。本块下方 2026-11-10 起的逐版本条目保留为历史演进记录，其中"未发布/未提交"措辞均为当时状态，v0.2.8–v0.2.57 已全部经 CI tag 发布并经 `scripts/deploy.sh --target all --tag vX.Y.Z` 部署。
-- **ADR-139 控制客户端主线（§126–§142）：** M0 契约 v0.2.56 ✅ → M1 事件流 v0.2.57 ✅ → M2a v1 门面 v0.2.58 ✅ → **M2 门面+Web SPA ✅**（§130–§133，Svelte 5 `/next/` 托管）→ **M3 Tauri 桌面壳 ✅**（§134–§138：托盘真实状态/通知/自启/深链接/tray_owner 接管 + client.token 双 token）→ **M4 切换 ✅**（§139：`/` = 新 SPA、`/legacy/` 旧控制台、托盘优先客户端、popover 退役；验收 = 生产一周无回退）→ **M5 预收敛 ✅**（§141 退役横幅）→ **M5 收敛进行中**（§142 起 CLI 逐波迁 v1；删 `/legacy/` 与 `ui/index.html`、旧 `/api/*` 下线、Android Compose 等待 M4 验收）。旧 `/api/*` 自 M1 起冻结。
+- **ADR-139 控制客户端主线（§126–§142）：** M0 契约 v0.2.56 ✅ → M1 事件流 v0.2.57 ✅ → M2a v1 门面 v0.2.58 ✅ → **M2 门面+Web SPA ✅**（§130–§133，Svelte 5 `/next/` 托管）→ **M3 Tauri 桌面壳 ✅**（§134–§138：托盘真实状态/通知/自启/深链接/tray_owner 接管 + client.token 双 token）→ **M4 切换 ✅**（§139：`/` = 新 SPA、`/legacy/` 旧控制台、托盘优先客户端、popover 退役；验收 = 生产一周无回退）→ **M5 预收敛 ✅**（§141 退役横幅）→ **M5 收敛进行中**（§142 起 CLI 逐波迁 v1；删 `/legacy/` 与 `ui/index.html`、旧 `/api/*` 下线、Android Compose §171 落地）。旧 `/api/*` 自 M1 起冻结。
 - **🟢 Windows→Mac 鼠标方向已解决（v0.2.29，2026-11-13 真机验收）：** 2026-11-13 早间移交时的"Windows 物理鼠标不能驱动 Mac 光标"根因是 §101 的 7 秒弹回（entry placement 落在反向触发区 + pinned heartbeat 自动完成驻留）；`7b71531` zone-entered gate 修复后双端 `/api/health` version=v0.2.29，Mac 日志 `apply: enter` → 稳定 Remote 会话 → 用户正常推回，无弹回。生产机验收由用户实测确认（"Windows 鼠标已经可以接入 mac 了"）。
 - **v0.2.30（§102）：** (A) core Remote 座位冗余 Move 帧抑制（归一化远端坐标不变就不发帧，消灭 `lone edge-clamp move` 四连与零位移抖动帧）；(C) 输入引擎决策环 `GET /api/input/trace` + 双 CLI `tetherly input trace`（64 条内存环，覆盖 crossing / seat / attach_kick / park_warp / release / rescue / reconcile / apply_enter / push_*），SYSTEM 守护进程排障不再依赖 RUST_LOG 与 ssh 翻日志；(B) 回归后 attach-kick 冷却**明确不做**（理由见 §102）。
 - **v0.2.31（§103）：** 针对用户真机两症状——(1) Windows 鼠标首次进入 Mac 要很久（22:28 日志 8 s `dwell gated` + 进入后 0.9–3.3 s 弹回）：反向触发区闸门改锚定在控制器**已应用的 Enter**（预臂 accept 无 entry 坐标时闸门保持开启，Enter 关闸、Leave 重开），core 新增进入回归宽限 `entry_return_grace`（node 由 `EdgeCrossingConfig.entry_return_grace_ms` 配置，默认 1000 ms，`/api/topology/config` 可调，0 为旧即时回归）；(2) Windows 鼠标在 Mac 里左键点不动：macOS 注入 `move_abs` 在按键按住期间改发 `*MouseDragged`（选字/拖窗/拖放此前对 AppKit 不可见），并补 Button 链路埋点 `push_button` / `apply_button` / `apply_reject` 与 `/api/input` 新字段 `applied / dropped / rx_buttons / rx_wheel / rx_keys / tx_buttons`，外加 `channel_open` / `pump_exit` / `zone_gate` 决策环条目（§102.7 `m3_12` 取证前置）。Mac 再预臂冷却（选项 iii）按 §102.4 继续不做。
@@ -9311,7 +9311,7 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **观察基础设施盘点（§8 M5 "旧 `/api/*` 别名带日志观察"）**：§129 M2a 已建全量——`hub.legacy.record`（method+route 模板+caller 分类，256 key 上限防扫描膨胀）在 `handle` 入口计数，`GET /api/v1/diagnostics` 的 `legacy_routes` 快照暴露。旧控制台迁移观察无需新代码；数据自 v0.2.59 部署起积累（部署前 `/` 是旧控制台，命中全是它自己）。
 - **退役横幅（ui/index.html）**：`<main>` 顶部注入一条内联样式横幅——"⚠️ 这是旧版控制台（`/legacy/`），新版控制台已迁至 `/`。旧版将在后续版本移除，请迁移你的书签。"，链接指向 `/`。单文件形态不变（无外部资产），next.rs `legacy_entry_is_the_single_file_console` 测试（无 `src=` 断言）保持通过。
 - **验证**：真 daemon 隔离端口冒烟——`/legacy/` 与 `/legacy/deep/link` 均含横幅与迁移链接；fmt / host + windows-gnu clippy `--all-targets -D warnings` 双 0 错；`cargo test --workspace --locked` 1019 全绿；deny 四项 ok。
-- **M5 剩余（等 M4 验收）**：删 `ui/index.html` 与 `/legacy/` 路由、旧 `/api/*` 别名按 diagnostics 快照逐个下线（路由 ~555→~60）、Android Compose 改版。
+- **M5 剩余（等 M4 验收）**：删 `ui/index.html` 与 `/legacy/` 路由、旧 `/api/*` 别名按 diagnostics 快照逐个下线（路由 ~555→~60）、~~Android Compose 改版~~（§171 落地）。
 
 ## 142. M5 CLI 迁移第一波：`tetherly pin` 三臂迁 `/api/v1/pairing/pin`（未发版，main 续）
 
@@ -9635,3 +9635,40 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **m3_12 windows 红取证埋点**（runtime/input.rs）：windows CI 自 v0.2.29 起偶发 `[takeover] resp: ACCEPTED` 后紧跟 `release: peer session gone role=Controller`（根因未定，§102.7 不做猜测性修复）。此前决策环缺两处关键视角——(1) `receive_input_tunnel_resp` 的 ACCEPTED 分支只有 `tracing::info!` 不进决策环，现在补 `trace_input("takeover", "resp ACCEPTED peer=…")`；(2) target pump 的 `is_remote=false` teardown（"peer session gone" 来源）只有 grant 侧 `release` 条目，现在在 release 之前补 `trace_input("pump_exit", "target pump session gone peer=…")`。下次 windows CI 红灯时决策环即可区分「pump 亲眼看到通道死亡」与「release 与新 grant 竞态」两类退出路径。
 - **本地验证（CI-only 纪律下最小面）**：删 target 后 fmt --check 绿；clippy `-p tetherly-node --all-targets -D warnings` 0 错；`m3_2`（3.89s 绿，新预算生效）与 `m3_12`（1.16s 绿）单测通过；trace 环有界性测试 2 例绿。全量测试交 CI（run 44404576406）。
 - **生效时点勘误（重要）**：§169 的 legacy 删除落在 main 但**晚于 v0.2.63 tag**，故 v0.2.63 发布产物仍含 legacy 路由（双端实测 `/api/peers` 200 属预期，非回归）；legacy 404 自本版（v0.2.64）发布起生效。hub.legacy 观测计数器继续保留，从 v0.2.64 起才是有效观测窗口。
+
+## §171（2026-11-19，v0.2.65）—— input-link 登记项清账 + Android Compose 改版 + Windows viewer/文件投递缺口核对
+
+**目标**：`.codex-memory/todo.md` 输入链路 8 个登记未修项（2026-11-10 明确范围控制留待本轮）逐项取证，能修则修、已解决则记证据、能力缺口则如实登记；顺带完成 M5 剩余的 Android Compose 改版；Windows session viewer 与文件投递三项缺口核对后更新 todo 口径。
+
+### 修复 4 项
+
+- **F · 滚轮 120x 单位错配**（platform.rs，WM_MOUSEWHEEL/WM_MOUSEHWHEEL 两处捕获点）：Windows 捕获 `mi.mouseData >> 16` 的值**已是 WHEEL_DELTA 计数**（1 格 = 120），而注入端（Windows `inject_mouse(MOUSEEVENTF_WHEEL, delta*120)`、macOS `CGScrollEventUnit::Line`）按「1 命令 = 1 line」语义再放大——Windows 物理滚轮一格在远端变成 120 格（120x 放大）。修复：捕获端符号保持整除归一 `(raw / 120) as i16`（平滑滚轮的亚 detent 噪声不足一格时不虚构 detent），注入端语义不动。macOS 捕获端（DeltaAxis1/2 + PointDelta signum 兜底）本就是 line 语义，不改。
+- **C · 冷启动 edge 未镜像**（runtime/input.rs `spawn_input_capture`）：engine 的 edge 默认 Right，直到首次 attach/策略变更才 `set_edge`——冷启动守护进程在无任何会话时就按错误 edge 评估越边。修复：capture 启动处 resize 后 `engine.set_edge(self.input_policy().resolved_edge())` 镜像持久化策略（store.rs `resolved_edge()` 已存在）。
+- **B · tb dwell 跨离边保留**（core input.rs Top/Bottom 两分支）：`tb_band_gate` 只在 fast push 与 out-of-band 时清 `tb_band_quiet_since`，而**离边运动**（Top `dy>0`、Bottom `dy<0`）根本不进 gate（`into_edge` 为假直通）——慢推驻留计时在用户离开边缘后仍保留，回来时旧时间戳直接放行越边。修复：两分支的 else（离边）路径显式清 `tb_band_quiet_since`，"quiet" 语义收紧为「停在边缘期间的 quiet」。测试：`tb_redundancy_band_speed_semantics` 增补离边往返段（arm → 离边 → 等 dwell 预算 → 回边必须仍不越）。
+- **D · ADR-138 session `force_remote_center` 不同步 rem 坐标**（core input.rs:890）：promote 发 `[Enter, Move{center}]` 但 `rem_x/rem_y` 留在 pre-session 值，而 `force_local` 的停靠位置从 `denorm_y(self.rem_y)` 反解——session 退出/紧急回归时光标落到观众从未看到的坐标。修复：promote 时 `rem_x = rem_y = SCREEN_UNITS/2` 镜像进引擎。新增守护测试 `force_remote_center_mirrors_center_into_remote_coords`。
+
+### 取证判定「已解决」3 项（不改码，记录证据）
+
+- **A · auto-reverse `last_tick` 不推进**：登记说法对应 v0.2.36 之前的旧行为。现 state machine（`reverse_dwell_advance`，input.rs:3706）三条路径全部推进——首触 `_` 臂（:3792）、`(Some,Some)` contiguous 臂（:3743，v0.2.36 注释明言「否则 gap check 永远量第一次 touch」）、gap 重置臂（:3767）；heartbeat（`spawn_reverse_pinned_heartbeat`，30ms 周期）以同一状态机喂 tick 且 v0.2.36 contiguous 首钳位帧补记锚点。dwell>150ms push 无法 fire 的饥饿条件已不存在。
+- **E · release/abort 生命周期审计**：`release_input_tunnel_local` 是统一出口（grant take → trace → seat → remote_screen(None) → disarm → restore_arrow_cursor → reverse-arming reset → UI 事件 → audit 十步齐全）；grace-window 有意**不**释放 grant（注释 + CI m3_11 锚定，pending takeover 的 late ACCEPT 依赖它）；pump 退出路径 release + disarm + warp 全配套；client task abort 有 supersession guard（die-away 的 target 会话不得把已接管的 Controller 拉回 Local）。未发现缺口。
+- **G · Dragged 事件类型**：macOS 捕获端（platform.rs:3093-3156）`Left/Right/OtherMouseDragged` 与 `MouseMoved` 同路发 `RawInput::Move{dx,dy}`（按钮 mask 由 Button 事件独立承载），注入端按 `InjectedMoveKind::{Left,Right,Other}Dragged` 还原 CGEventType（:646-651），按住期间 `move_abs` 发 Dragged 类型（v0.2.31 已修）。两端语义完整。
+
+### 登记「能力缺口」1 项
+
+- **H · 多显示器注入仅主屏**：`screen_size()` 两端都取主屏（Windows `SM_CXSCREEN`、macOS `CGMainDisplayID`），注入端 `move_abs` 用 `SetCursorPos` + 非 VIRTUALDESK 的 `MOUSEEVENTF_ABSOLUTE`（platform.rs:496-497 注释明言 "maps them onto this machine's primary monitor"）。真正支持需虚拟桌面坐标（`SM_*VIRTUALSCREEN` / `MOUSEEVENTF_VIRTUALDESK`）+ 跨屏捕获 + 引擎 per-display 映射，属功能立项不属 bugfix。
+
+### Android Compose 改版（M5 剩余项落地）
+
+- 根 `android/build.gradle.kts` 加 `org.jetbrains.kotlin.plugin.compose` 2.0.21（Kotlin 2.0 起 Compose 编译器随 Kotlin 插件分发，无独立 compiler artifact）。
+- `android/app/build.gradle.kts`：应用 compose 插件、`buildFeatures.compose = true`、依赖 Compose BOM 2024.10.01 + `compose.ui` + `material3` + `activity-compose` 1.9.3 + `ui-tooling-preview`。
+- `MainActivity.kt` 全量重写：`ComponentActivity` + `setContent`，`TetherlyScreen` Composable（OutlinedTextField ×2 + Button ×2 + 1s `LaunchedEffect` 状态轮询），Material 3。**行为与旧 View 树逐条等价**（保存连接 / 打开通知使用权 / POST_NOTIFICATIONS 运行时权限 / 1s 轮询 device_id+状态）；旧 `postDelayed` Runnable 轮询改为 `LaunchedEffect`（随组合销毁，不再挂视图树）。gradle 单测与 assembleDebug 由 CI `build-android` job 验证（Compose 依赖需联网拉取，本地不构建）。
+
+### Windows session viewer / 文件投递缺口核对（todo.md:105-106）
+
+- **Windows session viewer**：`tetherly-viewer` 是 macOS-only AppKit 子进程（`tetherly_viewer.rs:19-25` 非 macOS 直接 exit 2），Windows `spawn_remote_session_viewer` 为诚实 stub 直接 `ScreenRefused`（platform.rs:4326），CI 仅 macOS 分发 viewer 二进制（release.yml:104-106）——Windows 会话按设计 wire-side only。缺口确认：Windows 原生 viewer 需独立立项（Win32/GDI 窗口渲染或 Tauri SPA viewer）。
+- **文件投递三项**：协议/编排层完整（`runtime/drag.rs` + `drag_controller.rs` + `drag_target.rs` + core `drag.rs` 498 行，四模块内建测试，settlement 仅 MOTW+reveal 不自动执行）；**Edge Strip 置顶悬浮岛、真实 Ghost Overlay 窗口（当前 `GhostOverlayVisual` 仅状态模型经 REST 暴露）、被动跨屏拖拽手势识别**均未实施——与 ADR-137 §14/§35 的诚实登记一致。缺口确认，原生窗口层功能立项。
+- todo.md 口径更新：三项由「核对实际缺口」改记为「已核对、缺口确认为设计层未实施（§171）」。
+
+### 验证（CI-only 纪律下最小面）
+
+- `rm -rf target` 后：`cargo fmt --all -- --check` 绿；`cargo clippy -p tetherly-core -p tetherly-node --all-targets -- -D warnings` 0 错；core 单测 332（+2 新守护）、node 300、phase3 13 全绿。全量（含跨平台 cfg、Android gradle）交 CI。
