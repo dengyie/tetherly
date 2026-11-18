@@ -130,7 +130,6 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/events"
         | "/api/v1/devices"
         | "/api/v1/pairing"
-        | "/api/v1/input"
         | "/api/v1/layout"
         | "/api/v1/activity"
         | "/api/v1/diagnostics"
