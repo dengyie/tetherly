@@ -9626,3 +9626,12 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **测试收敛**：根集成测试 phase1/2/4/5 共 107 个纯 legacy 测试 fn + 孤儿 helper（wait_input_port/PACER_SETTLE/ControllableDeltaScreenSource/urlencode_query/wait_inbox_any/wait_event/DirGuard::path）删除，phase1 13003→578、phase5 12698→1539；uihttp.rs mod tests 内 57 个 legacy 测试删除（8712→1838）。CORS 测试改用 v1 路径（evil POST `/api/v1/health` 先 403、plain GET `/api/v1/health` 开放端点 200）。`tracing_capture` 模块（OTP 日志泄漏测试依赖）从删除中抢救回 phase1。
 - **保留**：`hub.legacy` 命中计数器与 `/api/v1/diagnostics` 的 `legacy_routes` 观测字段——外部 v0.2.6x 客户端仍在打 legacy 路由，观测数据是迁移验收证据；待后续版本确认归零后一并移除。
 - **门禁**：fmt --check 绿；clippy api+node+tetherly --all-targets 0 错 0 警；node lib 300 测试全绿；契约 42 全绿；bins 0 错。phase1/2/4/5 剩余 v1 测试交 CI 全跑。
+
+## 170. CI flake 根治 + m3_12 取证埋点加固（v0.2.64 前置件）
+
+接 §169。两件事一次收敛，均为零行为变更（产品面不动）：
+
+- **m3_2 宽限窗测试预算 5s→8s**（tests/phase3.rs）：Node 持 2.5s 重连宽限后才归还 seat，测试原给 5s 上限——在慢 runner 上已两次偶发（§164、§168 ubuntu，失败特征三连：`m3_2_peer_gone_returns_cursor` "cursor did not return home"、input.rs/phase3.rs 在 diff 中零改动、该 job 时长显著慢于基线）。判据确认为纯调度压力后放宽到 8s，注释写明证据链，防止后人误判为回归。
+- **m3_12 windows 红取证埋点**（runtime/input.rs）：windows CI 自 v0.2.29 起偶发 `[takeover] resp: ACCEPTED` 后紧跟 `release: peer session gone role=Controller`（根因未定，§102.7 不做猜测性修复）。此前决策环缺两处关键视角——(1) `receive_input_tunnel_resp` 的 ACCEPTED 分支只有 `tracing::info!` 不进决策环，现在补 `trace_input("takeover", "resp ACCEPTED peer=…")`；(2) target pump 的 `is_remote=false` teardown（"peer session gone" 来源）只有 grant 侧 `release` 条目，现在在 release 之前补 `trace_input("pump_exit", "target pump session gone peer=…")`。下次 windows CI 红灯时决策环即可区分「pump 亲眼看到通道死亡」与「release 与新 grant 竞态」两类退出路径。
+- **本地验证（CI-only 纪律下最小面）**：删 target 后 fmt --check 绿；clippy `-p tetherly-node --all-targets -D warnings` 0 错；`m3_2`（3.89s 绿，新预算生效）与 `m3_12`（1.16s 绿）单测通过；trace 环有界性测试 2 例绿。全量测试交 CI（run 44404576406）。
+- **生效时点勘误（重要）**：§169 的 legacy 删除落在 main 但**晚于 v0.2.63 tag**，故 v0.2.63 发布产物仍含 legacy 路由（双端实测 `/api/peers` 200 属预期，非回归）；legacy 404 自本版（v0.2.64）发布起生效。hub.legacy 观测计数器继续保留，从 v0.2.64 起才是有效观测窗口。
