@@ -36,42 +36,6 @@ pub fn client_token_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CLIENT_TOKEN_FILE)
 }
 
-/// True when `(method, path)` is a privileged route that needs the token.
-///
-/// `path` may carry a query string; only the path part is classified, with
-/// the same exact-match semantics as the router. Scope (user decision
-/// 2026-11-15, "privileged endpoints only"): process lifecycle, local command
-/// definitions and the policy that lets peers run them, config and log-level
-/// writes, and sending files from arbitrary paths. Inbox-open is on this
-/// list only because the legacy routes predate the v1 tier model; under
-/// ADR-139 it is a Write-tier v1 operation (any signed-in user may open a
-/// received file; executable launches are demoted by §123), so `/api/v1`
-/// requests are gated by `v1_required_tier` instead.
-pub fn requires_token(method: &str, path: &str) -> bool {
-    let path = path.split_once('?').map_or(path, |(p, _)| p);
-    matches!(
-        (method, path),
-        (
-            "POST",
-            "/api/daemon/shutdown"
-                | "/api/daemon/stop"
-                | "/api/daemon/restart"
-                | "/api/restart"
-                | "/api/file/inbox/open"
-                | "/api/inbox/open"
-                | "/api/handoff/inbox/open"
-                | "/api/handoff/open"
-                | "/api/file/send"
-                | "/api/file/send-multi"
-                | "/api/file/send-batch"
-                | "/api/file/batch"
-                | "/api/file/drag/intent"
-                | "/api/files/drag/intent"
-        ) | ("POST" | "PUT", "/api/action/policy" | "/api/config")
-            | ("POST" | "PUT" | "DELETE", "/api/action/local")
-    )
-}
-
 /// Access tier of a `/api/v1` request (ADR-139). Ordered: a grant of a
 /// higher tier satisfies every lower one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -561,57 +525,6 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn privileged_routes_require_token() {
-        for (m, p) in [
-            ("POST", "/api/daemon/shutdown"),
-            ("POST", "/api/daemon/stop"),
-            ("POST", "/api/daemon/restart"),
-            ("POST", "/api/restart"),
-            ("POST", "/api/action/local"),
-            ("PUT", "/api/action/local"),
-            ("DELETE", "/api/action/local?id=x"),
-            ("POST", "/api/action/policy"),
-            ("PUT", "/api/action/policy"),
-            ("POST", "/api/config"),
-            ("PUT", "/api/config"),
-            ("POST", "/api/file/inbox/open"),
-            ("POST", "/api/inbox/open"),
-            ("POST", "/api/handoff/inbox/open"),
-            ("POST", "/api/handoff/open"),
-            ("POST", "/api/file/send"),
-            ("POST", "/api/file/send-multi"),
-            ("POST", "/api/file/send-batch"),
-            ("POST", "/api/file/batch"),
-            ("POST", "/api/file/drag/intent"),
-            ("POST", "/api/files/drag/intent"),
-        ] {
-            assert!(requires_token(m, p), "{m} {p} must be gated");
-        }
-    }
-
-    #[test]
-    fn everyday_routes_stay_open() {
-        for (m, p) in [
-            ("GET", "/"),
-            ("GET", "/api/health"),
-            ("GET", "/api/state"),
-            ("GET", "/api/config"),
-            ("GET", "/api/action/local"),
-            ("GET", "/api/action/policy"),
-            ("POST", "/api/action/trigger"),
-            ("POST", "/api/handoff/send"),
-            ("POST", "/api/copy"),
-            ("POST", "/api/open"),
-            ("POST", "/api/file/cancel"),
-            ("GET", "/api/file/inbox"),
-            ("POST", "/api/input/ensure"),
-            ("POST", "/api/daemon/restart/"),
-        ] {
-            assert!(!requires_token(m, p), "{m} {p} must stay open");
-        }
     }
 
     #[test]

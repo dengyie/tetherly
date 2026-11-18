@@ -9616,3 +9616,13 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **CLI 迁移 ×151**（cmd_screen_session/tile/overlay/encoding/quality/replay）：括号配平的迁移器把 `loopback_get/post` 统一改写 `loopback_request`（GET 也带 api_token）；POST→PATCH（模式组）/DELETE（/reset）/POST 原样（start/stop/undo/redo/import/trigger 等）；body 键与契约 canonical 对齐（`zoom_percent`、`loop` rename、`pts_us` alias）。3 处打印机 `ok` 读取中性化（v1 折信封，HTTP 200 即成功）。迁移器 bug 修复记录：GET 路径透传未重写（全局字面量二次替换）+ 变量路径 `&uri` 被字符串拼接破坏（whiteboard undo/redo 误指根路径——已修正）。
 - **/legacy/ 删除**（§167c）：`/legacy` 与 `/legacy/*` 路由 arms、next.rs 的 LEGACY_INDEX embed + get_legacy_entry/get_legacy_asset + 单测、`ui/index.html`（10230 行旧单文件控制台）+ `ui/README.md` 整体删除；集成测试改为断言 404。SPA（client/）已确认零 legacy 调用（仅 /api/v1）。
 - **门禁**：fmt --all --check 绿；clippy api+node --all-targets 0 错 0 警（workspace 级 2 个预存警告除外）；apiv1 28 / 契约 42 / uihttp 79 全绿；bins 0 错。/api/* legacy 路由面（~900 arms + 27 个 api_*.rs）成为不可达死代码，归 §169 统一删除收敛。
+
+## 169. M5 收敛：legacy `/api/*` 路由面整体删除
+
+接 §168。screen 域迁移完成后，legacy `/api/*` 路由面（429 route arms + 27 个 api_*.rs 模块）成为不可达死代码。本节一次性删除，净 -33,796 行。
+
+- **取证先行**：SPA（client/）、Android、CLI 活代码全部仅调 `/api/v1`（SPA SSE 也走 `API_PREFIX=/api/v1/events`）；bins 中剩余 legacy 字面量全部是测试里对 `legacy_routes` 观测字段的 `starts_with` 断言，非活调用。`/api/state` 等核心读取在 v1 由 `system/devices/pairing` snapshot 族覆盖；`/api/peers` 全子路由由 `devices/{id}` + `devices/{id}/{action}` 覆盖。
+- **删除范围**：uihttp.rs route() 的 429 个 legacy arms（保留 `/`、`/assets/*`、404 fallback）+ `fn snapshot()`/`Snapshot`/`json_ok`/`err` 死码 + 27 个 `api_*.rs` 模块整体（~19k 行）+ dto.rs 瘦身 1308→46 行（仅留 DaemonRestartBody/Report——runtime lifecycle 与 lib 重导出仍在用、parse_hh_mm、node_clock_ms）+ apitoken.rs 的 `requires_token`（legacy 特权表，v1 已由 tier 模型全覆盖）及其两个测试 + trust.rs 的 `seed_trusted_peer` 测试后门。
+- **测试收敛**：根集成测试 phase1/2/4/5 共 107 个纯 legacy 测试 fn + 孤儿 helper（wait_input_port/PACER_SETTLE/ControllableDeltaScreenSource/urlencode_query/wait_inbox_any/wait_event/DirGuard::path）删除，phase1 13003→578、phase5 12698→1539；uihttp.rs mod tests 内 57 个 legacy 测试删除（8712→1838）。CORS 测试改用 v1 路径（evil POST `/api/v1/health` 先 403、plain GET `/api/v1/health` 开放端点 200）。`tracing_capture` 模块（OTP 日志泄漏测试依赖）从删除中抢救回 phase1。
+- **保留**：`hub.legacy` 命中计数器与 `/api/v1/diagnostics` 的 `legacy_routes` 观测字段——外部 v0.2.6x 客户端仍在打 legacy 路由，观测数据是迁移验收证据；待后续版本确认归零后一并移除。
+- **门禁**：fmt --check 绿；clippy api+node+tetherly --all-targets 0 错 0 警；node lib 300 测试全绿；契约 42 全绿；bins 0 错。phase1/2/4/5 剩余 v1 测试交 CI 全跑。

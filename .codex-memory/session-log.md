@@ -1503,3 +1503,10 @@
 - 部署链路（本机 Mac）：`scripts/package-macos-app.sh --tag v0.2.63 --restart`——下载 release 产物 → 暂存 bundle ad-hoc 签名（DR 锚 bundle id，TCC 辅助功能权限跨版本保留）→ 原子替换 /Applications/Tetherly.app → API token 优雅 shutdown 旧守护 → LaunchServices 重启。Windows 侧产物 tetherly-windows-x86_64.exe / tetherly-cli-windows-x86_64.exe / .msi 已在 release assets，按需分发。
 - 部署后 live 验证（v0.2.63 @ 127.0.0.1:45716）：/legacy 404、/api/v1/{screen,input,mic,health} 200、screen/tile GET→PATCH→DELETE 往返 200、watermark POST enable→PATCH off 往返 200（该组无 DELETE 语义，405 属 gate 表设计）、未知路径 404、无 token 401——全符合契约。
 - 事故复盘：清理残留资产时误用 `gh release delete v0.2.63 --yes` 把整个 release 删掉（应为 `gh release delete <tag> <asset> -y`）。恢复：run 44374655160 的 artifacts 仍在 Actions 侧，`gh run download` 全量拉回后 `gh release create v0.2.63 --generate-notes dist/*` 重建——比重新触发 CI 快 15 分钟。
+
+## §169（2026-11-19）：legacy /api/* 路由面整体删除（-33,796 行）
+
+- 取证：SPA/Android/CLI 活代码全在 /api/v1（含 SSE）；bins 剩余 legacy 字面量全是测试 starts_with 断言。/api/state→system/devices/pairing、/api/peers/*→devices/{id}/{action} 全覆盖。
+- 删除：429 route arms + 27 api_*.rs + dto.rs 1308→46 + requires_token + seed_trusted_peer + 107 个纯 legacy 集成测试 + uihttp mod tests 57 个。保留 hub.legacy 计数器（外部旧客户端迁移观测）。
+- 坑：批量删 fn 后孤儿 doc 注释/impl/尾括号成串（phase1 mod tracing_capture 差点被误删——OTP 日志泄漏测试依赖，从 git 抢救）；CORS 测试改 v1 路径（health POST 先 403，Origin gate 先于 route 分发）。
+- 门禁：fmt 绿 / clippy 3 crates 0 错 0 警 / node lib 300 绿 / 契约 42 绿 / bins 0 错。phase 全量交 CI。

@@ -269,3 +269,5 @@
 > §168（二）补充：`/legacy` 与 `/legacy/*`（旧单文件控制台 + `ui/index.html`）已整体删除；旧控制台的 `/api/*` 调用面成为不可达死代码，归 §169 删除。screen 域契约 ×113 + 端点 ×~150 + CLI ×151 详见 DEVELOPMENT.md §168。
 
 > 契约修正：`ActiveDisplaySessionDto.mode` 由 String 修为 `DisplayModeDto`（runtime 实字段为结构体，CLI 打印器读 `mode["width"]`）。
+
+> §169（M5 收敛）：legacy `/api/*` 路由面已整体删除——uihttp.rs 429 arms + 27 个 api_*.rs 模块 + requires_token legacy 特权表 + 107 个纯 legacy 集成测试，净 -33.8k 行。本表上方批次表保留作迁移史存档；`hub.legacy` 命中计数与 diagnostics 的 legacy_routes 观测字段保留至外部客户端迁移完成。
