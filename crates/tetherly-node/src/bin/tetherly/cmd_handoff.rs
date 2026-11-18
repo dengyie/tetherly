@@ -103,14 +103,20 @@ pub(crate) async fn do_handoff_send(
         "auto_open": auto_open,
     });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/handoff/send", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/handoff/send",
+        Some(&bytes),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "resource handoff failed (HTTP {code}): {}",
@@ -160,18 +166,24 @@ pub(crate) async fn do_handoff_send(
 }
 
 pub(crate) async fn do_handoff_list(ui_port: u16, status: Option<&str>, json: bool) -> Result<()> {
-    let mut path = "/api/handoff/inbox".to_string();
+    let mut path = "/api/v1/handoff/inbox".to_string();
     if let Some(s) = status {
-        path = format!("{path}?status={s}");
+        path = format!("{path}?status={}", super::util::url_encode(s));
     }
-    let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to list handoff inbox (HTTP {code}): {}",
@@ -231,14 +243,20 @@ pub(crate) async fn do_handoff_list(ui_port: u16, status: Option<&str>, json: bo
 pub(crate) async fn do_handoff_open(ui_port: u16, id: &str, json: bool) -> Result<()> {
     let payload = serde_json::json!({ "id": id });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/handoff/inbox/open", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/handoff/inbox/open",
+        Some(&bytes),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to open handoff resource (HTTP {code}): {}",
@@ -266,14 +284,20 @@ pub(crate) async fn do_handoff_open(ui_port: u16, id: &str, json: bool) -> Resul
 pub(crate) async fn do_handoff_dismiss(ui_port: u16, id: &str, json: bool) -> Result<()> {
     let payload = serde_json::json!({ "id": id });
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/handoff/inbox/dismiss", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/handoff/inbox/dismiss",
+        Some(&bytes),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to dismiss handoff resource (HTTP {code}): {}",
@@ -289,14 +313,20 @@ pub(crate) async fn do_handoff_dismiss(ui_port: u16, id: &str, json: bool) -> Re
 }
 
 pub(crate) async fn do_handoff_clear(ui_port: u16, json: bool) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_delete(ui_port, "/api/handoff/inbox")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "DELETE",
+        "/api/v1/handoff/inbox",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to clear handoff inbox (HTTP {code}): {}",
@@ -367,14 +397,20 @@ pub(crate) async fn do_handoff_policy(
         }
 
         let body = serde_json::to_vec(&payload)?;
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/handoff/policy", &body)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+        let (code, resp) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/handoff/policy",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+            )
+        })?;
         if code != 200 {
             anyhow::bail!(
                 "failed to update handoff policy (HTTP {code}): {}",
@@ -387,14 +423,20 @@ pub(crate) async fn do_handoff_policy(
         }
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/handoff/policy")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        "/api/v1/handoff/policy",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to query handoff policy (HTTP {code}): {}",

@@ -155,7 +155,15 @@ pub(crate) async fn audio(action: AudioCmd) -> Result<()> {
 }
 
 pub(crate) async fn do_audio_routing_status(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/audio/routing").await?;
+    let path = "/api/v1/audio".to_string();
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query audio routing status (HTTP {code}): {err_msg}");
@@ -249,10 +257,13 @@ pub(crate) async fn do_audio_routing_attach(
     if let Some(g) = gain {
         req["gain"] = serde_json::json!(g);
     }
-    let (code, body) = tetherly_node::loopback_post(
+    let path = "/api/v1/audio/attach".to_string();
+    let (code, body) = tetherly_node::loopback_request(
         ui_port,
-        "/api/audio/routing/attach",
-        &serde_json::to_vec(&req)?,
+        "POST",
+        &path,
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await?;
     if code != 200 {
@@ -283,10 +294,13 @@ pub(crate) async fn do_audio_routing_detach(
     if let Some(r) = reason {
         req["reason"] = serde_json::json!(r);
     }
-    let (code, body) = tetherly_node::loopback_post(
+    let path = "/api/v1/audio/detach".to_string();
+    let (code, body) = tetherly_node::loopback_request(
         ui_port,
-        "/api/audio/routing/detach",
-        &serde_json::to_vec(&req)?,
+        "POST",
+        &path,
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await?;
     if code != 200 {
@@ -328,8 +342,15 @@ pub(crate) async fn do_audio_routing_policy(
                 json: j,
                 ui_port: p,
             } => {
-                let (code, body) =
-                    tetherly_node::loopback_get(p, "/api/audio/routing/policy").await?;
+                let path = "/api/v1/audio/policy".to_string();
+                let (code, body) = tetherly_node::loopback_request(
+                    p,
+                    "GET",
+                    &path,
+                    None,
+                    tetherly_node::api_token_for(p).as_deref(),
+                )
+                .await?;
                 if code != 200 {
                     let err_msg = String::from_utf8_lossy(&body);
                     anyhow::bail!("failed to query audio routing policy (HTTP {code}): {err_msg}");
@@ -405,10 +426,13 @@ pub(crate) async fn do_audio_routing_policy(
     }
 
     if update_needed {
-        let (code, body) = tetherly_node::loopback_post(
+        let path = "/api/v1/audio/policy".to_string();
+        let (code, body) = tetherly_node::loopback_request(
             ui_port,
-            "/api/audio/routing/policy",
-            &serde_json::to_vec(&req)?,
+            "PATCH",
+            &path,
+            Some(&serde_json::to_vec(&req)?),
+            tetherly_node::api_token_for(ui_port).as_deref(),
         )
         .await?;
         if code != 200 {
@@ -421,7 +445,15 @@ pub(crate) async fn do_audio_routing_policy(
         }
     }
 
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/audio/routing/policy").await?;
+    let path = "/api/v1/audio/policy".to_string();
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query audio routing policy (HTTP {code}): {err_msg}");

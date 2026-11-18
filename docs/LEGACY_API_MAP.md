@@ -247,16 +247,22 @@
 
 > 本批只落 tetherly-api 契约（93 DTO），端点/CLI 未切——下表各行待后续批 §165 续（标 ⏳）。域与 legacy 路径映射不变。
 
-| 域 | legacy 路径 | v1 契约（已落） | 端点 | CLI |
-|---|---|---|---|---|
-| power | api/power/* | BatteryState/BatteryStatePatch/BatteryPolicyDto/BatteryPolicyPatch 等 5 | ⏳ | ⏳ |
-| media | api/media/* | MediaCommandRequest/Report/MultiReport/MediaState*/MediaPolicy* 等 10 | ⏳ | ⏳ |
-| ancs | api/ancs/* | AncsRule/Status/ConnectReport/DisconnectReport/AllowRequest/RuleReport/ClearRulesReport/RemoveRequest 8 | ⏳ | ⏳ |
-| input | api/input/* | InputStatus/Trace/TunnelStatus/TunnelDecision/InputPolicy* 等 12 | ⏳ | ⏳ |
-| handoff | api/handoff/* | HandoffInbox*/SendReport/SendMultiReport/Policy* 等 11 | ⏳ | ⏳ |
-| focus | api/focus/* | FocusState*/PeerFocus/FocusPeers/FocusSetReport/FocusSyncReport/FocusPolicy* 等 9 | ⏳ | ⏳ |
-| camera | api/camera/* | CameraStatus/Decision/Policy*/AttachRequest/DetachRequest 7 | ⏳ | ⏳ |
-| mic | api/mic/* | MicStatus/Decision/Policy*/AttachRequest/DetachRequest 7 | ⏳ | ⏳ |
-| audio | api/audio/* | AudioStatus/Decision/Policy*/AttachRequest/DetachRequest + SpatialPosition 8 | ⏳ | ⏳ |
-| locate | api/locate/* | LocateStatus/RingReport/StopReport/Policy*/RingRequest/StopRequest 8 | ⏳ | ⏳ |
-| display | api/display/* | DisplayVirtualStatus/Decision/Policy*/AttachRequest/DetachRequest 7 | ⏳ | ⏳ |
+## 已迁移契约层（§165 第一批，11 小域 DTO-only）
+
+> §165（一）只落 tetherly-api 契约（93 DTO）；§166（二）端点 ×49 + CLI ×57 已全部切换（下表 ✅）。/legacy/ 别名与 SPA legacy 路径未动，归 §167 统一删除。
+
+| 域 | legacy 路径 | v1 端点 | CLI 调用点 |
+|---|---|---|---|
+| power | api/power/*、api/battery/*、api/storage/* | GET /battery、GET /battery/all、POST /battery/policy | cmd_power 8 ✅ |
+| media | api/media/* | GET /media/state、GET|POST /media、POST /media/command(/multi)、GET|PATCH /media/policy | cmd_media 4 ✅ |
+| ancs | api/ancs/* | GET /ancs、POST connect/disconnect、POST|DELETE /ancs/allow、POST rules/clear | cmd_ancs 6 ✅ |
+| input | api/input/* | GET /input、/trace、/tunnel、POST start/stop/tunnel/attach/tunnel/release、GET|PATCH /policy | cmd_input 8 ✅ |
+| handoff | api/handoff/* | POST /send(/multi)、GET|DELETE /inbox、POST inbox/open|dismiss、GET|PATCH /policy | cmd_handoff 7 ✅ |
+| focus | api/focus/* | GET|POST /focus/state、GET /peers、POST /sync、GET|PATCH /policy | cmd_focus 7 ✅ |
+| camera | api/camera/* | GET /camera、POST attach/detach、GET|PATCH /policy | cmd_camera 6 ✅ |
+| mic | api/mic/* | GET /mic、POST attach/detach、GET|PATCH /policy | cmd_mic 6 ✅ |
+| audio | api/audio/* | GET /audio、POST attach/detach、GET|PATCH /policy | cmd_audio 6 ✅ |
+| locate | api/locate/* | GET /locate/status、POST ring/stop、GET|PATCH /policy | cmd_locate 5 ✅ |
+| display | api/display/* | GET /display/virtual、POST attach/detach、GET|PATCH /policy | cmd_display 5 ✅ |
+
+> 契约修正：`ActiveDisplaySessionDto.mode` 由 String 修为 `DisplayModeDto`（runtime 实字段为结构体，CLI 打印器读 `mode["width"]`）。

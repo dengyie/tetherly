@@ -7,14 +7,20 @@ use super::*;
 pub(crate) async fn ancs(action: AncsCmd) -> Result<()> {
     match action {
         AncsCmd::Status { json, ui_port } => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/ancs")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "GET",
+                "/api/v1/ancs",
+                None,
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "ANCS status query failed (HTTP {code}): {}",
@@ -66,14 +72,20 @@ pub(crate) async fn ancs(action: AncsCmd) -> Result<()> {
             }
         }
         AncsCmd::Connect { json, ui_port } => {
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/ancs/connect", b"{}")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "POST",
+                "/api/v1/ancs/connect",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "ANCS connect failed (HTTP {code}): {}",
@@ -93,14 +105,20 @@ pub(crate) async fn ancs(action: AncsCmd) -> Result<()> {
             }
         }
         AncsCmd::Disconnect { json, ui_port } => {
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/ancs/disconnect", b"{}")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "POST",
+                "/api/v1/ancs/disconnect",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "ANCS disconnect failed (HTTP {code}): {}",
@@ -128,14 +146,20 @@ pub(crate) async fn ancs(action: AncsCmd) -> Result<()> {
                 None => serde_json::json!({ "app_id": app_id }),
             };
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/ancs/allow", &bytes)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "POST",
+                "/api/v1/ancs/allow",
+                Some(&bytes),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "ANCS allow rule failed (HTTP {code}): {}",
@@ -158,15 +182,20 @@ pub(crate) async fn ancs(action: AncsCmd) -> Result<()> {
         } => {
             let payload = serde_json::json!({ "app_id": app_id });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/ancs/rules/remove", &bytes)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "DELETE",
+                "/api/v1/ancs/allow",
+                Some(&bytes),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "ANCS remove rule failed (HTTP {code}): {}",
@@ -188,15 +217,20 @@ pub(crate) async fn ancs(action: AncsCmd) -> Result<()> {
             }
         }
         AncsCmd::Clear { json, ui_port } => {
-            let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/ancs/rules/clear", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "POST",
+                "/api/v1/ancs/rules/clear",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "ANCS clear rules failed (HTTP {code}): {}",

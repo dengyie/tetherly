@@ -316,14 +316,20 @@ pub(crate) async fn do_media_command(
     }
 
     let bytes = serde_json::to_vec(&payload)?;
-    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/media/command", &bytes)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/media/command",
+        Some(&bytes),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "media command failed (HTTP {code}): {}",
@@ -365,18 +371,24 @@ pub(crate) async fn do_media_command(
 }
 
 pub(crate) async fn do_media_status(ui_port: u16, peer: Option<&str>, json: bool) -> Result<()> {
-    let mut path = "/api/media/state".to_string();
+    let mut path = "/api/v1/media/state".to_string();
     if let Some(p) = peer {
-        path = format!("{path}?peer={p}");
+        path = format!("{path}?peer={}", super::util::url_encode(p));
     }
-    let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to query media status (HTTP {code}): {}",
@@ -481,14 +493,20 @@ pub(crate) async fn do_media_policy(
         }
 
         let body = serde_json::to_vec(&payload)?;
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/media/policy", &body)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                     start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        let (code, resp) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/media/policy",
+            Some(&body),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
         if code != 200 {
             anyhow::bail!(
                 "failed to update media policy (HTTP {code}): {}",
@@ -501,14 +519,20 @@ pub(crate) async fn do_media_policy(
         }
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/media/policy")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        "/api/v1/media/policy",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to query media policy (HTTP {code}): {}",

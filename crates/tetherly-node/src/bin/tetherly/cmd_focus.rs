@@ -88,15 +88,20 @@ pub(crate) async fn do_focus_on(
         "reason": reason,
         "broadcast": !no_broadcast,
     });
-    let (code, body) =
-        tetherly_node::loopback_post(ui_port, "/api/focus/state", &serde_json::to_vec(&req)?)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/focus/state",
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        )
+    })?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to activate focus mode (HTTP {code}): {err_msg}");
@@ -129,15 +134,20 @@ pub(crate) async fn do_focus_off(ui_port: u16, no_broadcast: bool, json: bool) -
         "enabled": false,
         "broadcast": !no_broadcast,
     });
-    let (code, body) =
-        tetherly_node::loopback_post(ui_port, "/api/focus/state", &serde_json::to_vec(&req)?)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/focus/state",
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        )
+    })?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to deactivate focus mode (HTTP {code}): {err_msg}");
@@ -151,14 +161,20 @@ pub(crate) async fn do_focus_off(ui_port: u16, no_broadcast: bool, json: bool) -
 }
 
 pub(crate) async fn do_focus_status(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/focus/state")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        "/api/v1/focus/state",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to get focus status (HTTP {code}): {err_msg}");
@@ -209,14 +225,20 @@ pub(crate) async fn do_focus_status(ui_port: u16, json: bool) -> Result<()> {
 }
 
 pub(crate) async fn do_focus_peers(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/focus/peers")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        "/api/v1/focus/peers",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query peers focus states (HTTP {code}): {err_msg}");
@@ -254,14 +276,20 @@ pub(crate) async fn do_focus_peers(ui_port: u16, json: bool) -> Result<()> {
 }
 
 pub(crate) async fn do_focus_sync(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_post(ui_port, "/api/focus/sync", b"{}")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/focus/sync",
+        Some(b"{}".as_slice()),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to dispatch focus sync (HTTP {code}): {err_msg}");
@@ -343,14 +371,20 @@ pub(crate) async fn do_focus_policy(
         }
 
         let body_bytes = serde_json::to_vec(&req)?;
-        let (code, body) = tetherly_node::loopback_post(ui_port, "/api/focus/policy", &body_bytes)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+        let (code, body) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/focus/policy",
+            Some(&body_bytes),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+            )
+        })?;
         if code != 200 {
             let err_msg = String::from_utf8_lossy(&body);
             anyhow::bail!("failed to update focus policy (HTTP {code}): {err_msg}");
@@ -362,14 +396,20 @@ pub(crate) async fn do_focus_policy(
         println!("Focus Policy Updated Successfully:");
         print_focus_policy_json(&body)?;
     } else {
-        let (code, body) = tetherly_node::loopback_get(ui_port, "/api/focus/policy")
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+        let (code, body) = tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/focus/policy",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+            )
+        })?;
         if code != 200 {
             let err_msg = String::from_utf8_lossy(&body);
             anyhow::bail!("failed to query focus policy (HTTP {code}): {err_msg}");

@@ -69,18 +69,24 @@ pub(crate) async fn power(action: PowerCmd) -> Result<()> {
 }
 
 pub(crate) async fn do_power_status(ui_port: u16, peer: Option<&str>, json: bool) -> Result<()> {
-    let mut path = "/api/battery/state".to_string();
+    let mut path = "/api/v1/battery/state".to_string();
     if let Some(p) = peer {
-        path = format!("{path}?peer={p}");
+        path = format!("{path}?peer={}", super::util::url_encode(p));
     }
-    let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to query battery status (HTTP {code}): {}",
@@ -145,10 +151,12 @@ pub(crate) async fn do_power_report(
         payload["health_percent"] = serde_json::json!(hp);
     }
 
-    let (code, resp) = tetherly_node::loopback_post(
+    let (code, resp) = tetherly_node::loopback_request(
         ui_port,
-        "/api/battery/state",
-        &serde_json::to_vec(&payload)?,
+        "PATCH",
+        "/api/v1/battery/state",
+        Some(&serde_json::to_vec(&payload)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await
     .map_err(|e| {
@@ -238,10 +246,12 @@ pub(crate) async fn do_power_policy(
             payload["clear_filters"] = serde_json::json!(true);
         }
 
-        let (code, resp) = tetherly_node::loopback_post(
+        let (code, resp) = tetherly_node::loopback_request(
             ui_port,
-            "/api/battery/policy",
-            &serde_json::to_vec(&payload)?,
+            "PATCH",
+            "/api/v1/battery/policy",
+            Some(&serde_json::to_vec(&payload)?),
+            tetherly_node::api_token_for(ui_port).as_deref(),
         )
         .await
         .map_err(|e| {
@@ -259,14 +269,20 @@ pub(crate) async fn do_power_policy(
         }
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/battery/policy")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        "/api/v1/battery/policy",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to query battery policy (HTTP {code}): {}",
@@ -280,7 +296,7 @@ pub(crate) async fn do_power_policy(
 
     let v: serde_json::Value =
         serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-    let p = &v["policy"];
+    let p = v.get("policy").filter(|x| !x.is_null()).unwrap_or(&v);
     let low = p["low_battery_threshold"].as_u64().unwrap_or(20);
     let crit = p["critical_battery_threshold"].as_u64().unwrap_or(10);
     let alert_enabled = p["alert_on_low_battery"].as_bool().unwrap_or(true);

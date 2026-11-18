@@ -4402,6 +4402,22 @@ pub struct LocateStopRequest {
 
 // ---- §165b: virtual display domain ----
 
+/// Display geometry and refresh rate (legacy core `VirtualDisplayMode`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DisplayModeDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub height: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub refresh_rate: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub scale_factor: f32,
+    /// `VirtualDisplayPixelFormat` lowercase string (`bgra8`/`rgba8`).
+    pub pixel_format: String,
+}
+
 /// One active virtual-display session (legacy `ActiveVirtualDisplaySession`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -4412,8 +4428,8 @@ pub struct ActiveDisplaySessionDto {
     pub role: String,
     /// `DisplayEdge` snake_case string.
     pub assigned_edge: String,
-    /// `VirtualDisplayMode` snake_case string.
-    pub mode: String,
+    /// Display geometry as advertised by the host peer.
+    pub mode: DisplayModeDto,
     /// `VirtualDisplayCodec` snake_case string.
     pub codec: String,
     #[cfg_attr(test, ts(type = "number"))]

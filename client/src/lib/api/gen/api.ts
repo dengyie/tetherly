@@ -996,9 +996,9 @@ role: string,
  */
 assigned_edge: string, 
 /**
- * `VirtualDisplayMode` snake_case string.
+ * Display geometry as advertised by the host peer.
  */
-mode: string, 
+mode: DisplayModeDto, 
 /**
  * `VirtualDisplayCodec` snake_case string.
  */

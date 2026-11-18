@@ -103,15 +103,21 @@ pub(crate) async fn do_locate_ring(
         payload["message"] = serde_json::json!(msg);
     }
 
-    let (code, resp) =
-        tetherly_node::loopback_post(ui_port, "/api/locate/ring", &serde_json::to_vec(&payload)?)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let path = "/api/v1/locate/ring".to_string();
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        &path,
+        Some(&serde_json::to_vec(&payload)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        )
+    })?;
 
     if code != 200 {
         anyhow::bail!(
@@ -163,15 +169,21 @@ pub(crate) async fn do_locate_stop(
         payload["reason"] = serde_json::json!(r);
     }
 
-    let (code, resp) =
-        tetherly_node::loopback_post(ui_port, "/api/locate/stop", &serde_json::to_vec(&payload)?)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let path = "/api/v1/locate/stop".to_string();
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        &path,
+        Some(&serde_json::to_vec(&payload)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        )
+    })?;
 
     if code != 200 {
         anyhow::bail!(
@@ -198,14 +210,21 @@ pub(crate) async fn do_locate_stop(
 }
 
 pub(crate) async fn do_locate_status(ui_port: u16, json: bool) -> Result<()> {
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/locate/status")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let path = "/api/v1/locate/status".to_string();
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to query locate status (HTTP {code}): {}",
@@ -302,10 +321,13 @@ pub(crate) async fn do_locate_policy(
             payload["clear_filters"] = serde_json::json!(true);
         }
 
-        let (code, resp) = tetherly_node::loopback_post(
+        let path = "/api/v1/locate/policy".to_string();
+        let (code, resp) = tetherly_node::loopback_request(
             ui_port,
-            "/api/locate/policy",
-            &serde_json::to_vec(&payload)?,
+            "PATCH",
+            &path,
+            Some(&serde_json::to_vec(&payload)?),
+            tetherly_node::api_token_for(ui_port).as_deref(),
         )
         .await
         .map_err(|e| {
@@ -323,14 +345,21 @@ pub(crate) async fn do_locate_policy(
         }
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/locate/policy")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let path = "/api/v1/locate/policy".to_string();
+    let (code, resp) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
 
     if code != 200 {
         anyhow::bail!(

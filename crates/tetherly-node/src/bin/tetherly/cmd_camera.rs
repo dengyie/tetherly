@@ -153,11 +153,18 @@ pub(crate) async fn camera(action: CameraCmd) -> Result<()> {
 }
 
 pub(crate) async fn do_camera_status(ui_port: u16, peer: Option<&str>, json: bool) -> Result<()> {
-    let mut path = "/api/camera".to_string();
+    let mut path = "/api/v1/camera".to_string();
     if let Some(p) = peer {
-        path = format!("/api/camera?peer={p}");
+        path = format!("/api/v1/camera?peer={}", super::util::url_encode(p));
     }
-    let (code, body) = tetherly_node::loopback_get(ui_port, &path).await?;
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query virtual camera status (HTTP {code}): {err_msg}");
@@ -283,9 +290,14 @@ pub(crate) async fn do_camera_attach(
     if let Some(z) = zoom {
         req["zoom"] = serde_json::json!(z);
     }
-    let (code, body) =
-        tetherly_node::loopback_post(ui_port, "/api/camera/attach", &serde_json::to_vec(&req)?)
-            .await?;
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/camera/attach",
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to attach virtual camera (HTTP {code}): {err_msg}");
@@ -316,9 +328,14 @@ pub(crate) async fn do_camera_detach(
     if let Some(r) = reason {
         req["reason"] = serde_json::json!(r);
     }
-    let (code, body) =
-        tetherly_node::loopback_post(ui_port, "/api/camera/detach", &serde_json::to_vec(&req)?)
-            .await?;
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "POST",
+        "/api/v1/camera/detach",
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to detach virtual camera (HTTP {code}): {err_msg}");
@@ -360,7 +377,14 @@ pub(crate) async fn do_camera_policy(
                 json: j,
                 ui_port: p,
             } => {
-                let (code, body) = tetherly_node::loopback_get(p, "/api/camera/policy").await?;
+                let (code, body) = tetherly_node::loopback_request(
+                    p,
+                    "GET",
+                    "/api/v1/camera/policy",
+                    None,
+                    tetherly_node::api_token_for(p).as_deref(),
+                )
+                .await?;
                 if code != 200 {
                     let err_msg = String::from_utf8_lossy(&body);
                     anyhow::bail!("failed to query virtual camera policy (HTTP {code}): {err_msg}");
@@ -449,9 +473,14 @@ pub(crate) async fn do_camera_policy(
     }
 
     if update_needed {
-        let (code, body) =
-            tetherly_node::loopback_post(ui_port, "/api/camera/policy", &serde_json::to_vec(&req)?)
-                .await?;
+        let (code, body) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/camera/policy",
+            Some(&serde_json::to_vec(&req)?),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await?;
         if code != 200 {
             let err_msg = String::from_utf8_lossy(&body);
             anyhow::bail!("failed to update virtual camera policy (HTTP {code}): {err_msg}");
@@ -462,7 +491,14 @@ pub(crate) async fn do_camera_policy(
         }
     }
 
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/camera/policy").await?;
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        "/api/v1/camera/policy",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query virtual camera policy (HTTP {code}): {err_msg}");

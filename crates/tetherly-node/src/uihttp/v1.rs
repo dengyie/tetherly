@@ -12,11 +12,18 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
 use tetherly_api::{
-    ActionPolicyPatch, ActionTriggerRequest, BenchPolicyPatch, BenchStartRequest, BlockRequest,
-    CapsUpdate, ConnectRequest, DevicePatch, Diagnostics, DialReport, DialRequest, ErrorBody,
-    ErrorCode, Event, Health, HeartbeatPatch, LinkProbeRequest, LocalActionRequest, LogLevel,
-    LogLevelRequest, LogTail, Patch, PeerProfileDto, PeerProfilePatch, PeerProfileUpdated,
-    PinGrant, RemoteActionRefreshRequest, SettingsPatch, SysHost, SysProcess, SysTelemetry, Topic,
+    ActionPolicyPatch, ActionTriggerRequest, AncsAllowRequest, AncsRemoveRequest,
+    AudioAttachRequest, AudioDetachRequest, AudioPolicyPatch, BatteryPolicyPatch,
+    BatteryStatePatch, BenchPolicyPatch, BenchStartRequest, BlockRequest, CameraAttachRequest,
+    CameraDetachRequest, CameraPolicyPatch, CapsUpdate, ConnectRequest, DevicePatch, Diagnostics,
+    DialReport, DialRequest, DisplayAttachRequest, DisplayDetachRequest, DisplayPolicyPatch,
+    ErrorBody, ErrorCode, Event, FocusPolicyPatch, FocusSetRequest, HandoffInboxActionRequest,
+    HandoffPolicyPatch, HandoffSendRequest, Health, HeartbeatPatch, InputAttachRequest,
+    InputPolicyPatch, InputReleaseRequest, InputStartRequest, LinkProbeRequest, LocalActionRequest,
+    LocatePolicyPatch, LocateRingRequest, LocateStopRequest, LogLevel, LogLevelRequest, LogTail,
+    MediaCommandRequest, MediaPolicyPatch, MediaStatePatch, MicAttachRequest, MicDetachRequest,
+    MicPolicyPatch, Patch, PeerProfileDto, PeerProfilePatch, PeerProfileUpdated, PinGrant,
+    RemoteActionRefreshRequest, SettingsPatch, SysHost, SysProcess, SysTelemetry, Topic,
     API_VERSION,
 };
 use tetherly_core::CoreError;
@@ -194,6 +201,55 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/bench/start" | "/api/v1/bench/stop" => Some(&["POST"]),
         "/api/v1/bench/policy" => Some(&["GET", "PATCH"]),
         "/api/v1/recommendation" => Some(&["GET"]),
+        // §165: battery/power domain.
+        "/api/v1/battery/state" => Some(&["GET", "PATCH"]),
+        "/api/v1/battery/policy" => Some(&["GET", "PATCH"]),
+        // §165: media control domain.
+        "/api/v1/media/command" | "/api/v1/media/state/sync" => Some(&["POST", "PATCH"]),
+        "/api/v1/media/state" => Some(&["GET", "PATCH"]),
+        "/api/v1/media/policy" => Some(&["GET", "PATCH"]),
+        // §165: ANCS (iPhone notification bridge) domain.
+        "/api/v1/ancs" => Some(&["GET"]),
+        "/api/v1/ancs/connect" | "/api/v1/ancs/disconnect" => Some(&["POST"]),
+        "/api/v1/ancs/allow" => Some(&["POST", "DELETE"]),
+        "/api/v1/ancs/rules/clear" => Some(&["POST"]),
+        // §165: input tunnel domain.
+        "/api/v1/input" => Some(&["GET"]),
+        "/api/v1/input/trace" => Some(&["GET"]),
+        "/api/v1/input/start" | "/api/v1/input/stop" => Some(&["POST"]),
+        "/api/v1/input/tunnel" => Some(&["GET"]),
+        "/api/v1/input/tunnel/attach" | "/api/v1/input/tunnel/release" => Some(&["POST"]),
+        "/api/v1/input/policy" => Some(&["GET", "PATCH"]),
+        // §165: handoff (URL/resource inbox) domain.
+        "/api/v1/handoff" | "/api/v1/handoff/inbox" => Some(&["GET", "DELETE"]),
+        "/api/v1/handoff/send" | "/api/v1/handoff/send/multi" => Some(&["POST"]),
+        "/api/v1/handoff/inbox/open" | "/api/v1/handoff/inbox/dismiss" => Some(&["POST"]),
+        "/api/v1/handoff/policy" => Some(&["GET", "PATCH"]),
+        // §165: focus (DND / quiet hours) domain.
+        "/api/v1/focus/state" => Some(&["GET", "POST"]),
+        "/api/v1/focus/peers" => Some(&["GET"]),
+        "/api/v1/focus/sync" => Some(&["POST"]),
+        "/api/v1/focus/policy" => Some(&["GET", "PATCH"]),
+        // §165: camera (virtual camera streaming) domain.
+        "/api/v1/camera" => Some(&["GET"]),
+        "/api/v1/camera/attach" | "/api/v1/camera/detach" => Some(&["POST"]),
+        "/api/v1/camera/policy" => Some(&["GET", "PATCH"]),
+        // §165: mic (virtual microphone / intercom) domain.
+        "/api/v1/mic" => Some(&["GET"]),
+        "/api/v1/mic/attach" | "/api/v1/mic/detach" => Some(&["POST"]),
+        "/api/v1/mic/policy" => Some(&["GET", "PATCH"]),
+        // §165: audio routing domain.
+        "/api/v1/audio" => Some(&["GET"]),
+        "/api/v1/audio/attach" | "/api/v1/audio/detach" => Some(&["POST"]),
+        "/api/v1/audio/policy" => Some(&["GET", "PATCH"]),
+        // §165: locate (find-my ringing) domain.
+        "/api/v1/locate/status" => Some(&["GET"]),
+        "/api/v1/locate/ring" | "/api/v1/locate/stop" => Some(&["POST"]),
+        "/api/v1/locate/policy" => Some(&["GET", "PATCH"]),
+        // §165: virtual display domain.
+        "/api/v1/display/virtual" => Some(&["GET"]),
+        "/api/v1/display/virtual/attach" | "/api/v1/display/virtual/detach" => Some(&["POST"]),
+        "/api/v1/display/virtual/policy" => Some(&["GET", "PATCH"]),
         p if profile_item(p).is_some() => Some(&["GET", "PATCH"]),
         p if matches!(device_action(p), Some((_, "caps"))) => Some(&["GET"]),
         p if device_item(p).is_some() => Some(&["GET", "PATCH", "DELETE"]),
@@ -621,6 +677,102 @@ pub(super) async fn route(
                 },
                 None => Ok(json(200, &crate::apiv1::model::recommendation_status(node))),
             }
+        }
+        // §165: battery/power domain.
+        ("GET", "/api/v1/battery/state") => get_battery_state(node, query).await,
+        ("PATCH", "/api/v1/battery/state") => patch_battery_state(node, query, body).await,
+        ("GET", "/api/v1/battery/policy") => {
+            Ok(json(200, &crate::apiv1::model::battery_policy(node)))
+        }
+        ("PATCH", "/api/v1/battery/policy") => patch_battery_policy(node, query, body).await,
+        // §165: media control domain.
+        ("POST", "/api/v1/media/command") => post_media_command(node, query, body).await,
+        ("GET", "/api/v1/media/state") => get_media_state(node, query),
+        ("PATCH", "/api/v1/media/state") => patch_media_state(node, body),
+        ("GET", "/api/v1/media/policy") => Ok(json(200, &crate::apiv1::model::media_policy(node))),
+        ("PATCH", "/api/v1/media/policy") => patch_media_policy(node, query, body).await,
+        // §165: ANCS (iPhone notification bridge) domain.
+        ("GET", "/api/v1/ancs") => Ok(json(200, &crate::apiv1::model::ancs_status(node))),
+        ("POST", "/api/v1/ancs/connect") => post_ancs_connect(node).await,
+        ("POST", "/api/v1/ancs/disconnect") => {
+            Ok(json(200, &crate::apiv1::model::ancs_disconnect(node)))
+        }
+        ("POST", "/api/v1/ancs/allow") => post_ancs_allow(node, body).await,
+        ("DELETE", "/api/v1/ancs/allow") => delete_ancs_allow(node, query, body).await,
+        ("POST", "/api/v1/ancs/rules/clear") => {
+            Ok(json(200, &crate::apiv1::model::ancs_clear_rules(node)))
+        }
+        // §165: input tunnel domain.
+        ("GET", "/api/v1/input") => get_input_status(node).await,
+        ("GET", "/api/v1/input/trace") => get_input_trace(node).await,
+        ("POST", "/api/v1/input/start") => post_input_start(node, body).await,
+        ("POST", "/api/v1/input/stop") => post_input_stop(node).await,
+        ("GET", "/api/v1/input/tunnel") => get_input_tunnel(node).await,
+        ("POST", "/api/v1/input/tunnel/attach") => post_input_attach(node, query, body).await,
+        ("POST", "/api/v1/input/tunnel/release") => post_input_release(node, query, body).await,
+        ("GET", "/api/v1/input/policy") => Ok(json(200, &crate::apiv1::model::input_policy(node))),
+        ("PATCH", "/api/v1/input/policy") => patch_input_policy(node, query, body).await,
+        // §165: handoff (URL/resource inbox) domain.
+        ("POST", "/api/v1/handoff/send") => post_handoff_send(node, query, body).await,
+        ("POST", "/api/v1/handoff/send/multi") => post_handoff_send_multi(node, query, body).await,
+        ("GET", "/api/v1/handoff/inbox") => get_handoff_inbox(node, query),
+        ("POST", "/api/v1/handoff/inbox/open") => post_handoff_inbox_open(node, query, body).await,
+        ("POST", "/api/v1/handoff/inbox/dismiss") => {
+            post_handoff_inbox_dismiss(node, query, body).await
+        }
+        ("DELETE", "/api/v1/handoff/inbox") => delete_handoff_inbox(node).await,
+        ("GET", "/api/v1/handoff/policy") => {
+            Ok(json(200, &crate::apiv1::model::handoff_policy(node)))
+        }
+        ("PATCH", "/api/v1/handoff/policy") => patch_handoff_policy(node, query, body).await,
+        // §165: focus (DND / quiet hours) domain.
+        ("GET", "/api/v1/focus/state") => Ok(json(200, &crate::apiv1::model::focus_state(node))),
+        ("POST", "/api/v1/focus/state") => post_focus_state(node, query, body).await,
+        ("GET", "/api/v1/focus/peers") => Ok(json(200, &crate::apiv1::model::focus_peers(node))),
+        ("POST", "/api/v1/focus/sync") => post_focus_sync(node).await,
+        ("GET", "/api/v1/focus/policy") => Ok(json(200, &crate::apiv1::model::focus_policy(node))),
+        ("PATCH", "/api/v1/focus/policy") => patch_focus_policy(node, query, body).await,
+        // §165: camera (virtual camera streaming) domain.
+        ("GET", "/api/v1/camera") => Ok(json(200, &crate::apiv1::model::camera_status(node))),
+        ("POST", "/api/v1/camera/attach") => post_camera_attach(node, query, body).await,
+        ("POST", "/api/v1/camera/detach") => post_camera_detach(node, query, body).await,
+        ("GET", "/api/v1/camera/policy") => {
+            Ok(json(200, &crate::apiv1::model::camera_policy(node)))
+        }
+        ("PATCH", "/api/v1/camera/policy") => patch_camera_policy(node, query, body).await,
+        // §165: mic (virtual microphone / intercom) domain.
+        ("GET", "/api/v1/mic") => Ok(json(200, &crate::apiv1::model::mic_status(node))),
+        ("POST", "/api/v1/mic/attach") => post_mic_attach(node, query, body).await,
+        ("POST", "/api/v1/mic/detach") => post_mic_detach(node, query, body).await,
+        ("GET", "/api/v1/mic/policy") => Ok(json(200, &crate::apiv1::model::mic_policy(node))),
+        ("PATCH", "/api/v1/mic/policy") => patch_mic_policy(node, query, body).await,
+        // §165: audio routing domain.
+        ("GET", "/api/v1/audio") => Ok(json(200, &crate::apiv1::model::audio_status(node))),
+        ("POST", "/api/v1/audio/attach") => post_audio_attach(node, query, body).await,
+        ("POST", "/api/v1/audio/detach") => post_audio_detach(node, query, body).await,
+        ("GET", "/api/v1/audio/policy") => Ok(json(200, &crate::apiv1::model::audio_policy(node))),
+        ("PATCH", "/api/v1/audio/policy") => patch_audio_policy(node, query, body).await,
+        // §165: locate (find-my ringing) domain.
+        ("GET", "/api/v1/locate/status") => {
+            Ok(json(200, &crate::apiv1::model::locate_status(node)))
+        }
+        ("POST", "/api/v1/locate/ring") => post_locate_ring(node, query, body).await,
+        ("POST", "/api/v1/locate/stop") => post_locate_stop(node, query, body).await,
+        ("GET", "/api/v1/locate/policy") => {
+            Ok(json(200, &crate::apiv1::model::locate_policy(node)))
+        }
+        ("PATCH", "/api/v1/locate/policy") => patch_locate_policy(node, query, body).await,
+        // §165: virtual display domain.
+        ("GET", "/api/v1/display/virtual") => {
+            Ok(json(200, &crate::apiv1::model::display_status(node)))
+        }
+        ("POST", "/api/v1/display/virtual/attach") => post_display_attach(node, query, body).await,
+        ("POST", "/api/v1/display/virtual/detach") => post_display_detach(node, query, body).await,
+        ("GET", "/api/v1/display/virtual/policy") => {
+            Ok(json(200, &crate::apiv1::model::display_policy(node)))
+        }
+        ("PATCH", "/api/v1/display/virtual/policy") => {
+            patch_display_policy(node, query, body).await
         }
         ("GET", "/api/v1/profiles") => Ok(json(
             200,
@@ -1598,6 +1750,2294 @@ async fn patch_bench_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Ha
         200,
         &crate::apiv1::model::set_bench_policy(node, policy),
     ))
+}
+
+/// `GET /battery/state?peer=` (§165): local state or a peer's last broadcast.
+async fn get_battery_state(node: &Node, query: Option<&str>) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let peer = qmap
+        .get("peer")
+        .or_else(|| qmap.get("target"))
+        .map(|s| s.as_str());
+    match crate::apiv1::model::battery_state(node, peer) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /battery/state` (§165): sparse local state update; body wins over
+/// the legacy query aliases (`level`/`percent`, `charging`, `source`,
+/// `saver`, `health`).
+async fn patch_battery_state(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<BatteryStatePatch>(body)?;
+    if patch.battery_level.is_none() {
+        patch.battery_level = q_str("level")
+            .or_else(|| q_str("battery_level"))
+            .or_else(|| q_str("percent"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.is_charging.is_none() {
+        patch.is_charging = q_str("charging")
+            .or_else(|| q_str("is_charging"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.power_source.is_none() {
+        patch.power_source = q_str("source")
+            .or_else(|| q_str("power_source"))
+            .or_else(|| q_str("source_type"));
+    }
+    if patch.battery_saver.is_none() {
+        patch.battery_saver = q_str("saver")
+            .or_else(|| q_str("battery_saver"))
+            .or_else(|| q_str("low_power_mode"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.health_percent.is_none() {
+        patch.health_percent = q_str("health")
+            .or_else(|| q_str("health_percent"))
+            .and_then(|s| s.parse().ok());
+    }
+
+    // Start from the current frame, apply the sparse set, let the node clamp.
+    let current = match node.battery_get_state(None) {
+        Ok(rep) => rep.state.unwrap_or_default(),
+        Err(e) => return Err(core_error(e)),
+    };
+    let mut state = current;
+    if let Some(lvl) = patch.battery_level {
+        state.battery_level = lvl.min(100);
+    }
+    if let Some(chg) = patch.is_charging {
+        state.is_charging = chg;
+    }
+    if let Some(src) = patch.power_source {
+        state.power_source = src
+            .parse::<tetherly_core::PowerSource>()
+            .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    }
+    if let Some(saver) = patch.battery_saver {
+        state.battery_saver = saver;
+    }
+    if let Some(hp) = patch.health_percent {
+        state.health_percent = Some(hp.min(100));
+    }
+    match crate::apiv1::model::set_battery_state(node, state).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /battery/policy` (§165): sparse update, body wins over legacy
+/// query (threshold/alert/throttle aliases + append-dedup filters).
+async fn patch_battery_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<BatteryPolicyPatch>(body)?;
+    if patch.low_battery_threshold.is_none() {
+        patch.low_battery_threshold = q_str("low_battery_threshold")
+            .or_else(|| q_str("low_threshold"))
+            .or_else(|| q_str("low"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.critical_battery_threshold.is_none() {
+        patch.critical_battery_threshold = q_str("critical_battery_threshold")
+            .or_else(|| q_str("critical_threshold"))
+            .or_else(|| q_str("critical"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.alert_on_low_battery.is_none() {
+        patch.alert_on_low_battery = q_str("alert_on_low_battery")
+            .or_else(|| q_str("alert"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.auto_throttle_on_battery_saver.is_none() {
+        patch.auto_throttle_on_battery_saver = q_str("auto_throttle_on_battery_saver")
+            .or_else(|| q_str("throttle"))
+            .or_else(|| q_str("auto_throttle"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_list(&qmap, "allowed_groups").or_else(|| q_list(&qmap, "group"));
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_list(&qmap, "allowed_tags").or_else(|| q_list(&qmap, "tag"));
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_list(&qmap, "allowed_types").or_else(|| q_list(&qmap, "type"));
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.battery_policy();
+    if let Some(v) = patch.low_battery_threshold {
+        policy.low_battery_threshold = v.min(100);
+    }
+    if let Some(v) = patch.critical_battery_threshold {
+        policy.critical_battery_threshold = v.min(100);
+    }
+    if let Some(v) = patch.alert_on_low_battery {
+        policy.alert_on_low_battery = v;
+    }
+    if let Some(v) = patch.auto_throttle_on_battery_saver {
+        policy.auto_throttle_on_battery_saver = v;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    Ok(json(
+        200,
+        &crate::apiv1::model::set_battery_policy(node, policy),
+    ))
+}
+/// `POST /media/command` (§165): body or legacy query; single peer or
+/// selector fan-out (`all`/`tag`/`group`/`device_type`). Body wins.
+async fn post_media_command(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<MediaCommandRequest>(body)?;
+    if req.peer.is_none() {
+        req.peer = q_str("peer").or_else(|| q_str("target"));
+    }
+    if req.command.is_none() {
+        req.command = q_str("command")
+            .or_else(|| q_str("cmd"))
+            .or_else(|| q_str("action"));
+    }
+    if req.volume.is_none() {
+        req.volume = q_str("volume")
+            .or_else(|| q_str("volume_percent"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.offset_ms.is_none() {
+        req.offset_ms = q_str("offset_ms")
+            .or_else(|| q_str("offset"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.target_player.is_none() {
+        req.target_player = q_str("target_player").or_else(|| q_str("player"));
+    }
+    if req.tag.is_none() {
+        req.tag = q_str("tag");
+    }
+    if req.group.is_none() {
+        req.group = q_str("group");
+    }
+    if req.device_type.is_none() {
+        req.device_type = q_str("device_type").or_else(|| q_str("type"));
+    }
+    if req.all.is_none() {
+        req.all = q_str("all")
+            .map(|s| s == "true" || s == "1")
+            .or_else(|| qmap.contains_key("all").then_some(true));
+    }
+
+    let cmd_str = req
+        .command
+        .clone()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if cmd_str.is_empty() {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "missing required 'command' or 'action'",
+        ));
+    }
+    let command = match cmd_str.as_str() {
+        "play" => tetherly_core::MediaCommand::Play,
+        "pause" => tetherly_core::MediaCommand::Pause,
+        "play_pause" | "playpause" | "toggle" => tetherly_core::MediaCommand::PlayPause,
+        "stop" => tetherly_core::MediaCommand::Stop,
+        "next" => tetherly_core::MediaCommand::Next,
+        "prev" | "previous" => tetherly_core::MediaCommand::Previous,
+        "seek" => tetherly_core::MediaCommand::Seek {
+            offset_ms: req.offset_ms.unwrap_or(0),
+        },
+        "volume" | "set_volume" => tetherly_core::MediaCommand::SetVolume {
+            volume_percent: req.volume.unwrap_or(0),
+        },
+        "toggle_mute" | "mute" => tetherly_core::MediaCommand::ToggleMute,
+        other => {
+            return Err(error(
+                ErrorCode::BadRequest,
+                format!("unsupported media command: '{other}'"),
+            ))
+        }
+    };
+    let target_player = req.target_player.clone();
+
+    let is_all = req.all.unwrap_or(false);
+    let selector_tag = req.tag.clone().filter(|t| !t.is_empty());
+    let selector_group = req.group.clone().filter(|g| !g.is_empty());
+    let selector_type = req.device_type.clone().filter(|t| !t.is_empty());
+    let peer = req.peer.clone().filter(|p| !p.is_empty());
+
+    if is_all || selector_tag.is_some() || selector_group.is_some() || selector_type.is_some() {
+        let selector = crate::store::TargetSelector::from_query(
+            peer.as_deref(),
+            selector_tag.as_deref(),
+            selector_group.as_deref(),
+            selector_type.as_deref(),
+            is_all,
+        )
+        .map_err(|e| error(ErrorCode::BadRequest, e))?;
+        return match crate::apiv1::model::media_command_multi(
+            node,
+            &selector,
+            command,
+            target_player,
+        )
+        .await
+        {
+            Ok(rep) => Ok(json(200, &rep)),
+            Err(e) => Err(core_error(e)),
+        };
+    }
+
+    match crate::apiv1::model::media_command(
+        node,
+        &peer.unwrap_or_default(),
+        command,
+        target_player,
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `GET /media/state?peer=` (§165).
+fn get_media_state(node: &Node, query: Option<&str>) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let peer = qmap
+        .get("peer")
+        .or_else(|| qmap.get("target"))
+        .map(String::as_str);
+    match crate::apiv1::model::media_state(node, peer) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /media/state` (§165): sparse local playback update.
+fn patch_media_state(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body::<MediaStatePatch>(body)?;
+    let current = match node.media_get_state(None) {
+        Ok(rep) => rep.state.unwrap_or_default(),
+        Err(e) => return Err(core_error(e)),
+    };
+    let mut state = current;
+    if let Some(pid) = patch.player_id {
+        state.player_id = pid;
+    }
+    if let Some(ref st) = patch.state {
+        state.state = st
+            .parse::<tetherly_core::PlaybackState>()
+            .map_err(|e| error(ErrorCode::BadRequest, e))?;
+    }
+    if let Some(v) = patch.title {
+        state.title = v;
+    }
+    if let Some(v) = patch.artist {
+        state.artist = v;
+    }
+    if let Some(v) = patch.album {
+        state.album = v;
+    }
+    if let Some(v) = patch.position_ms {
+        state.position_ms = v;
+    }
+    if let Some(v) = patch.duration_ms {
+        state.duration_ms = v;
+    }
+    if let Some(v) = patch.volume_percent {
+        state.volume_percent = v;
+    }
+    if let Some(v) = patch.muted {
+        state.muted = v;
+    }
+    if let Some(v) = patch.can_play {
+        state.can_play = v;
+    }
+    if let Some(v) = patch.can_pause {
+        state.can_pause = v;
+    }
+    if let Some(v) = patch.can_go_next {
+        state.can_go_next = v;
+    }
+    if let Some(v) = patch.can_go_previous {
+        state.can_go_previous = v;
+    }
+    if let Some(v) = patch.can_seek {
+        state.can_seek = v;
+    }
+    match crate::apiv1::model::set_media_state(node, state) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /media/policy` (§165): sparse update, body wins over legacy query.
+async fn patch_media_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<MediaPolicyPatch>(body)?;
+    if patch.mode.is_none() {
+        patch.mode = q_str("mode");
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_list(&qmap, "allowed_groups").or_else(|| q_list(&qmap, "group"));
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_list(&qmap, "allowed_tags").or_else(|| q_list(&qmap, "tag"));
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_list(&qmap, "allowed_types").or_else(|| q_list(&qmap, "type"));
+    }
+    if patch.max_volume_limit.is_none() {
+        patch.max_volume_limit = q_str("max_volume_limit")
+            .or_else(|| q_str("max_volume"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_seek.is_none() {
+        patch.allow_seek = q_str("allow_seek").and_then(|s| s.parse().ok());
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.media_policy();
+    if let Some(ref m) = patch.mode {
+        policy.mode = m
+            .parse::<tetherly_core::MediaControlMode>()
+            .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if let Some(v) = patch.max_volume_limit {
+        policy.max_volume_limit = v.min(100);
+    }
+    if let Some(v) = patch.allow_seek {
+        policy.allow_seek = v;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    Ok(json(
+        200,
+        &crate::apiv1::model::set_media_policy(node, policy),
+    ))
+}
+
+/// `POST /ancs/connect` (§165): trigger ANCS subscription.
+async fn post_ancs_connect(node: &Node) -> Handled {
+    match crate::apiv1::model::ancs_connect(node) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
+    }
+}
+
+/// `POST /ancs/allow` (§165): add one open-rule (`app_id` required, `url`
+/// defaults to empty per the contract).
+async fn post_ancs_allow(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body_strict::<AncsAllowRequest>(body)?;
+    match crate::apiv1::model::ancs_allow(node, req) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(error(ErrorCode::BadRequest, e.to_string())),
+    }
+}
+
+/// `DELETE /ancs/allow` (§165): remove one open-rule; query `app_id` wins
+/// over the JSON body (legacy append semantics preserved).
+async fn delete_ancs_allow(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let app_id = qmap
+        .get("app_id")
+        .cloned()
+        .or_else(|| {
+            parse_body::<AncsRemoveRequest>(body)
+                .ok()
+                .and_then(|b| b.app_id)
+        })
+        .filter(|s| !s.trim().is_empty());
+    match app_id {
+        Some(app_id) => Ok(json(
+            200,
+            &crate::apiv1::model::ancs_remove_rule(node, &app_id),
+        )),
+        None => Err(error(
+            ErrorCode::BadRequest,
+            "missing required 'app_id' in query or body",
+        )),
+    }
+}
+
+/// `GET /input` (§165): input sharing status.
+async fn get_input_status(node: &Node) -> Handled {
+    Ok(json(200, &crate::apiv1::model::input_status(node).await))
+}
+
+/// `GET /input/trace` (§165): input-engine decision ring.
+async fn get_input_trace(node: &Node) -> Handled {
+    Ok(json(200, &crate::apiv1::model::input_trace(node).await))
+}
+
+/// `POST /input/start` (§165): start input sharing (optional `peer`).
+async fn post_input_start(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<InputStartRequest>(body)?;
+    match crate::apiv1::model::input_control_start(node, req.peer).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /input/stop` (§165): stop input sharing.
+async fn post_input_stop(node: &Node) -> Handled {
+    match crate::apiv1::model::input_control_stop(node).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `GET /input/tunnel` (§165): tunnel session + policy status.
+async fn get_input_tunnel(node: &Node) -> Handled {
+    Ok(json(
+        200,
+        &crate::apiv1::model::input_tunnel_status(node).await,
+    ))
+}
+
+/// `POST /input/tunnel/attach` (§165): body wins over legacy query aliases
+/// (`peer_id`/`target` for `peer`).
+async fn post_input_attach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<InputAttachRequest>(body)?;
+    if req.peer.is_none() {
+        req.peer = q_str("peer")
+            .or_else(|| q_str("peer_id"))
+            .or_else(|| q_str("target"));
+    }
+    if req.edge.is_none() {
+        req.edge = q_str("edge");
+    }
+    if req.x.is_none() {
+        req.x = q_str("x").and_then(|s| s.parse().ok());
+    }
+    if req.y.is_none() {
+        req.y = q_str("y").and_then(|s| s.parse().ok());
+    }
+    let peer = match req.peer.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => p.to_string(),
+        None => return Err(error(ErrorCode::BadRequest, "missing 'peer' parameter")),
+    };
+    let edge = match req.edge.as_deref() {
+        Some(s) => Some(
+            s.parse::<tetherly_core::DisplayEdge>()
+                .map_err(|e| error(ErrorCode::BadRequest, format!("invalid edge '{s}': {e}")))?,
+        ),
+        None => None,
+    };
+    match crate::apiv1::model::input_tunnel_attach(node, &peer, edge, req.x, req.y).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /input/tunnel/release` (§165): body wins over legacy query `reason`.
+async fn post_input_release(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let mut req = parse_body::<InputReleaseRequest>(body)?;
+    if req.reason.is_none() {
+        req.reason = qmap.get("reason").cloned();
+    }
+    match crate::apiv1::model::input_tunnel_release(node, req.reason.as_deref()).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /input/policy` (§165): sparse update; body wins over legacy query
+/// aliases, single-value `group`/`tag`/`type` query params append.
+async fn patch_input_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<InputPolicyPatch>(body)?;
+    if patch.enabled.is_none() {
+        patch.enabled = q_str("enable")
+            .or_else(|| q_str("enabled"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_inbound_control.is_none() {
+        patch.allow_inbound_control = q_str("allow_inbound")
+            .or_else(|| q_str("allow_inbound_control"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_keyboard.is_none() {
+        patch.allow_keyboard = q_str("keyboard")
+            .or_else(|| q_str("allow_keyboard"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_mouse.is_none() {
+        patch.allow_mouse = q_str("mouse")
+            .or_else(|| q_str("allow_mouse"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.hotkey_release_enabled.is_none() {
+        patch.hotkey_release_enabled = q_str("hotkey")
+            .or_else(|| q_str("hotkey_release_enabled"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.idle_timeout_secs.is_none() {
+        patch.idle_timeout_secs = q_str("timeout")
+            .or_else(|| q_str("idle_timeout_secs"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_list(&qmap, "allowed_groups").or_else(|| {
+            q_str("group")
+                .or_else(|| q_str("allowed_group"))
+                .map(|g| vec![g])
+        });
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_list(&qmap, "allowed_tags").or_else(|| {
+            q_str("tag")
+                .or_else(|| q_str("allowed_tag"))
+                .map(|t| vec![t])
+        });
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_list(&qmap, "allowed_types").or_else(|| {
+            q_str("type")
+                .or_else(|| q_str("device_type"))
+                .map(|t| vec![t])
+        });
+    }
+    if patch.keymap.is_none() {
+        patch.keymap = q_str("keymap").or_else(|| q_str("key_map"));
+    }
+    if patch.edge.is_none() {
+        patch.edge = q_str("edge").or_else(|| q_str("screen_edge"));
+    }
+    if patch.wheel_speed.is_none() {
+        patch.wheel_speed = q_str("wheel_speed")
+            .or_else(|| q_str("scroll_speed"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.input_policy();
+    if let Some(v) = patch.enabled {
+        policy.enabled = v;
+    }
+    if let Some(v) = patch.allow_inbound_control {
+        policy.allow_inbound_control = v;
+    }
+    if let Some(v) = patch.allow_keyboard {
+        policy.allow_keyboard = v;
+    }
+    if let Some(v) = patch.allow_mouse {
+        policy.allow_mouse = v;
+    }
+    if let Some(v) = patch.hotkey_release_enabled {
+        policy.hotkey_release_enabled = v;
+    }
+    if let Some(v) = patch.idle_timeout_secs {
+        policy.idle_timeout_secs = v;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if let Some(km) = &patch.keymap {
+        policy.keymap = if km.trim().is_empty() || km == "none" || km == "identity" || km == "off" {
+            None
+        } else {
+            Some(km.trim().to_lowercase().replace('-', "_"))
+        };
+    }
+    if let Some(edge_val) = &patch.edge {
+        policy.edge = if edge_val.trim().is_empty() || edge_val == "none" || edge_val == "default" {
+            None
+        } else if let Ok(e) = edge_val
+            .trim()
+            .to_lowercase()
+            .parse::<tetherly_core::ScreenEdge>()
+        {
+            Some(e.to_string())
+        } else {
+            return Err(error(
+                ErrorCode::BadRequest,
+                format!("invalid edge '{edge_val}' (left|right|top|bottom)"),
+            ));
+        };
+    }
+    if let Some(ws) = patch.wheel_speed {
+        if !(ws > 0.0 && ws.is_finite() && ws <= 20.0) {
+            return Err(error(
+                ErrorCode::BadRequest,
+                "wheel_speed must be within (0, 20]",
+            ));
+        }
+        policy.wheel_speed = ws;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    match crate::apiv1::model::set_input_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// Resolve the handoff fan-out selector from a request + legacy query
+/// aliases (body wins; `all` query flag also forces selector mode).
+fn handoff_selector(
+    req: &HandoffSendRequest,
+    qmap: &std::collections::HashMap<String, String>,
+) -> Result<Option<crate::store::TargetSelector>, UiResponse> {
+    let q_bool = |k: &str| qmap.get(k).map(|s| s == "true" || s == "1");
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let is_all =
+        req.all.unwrap_or(false) || q_bool("all").unwrap_or(false) || qmap.contains_key("all");
+    let tag = req.tag.clone().or_else(|| q_str("tag"));
+    let group = req.group.clone().or_else(|| q_str("group"));
+    let dev_type = req
+        .device_type
+        .clone()
+        .or_else(|| q_str("device_type"))
+        .or_else(|| q_str("type"));
+    if is_all || tag.is_some() || group.is_some() || dev_type.is_some() {
+        let peer = req.peer.clone().or_else(|| q_str("peer"));
+        crate::store::TargetSelector::from_query(
+            peer.as_deref(),
+            tag.as_deref(),
+            group.as_deref(),
+            dev_type.as_deref(),
+            is_all,
+        )
+        .map(Some)
+        .map_err(|e| error(ErrorCode::BadRequest, e))
+    } else {
+        Ok(None)
+    }
+}
+
+/// `POST /handoff/send` (§165): single peer, or selector fan-out when
+/// `tag`/`group`/`device_type`/`all` present (legacy `/api/handoff/send`
+/// dispatch split preserved).
+async fn post_handoff_send(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<HandoffSendRequest>(body)?;
+    if req.url.is_empty() {
+        if let Some(u) = q_str("url") {
+            req.url = u;
+        }
+    }
+    if req.peer.is_none() {
+        req.peer = q_str("peer");
+    }
+    if req.title.is_none() {
+        req.title = q_str("title");
+    }
+    if req.auto_open.is_none() {
+        req.auto_open = q_str("auto_open").and_then(|s| match s.as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        });
+    }
+    let url = req.url.trim();
+    if url.is_empty() {
+        return Err(error(ErrorCode::BadRequest, "url cannot be empty"));
+    }
+    match handoff_selector(&req, &qmap) {
+        Err(resp) => Err(resp),
+        Ok(Some(selector)) => match crate::apiv1::model::handoff_send_multi(
+            node,
+            &selector,
+            url,
+            req.title.as_deref(),
+            req.auto_open.unwrap_or(false),
+        )
+        .await
+        {
+            Ok(rep) => Ok(json(200, &rep)),
+            Err(e) => Err(core_error(e)),
+        },
+        Ok(None) => {
+            let peer = req.peer.clone().unwrap_or_default();
+            match crate::apiv1::model::handoff_send(
+                node,
+                &peer,
+                url,
+                req.title.as_deref(),
+                req.auto_open.unwrap_or(false),
+            )
+            .await
+            {
+                Ok(rep) => Ok(json(200, &rep)),
+                Err(e) => Err(core_error(e)),
+            }
+        }
+    }
+}
+
+/// `POST /handoff/send/multi` (§165): mandatory selector fan-out.
+async fn post_handoff_send_multi(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<HandoffSendRequest>(body)?;
+    if req.url.is_empty() {
+        if let Some(u) = q_str("url") {
+            req.url = u;
+        }
+    }
+    if req.title.is_none() {
+        req.title = q_str("title");
+    }
+    if req.auto_open.is_none() {
+        req.auto_open = q_str("auto_open").and_then(|s| match s.as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        });
+    }
+    let url = req.url.trim();
+    if url.is_empty() {
+        return Err(error(ErrorCode::BadRequest, "url cannot be empty"));
+    }
+    let is_all = req.all.unwrap_or(false) || qmap.contains_key("all");
+    let selector = match crate::store::TargetSelector::from_query(
+        req.peer.as_deref(),
+        req.tag.as_deref(),
+        req.group.as_deref(),
+        req.device_type.as_deref(),
+        is_all,
+    ) {
+        Ok(s) => s,
+        Err(e) => return Err(error(ErrorCode::BadRequest, e)),
+    };
+    match crate::apiv1::model::handoff_send_multi(
+        node,
+        &selector,
+        url,
+        req.title.as_deref(),
+        req.auto_open.unwrap_or(false),
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `GET /handoff/inbox` (§165): list entries with an optional status filter.
+fn get_handoff_inbox(node: &Node, query: Option<&str>) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let status_filter = qmap
+        .get("status")
+        .and_then(|s| s.parse::<tetherly_core::HandoffStatus>().ok());
+    Ok(json(
+        200,
+        &crate::apiv1::model::handoff_inbox(node, status_filter),
+    ))
+}
+
+/// Resolve an inbox entry id from query `id` or the JSON body (query wins).
+fn handoff_action_id(query: Option<&str>, body: &[u8]) -> Result<String, UiResponse> {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let id = qmap.get("id").cloned().or_else(|| {
+        parse_body::<HandoffInboxActionRequest>(body)
+            .ok()
+            .and_then(|b| b.id)
+    });
+    match id {
+        Some(id) => Ok(id),
+        None => Err(error(
+            ErrorCode::BadRequest,
+            "missing required 'id' parameter",
+        )),
+    }
+}
+
+/// `POST /handoff/inbox/open` (§165): open one inbox entry.
+async fn post_handoff_inbox_open(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let id = handoff_action_id(query, body)?;
+    match crate::apiv1::model::handoff_inbox_open(node, &id) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /handoff/inbox/dismiss` (§165): dismiss one inbox entry.
+async fn post_handoff_inbox_dismiss(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let id = handoff_action_id(query, body)?;
+    match crate::apiv1::model::handoff_inbox_dismiss(node, &id) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `DELETE /handoff/inbox` (§165): clear all entries.
+async fn delete_handoff_inbox(node: &Node) -> Handled {
+    match crate::apiv1::model::handoff_inbox_clear(node) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /focus/state` (§165): set local focus; body wins over legacy query.
+async fn post_focus_state(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<FocusSetRequest>(body)?;
+    if req.enabled.is_none() {
+        req.enabled = q_str("enabled").and_then(|s| s.parse().ok());
+    }
+    if req.mode.is_none() {
+        req.mode = q_str("mode");
+    }
+    if req.duration_mins.is_none() {
+        req.duration_mins = q_str("duration_mins")
+            .or_else(|| q_str("duration"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.reason.is_none() {
+        req.reason = q_str("reason");
+    }
+    if req.broadcast.is_none() {
+        req.broadcast = q_str("broadcast").and_then(|s| s.parse().ok());
+    }
+    let mode = match &req.mode {
+        Some(m) => Some(m.parse::<tetherly_core::FocusMode>().map_err(|e| {
+            error(
+                ErrorCode::BadRequest,
+                format!("invalid focus mode '{m}': {e}"),
+            )
+        })?),
+        None => None,
+    };
+    match crate::apiv1::model::set_focus_state(
+        node,
+        req.enabled.unwrap_or(true),
+        mode,
+        req.duration_mins,
+        req.reason,
+        req.broadcast.unwrap_or(true),
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /focus/sync` (§165): request focus state from eligible peers.
+async fn post_focus_sync(node: &Node) -> Handled {
+    match crate::apiv1::model::focus_sync(node).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /focus/policy` (§165): sparse update; body wins over legacy query
+/// aliases (`enable`/`mirror`/`breakthrough`/`quiet_hours`/`start`/`end`,
+/// single-value `group`/`tag`/`type` append); `HH:MM` folds to minutes.
+async fn patch_focus_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<FocusPolicyPatch>(body)?;
+    if patch.enabled.is_none() {
+        patch.enabled = q_str("enabled")
+            .or_else(|| q_str("enable"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.default_mode.is_none() {
+        patch.default_mode = q_str("default_mode").or_else(|| q_str("mode"));
+    }
+    if patch.mirror_inbound_focus.is_none() {
+        patch.mirror_inbound_focus = q_str("mirror")
+            .or_else(|| q_str("mirror_inbound_focus"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_emergency_breakthrough.is_none() {
+        patch.allow_emergency_breakthrough = q_str("breakthrough")
+            .or_else(|| q_str("allow_emergency_breakthrough"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.quiet_hours_enabled.is_none() {
+        patch.quiet_hours_enabled = q_str("quiet_hours")
+            .or_else(|| q_str("quiet_hours_enabled"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.quiet_hours_start.is_none() {
+        patch.quiet_hours_start = q_str("start").or_else(|| q_str("quiet_hours_start"));
+    }
+    if patch.quiet_hours_end.is_none() {
+        patch.quiet_hours_end = q_str("end").or_else(|| q_str("quiet_hours_end"));
+    }
+    let from_query = !qmap.is_empty();
+    if from_query {
+        if let Some(s) = q_str("start").or_else(|| q_str("quiet_hours_start")) {
+            if let Some(min) = super::dto::parse_hh_mm(&s) {
+                patch.quiet_hours_start = None;
+                patch.quiet_hours_start_minute = Some(min);
+            }
+        }
+        if let Some(e) = q_str("end").or_else(|| q_str("quiet_hours_end")) {
+            if let Some(min) = super::dto::parse_hh_mm(&e) {
+                patch.quiet_hours_end = None;
+                patch.quiet_hours_end_minute = Some(min);
+            }
+        }
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_str("group")
+            .filter(|g| !g.trim().is_empty())
+            .map(|g| vec![g]);
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_str("tag")
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t]);
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_str("type")
+            .or_else(|| q_str("device_type"))
+            .map(|t| vec![t]);
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.focus_policy();
+    if let Some(v) = patch.enabled {
+        policy.enabled = v;
+    }
+    if let Some(m) = &patch.default_mode {
+        policy.default_mode = m.parse::<tetherly_core::FocusMode>().map_err(|e| {
+            error(
+                ErrorCode::BadRequest,
+                format!("invalid default focus mode '{m}': {e}"),
+            )
+        })?;
+    }
+    if let Some(v) = patch.mirror_inbound_focus {
+        policy.mirror_inbound_focus = v;
+    }
+    if let Some(v) = patch.allow_emergency_breakthrough {
+        policy.allow_emergency_breakthrough = v;
+    }
+    if let Some(v) = patch.quiet_hours_enabled {
+        policy.quiet_hours_enabled = v;
+    }
+    if let Some(s) = &patch.quiet_hours_start {
+        match super::dto::parse_hh_mm(s) {
+            Some(min) => policy.quiet_hours_start_minute = min,
+            None => {
+                return Err(error(
+                    ErrorCode::BadRequest,
+                    "invalid quiet_hours_start format (expected HH:MM)",
+                ))
+            }
+        }
+    }
+    if let Some(min) = patch.quiet_hours_start_minute {
+        policy.quiet_hours_start_minute = min % 1440;
+    }
+    if let Some(e) = &patch.quiet_hours_end {
+        match super::dto::parse_hh_mm(e) {
+            Some(min) => policy.quiet_hours_end_minute = min,
+            None => {
+                return Err(error(
+                    ErrorCode::BadRequest,
+                    "invalid quiet_hours_end format (expected HH:MM)",
+                ))
+            }
+        }
+    }
+    if let Some(min) = patch.quiet_hours_end_minute {
+        policy.quiet_hours_end_minute = min % 1440;
+    }
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query && !policy.allowed_groups.contains(&g[0]) {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query && !policy.allowed_tags.contains(&t[0]) {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    match crate::apiv1::model::set_focus_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /camera/attach` (§165): body wins over legacy query aliases.
+async fn post_camera_attach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<CameraAttachRequest>(body)?;
+    if req.peer.is_none() {
+        req.peer = q_str("peer")
+            .or_else(|| q_str("peer_id"))
+            .or_else(|| q_str("target"));
+    }
+    if req.lens_id.is_none() {
+        req.lens_id = q_str("lens_id").or_else(|| q_str("lens"));
+    }
+    if req.width.is_none() {
+        req.width = q_str("width").and_then(|s| s.parse().ok());
+    }
+    if req.height.is_none() {
+        req.height = q_str("height").and_then(|s| s.parse().ok());
+    }
+    if req.fps.is_none() {
+        req.fps = q_str("target_fps")
+            .or_else(|| q_str("fps"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.codec.is_none() {
+        req.codec = q_str("codec");
+    }
+    if req.flashlight.is_none() {
+        req.flashlight = q_str("flashlight")
+            .or_else(|| q_str("torch"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.zoom.is_none() {
+        req.zoom = q_str("zoom").and_then(|s| s.parse().ok());
+    }
+    let codec = req
+        .codec
+        .as_deref()
+        .map(tetherly_core::CameraCodec::from_str_lenient);
+    match crate::apiv1::model::camera_attach(
+        node,
+        &req.peer.unwrap_or_default(),
+        req.lens_id.as_deref(),
+        req.width,
+        req.height,
+        req.fps,
+        codec,
+        req.flashlight,
+        req.zoom,
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /camera/detach` (§165): body wins over legacy query.
+async fn post_camera_detach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let mut req = parse_body::<CameraDetachRequest>(body)?;
+    if req.reason.is_none() {
+        req.reason = qmap.get("reason").cloned();
+    }
+    match crate::apiv1::model::camera_detach(node, req.reason.as_deref()).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /camera/policy` (§165): sparse update; body wins over legacy
+/// query aliases (`enable`/`allow_inbound`/`inbound`/`allow_capture`,
+/// single-value `group`/`tag`/`type` append).
+async fn patch_camera_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<CameraPolicyPatch>(body)?;
+    if patch.enabled.is_none() {
+        patch.enabled = q_str("enabled")
+            .or_else(|| q_str("enable"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_inbound_stream.is_none() {
+        patch.allow_inbound_stream = q_str("allow_inbound_stream")
+            .or_else(|| q_str("allow_inbound"))
+            .or_else(|| q_str("inbound"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_remote_capture.is_none() {
+        patch.allow_remote_capture = q_str("allow_remote_capture")
+            .or_else(|| q_str("allow_capture"))
+            .or_else(|| q_str("capture"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_resolution_width.is_none() {
+        patch.max_resolution_width = q_str("max_resolution_width")
+            .or_else(|| q_str("max_width"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_resolution_height.is_none() {
+        patch.max_resolution_height = q_str("max_resolution_height")
+            .or_else(|| q_str("max_height"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_fps.is_none() {
+        patch.max_fps = q_str("max_fps").and_then(|s| s.parse().ok());
+    }
+    if patch.enforce_privacy_shutter_indicator.is_none() {
+        patch.enforce_privacy_shutter_indicator = q_str("enforce_privacy_shutter_indicator")
+            .or_else(|| q_str("shutter"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.idle_timeout_secs.is_none() {
+        patch.idle_timeout_secs = q_str("idle_timeout_secs")
+            .or_else(|| q_str("timeout"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_str("group")
+            .filter(|g| !g.trim().is_empty())
+            .map(|g| vec![g]);
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_str("tag")
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t]);
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_str("type")
+            .or_else(|| q_str("device_type"))
+            .map(|t| vec![t]);
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.camera_policy();
+    if let Some(v) = patch.enabled {
+        policy.enabled = v;
+    }
+    if let Some(v) = patch.allow_inbound_stream {
+        policy.allow_inbound_stream = v;
+    }
+    if let Some(v) = patch.allow_remote_capture {
+        policy.allow_remote_capture = v;
+    }
+    if let Some(v) = patch.max_resolution_width {
+        policy.max_resolution_width = v;
+    }
+    if let Some(v) = patch.max_resolution_height {
+        policy.max_resolution_height = v;
+    }
+    if let Some(v) = patch.max_fps {
+        policy.max_fps = v;
+    }
+    if let Some(v) = patch.enforce_privacy_shutter_indicator {
+        policy.enforce_privacy_shutter_indicator = v;
+    }
+    if let Some(v) = patch.idle_timeout_secs {
+        policy.idle_timeout_secs = v;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query && !policy.allowed_groups.contains(&g[0]) {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query && !policy.allowed_tags.contains(&t[0]) {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    match crate::apiv1::model::set_camera_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /audio/policy` (§165): sparse update; body wins over legacy query
+/// aliases (`enable`/`allow_sink`/`sink`/`allow_outbound`/`routing`/
+/// `max_volume`/`volume_limit`/`allow_spatial`/`spatial`/`timeout`/
+/// `idle_timeout`, single-value `group`/`tag`/`type` append).
+async fn patch_audio_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<AudioPolicyPatch>(body)?;
+    if patch.enabled.is_none() {
+        patch.enabled = q_str("enabled")
+            .or_else(|| q_str("enable"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_inbound_sink.is_none() {
+        patch.allow_inbound_sink = q_str("allow_inbound_sink")
+            .or_else(|| q_str("allow_sink"))
+            .or_else(|| q_str("sink"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_outbound_routing.is_none() {
+        patch.allow_outbound_routing = q_str("allow_outbound_routing")
+            .or_else(|| q_str("allow_outbound"))
+            .or_else(|| q_str("routing"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_volume_limit.is_none() {
+        patch.max_volume_limit = q_str("max_volume_limit")
+            .or_else(|| q_str("max_volume"))
+            .or_else(|| q_str("volume_limit"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_spatial_rendering.is_none() {
+        patch.allow_spatial_rendering = q_str("allow_spatial_rendering")
+            .or_else(|| q_str("allow_spatial"))
+            .or_else(|| q_str("spatial"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.idle_timeout_secs.is_none() {
+        patch.idle_timeout_secs = q_str("idle_timeout_secs")
+            .or_else(|| q_str("timeout"))
+            .or_else(|| q_str("idle_timeout"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_str("group")
+            .or_else(|| q_str("allowed_group"))
+            .filter(|g| !g.trim().is_empty())
+            .map(|g| vec![g]);
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_str("tag")
+            .or_else(|| q_str("allowed_tag"))
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t]);
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_str("type")
+            .or_else(|| q_str("device_type"))
+            .map(|t| vec![t]);
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.audio_routing_policy();
+    if let Some(v) = patch.enabled {
+        policy.enabled = v;
+    }
+    if let Some(v) = patch.allow_inbound_sink {
+        policy.allow_inbound_sink = v;
+    }
+    if let Some(v) = patch.allow_outbound_routing {
+        policy.allow_outbound_routing = v;
+    }
+    if let Some(v) = patch.max_volume_limit {
+        policy.max_volume_limit = v.min(100);
+    }
+    if let Some(v) = patch.allow_spatial_rendering {
+        policy.allow_spatial_rendering = v;
+    }
+    if let Some(v) = patch.idle_timeout_secs {
+        policy.idle_timeout_secs = v;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query && !policy.allowed_groups.contains(&g[0]) {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query && !policy.allowed_tags.contains(&t[0]) {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    match crate::apiv1::model::set_audio_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /mic/attach` (§165): body wins over legacy query aliases
+/// (`peer`/`peer_id`/`target`, `mic_id`/`mic`).
+async fn post_mic_attach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<MicAttachRequest>(body)?;
+    if req.peer.is_none() {
+        req.peer = q_str("peer")
+            .or_else(|| q_str("peer_id"))
+            .or_else(|| q_str("target"));
+    }
+    if req.mic_id.is_none() {
+        req.mic_id = q_str("mic_id").or_else(|| q_str("mic"));
+    }
+    if req.mode.is_none() {
+        req.mode = q_str("mode");
+    }
+    if req.codec.is_none() {
+        req.codec = q_str("codec");
+    }
+    if req.sample_rate.is_none() {
+        req.sample_rate = q_str("sample_rate").and_then(|s| s.parse().ok());
+    }
+    if req.channels.is_none() {
+        req.channels = q_str("channels").and_then(|s| s.parse().ok());
+    }
+    if req.gain.is_none() {
+        req.gain = q_str("gain").and_then(|s| s.parse().ok());
+    }
+    if req.muted.is_none() {
+        req.muted = q_str("muted").and_then(|s| s.parse().ok());
+    }
+    if req.noise_suppression.is_none() {
+        req.noise_suppression = q_str("noise_suppression")
+            .or_else(|| q_str("ns"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.echo_cancellation.is_none() {
+        req.echo_cancellation = q_str("echo_cancellation")
+            .or_else(|| q_str("aec"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.auto_gain.is_none() {
+        req.auto_gain = q_str("auto_gain")
+            .or_else(|| q_str("agc"))
+            .and_then(|s| s.parse().ok());
+    }
+    let mode = req
+        .mode
+        .as_deref()
+        .map(tetherly_core::MicMode::from_str_lenient)
+        .unwrap_or(tetherly_core::MicMode::VirtualMic);
+    let codec = req
+        .codec
+        .as_deref()
+        .map(tetherly_core::MicCodec::from_str_lenient);
+    match crate::apiv1::model::mic_attach(
+        node,
+        &req.peer.unwrap_or_default(),
+        req.mic_id.as_deref(),
+        mode,
+        codec,
+        req.sample_rate,
+        req.channels,
+        req.gain,
+        req.muted,
+        req.noise_suppression,
+        req.echo_cancellation,
+        req.auto_gain,
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /mic/detach` (§165): body wins over legacy query.
+async fn post_mic_detach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let mut req = parse_body::<MicDetachRequest>(body)?;
+    if req.reason.is_none() {
+        req.reason = qmap.get("reason").cloned();
+    }
+    match crate::apiv1::model::mic_detach(node, req.reason.as_deref()).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /audio/attach` (§165): body wins over legacy query aliases
+/// (`peer`/`peer_id`/`target`, `gain`/`volume`/`volume_gain`,
+/// `x`/`spatial_x`, `y`/`spatial_y`, `z`/`spatial_z`).
+async fn post_audio_attach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<AudioAttachRequest>(body)?;
+    if req.peer.is_none() {
+        req.peer = q_str("peer")
+            .or_else(|| q_str("peer_id"))
+            .or_else(|| q_str("target"));
+    }
+    if req.layout.is_none() {
+        req.layout = q_str("layout");
+    }
+    if req.sample_rate.is_none() {
+        req.sample_rate = q_str("sample_rate").and_then(|s| s.parse().ok());
+    }
+    if req.channels.is_none() {
+        req.channels = q_str("channels").and_then(|s| s.parse().ok());
+    }
+    // Flatten embedded spatial_position into x/y/z (body wins over query).
+    if let Some(pos) = req.spatial_position.take() {
+        if req.spatial_x.is_none() {
+            req.spatial_x = Some(pos.x);
+        }
+        if req.spatial_y.is_none() {
+            req.spatial_y = Some(pos.y);
+        }
+        if req.spatial_z.is_none() {
+            req.spatial_z = Some(pos.z);
+        }
+    }
+    if req.spatial_x.is_none() {
+        req.spatial_x = q_str("x")
+            .or_else(|| q_str("spatial_x"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.spatial_y.is_none() {
+        req.spatial_y = q_str("y")
+            .or_else(|| q_str("spatial_y"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.spatial_z.is_none() {
+        req.spatial_z = q_str("z")
+            .or_else(|| q_str("spatial_z"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.volume_gain.is_none() {
+        req.volume_gain = q_str("gain")
+            .or_else(|| q_str("volume"))
+            .or_else(|| q_str("volume_gain"))
+            .and_then(|s| s.parse().ok());
+    }
+    let layout = req
+        .layout
+        .as_deref()
+        .map(tetherly_core::AudioChannelLayout::from_str_lenient);
+    match crate::apiv1::model::audio_attach(
+        node,
+        req.peer.as_deref().unwrap_or_default(),
+        layout,
+        req.sample_rate,
+        req.channels,
+        req.spatial_x,
+        req.spatial_y,
+        req.spatial_z,
+        req.volume_gain,
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /audio/detach` (§165): body wins over legacy query.
+async fn post_audio_detach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let mut req = parse_body::<AudioDetachRequest>(body)?;
+    if req.reason.is_none() {
+        req.reason = qmap.get("reason").cloned();
+    }
+    match crate::apiv1::model::audio_detach(node, req.reason.as_deref()).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /locate/ring` (§165): body wins over legacy query aliases
+/// (`peer`/`target`, `duration`/`duration_secs`, `override_silent`/`override`).
+async fn post_locate_ring(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<LocateRingRequest>(body)?;
+    if req.peer.is_none() {
+        req.peer = q_str("peer").or_else(|| q_str("target"));
+    }
+    if req.duration_secs.is_none() {
+        req.duration_secs = q_str("duration")
+            .or_else(|| q_str("duration_secs"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.pattern.is_none() {
+        req.pattern = q_str("pattern");
+    }
+    if req.override_silent.is_none() {
+        req.override_silent = q_str("override_silent")
+            .or_else(|| q_str("override"))
+            .and_then(|s| s.parse().ok());
+    }
+    if req.message.is_none() {
+        req.message = q_str("message");
+    }
+    let Some(peer) = req.peer.filter(|p| !p.trim().is_empty()) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "missing target peer (specify 'peer' or 'target')",
+        ));
+    };
+    let pattern = match req.pattern.as_deref() {
+        Some(p) => Some(p.parse::<tetherly_core::LocatePattern>().map_err(|e| {
+            error(
+                ErrorCode::BadRequest,
+                format!("invalid locate pattern: {e}"),
+            )
+        })?),
+        None => None,
+    };
+    match crate::apiv1::model::locate_ring_request(
+        node,
+        &peer,
+        req.duration_secs,
+        pattern,
+        req.override_silent,
+        req.message,
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /locate/stop` (§165): body wins over legacy query aliases
+/// (`peer`/`target`, `id`/`request_id`).
+async fn post_locate_stop(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<LocateStopRequest>(body)?;
+    if req.peer.is_none() {
+        req.peer = q_str("peer").or_else(|| q_str("target"));
+    }
+    if req.request_id.is_none() {
+        req.request_id = q_str("id").or_else(|| q_str("request_id"));
+    }
+    if req.reason.is_none() {
+        req.reason = q_str("reason");
+    }
+    match crate::apiv1::model::locate_stop_request(
+        node,
+        req.peer.as_deref(),
+        req.request_id,
+        req.reason,
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /locate/policy` (§165): sparse update; body wins over legacy query
+/// aliases (`override_silent`/`override`, `max_duration`, single-value
+/// `group`/`tag`/`type` append).
+async fn patch_locate_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<LocatePolicyPatch>(body)?;
+    if patch.enabled.is_none() {
+        patch.enabled = q_str("enabled").and_then(|s| s.parse().ok());
+    }
+    if patch.allow_override_silent.is_none() {
+        patch.allow_override_silent = q_str("allow_override_silent")
+            .or_else(|| q_str("override_silent"))
+            .or_else(|| q_str("override"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_duration_secs.is_none() {
+        patch.max_duration_secs = q_str("max_duration_secs")
+            .or_else(|| q_str("max_duration"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_str("group")
+            .filter(|g| !g.trim().is_empty())
+            .map(|g| vec![g]);
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_str("tag")
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t]);
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_str("type")
+            .or_else(|| q_str("device_type"))
+            .map(|t| vec![t]);
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.locator_policy();
+    if let Some(v) = patch.enabled {
+        policy.enabled = v;
+    }
+    if let Some(v) = patch.allow_override_silent {
+        policy.allow_override_silent = v;
+    }
+    if let Some(v) = patch.max_duration_secs {
+        policy.max_duration_secs = v.clamp(1, 60);
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query && !policy.allowed_groups.contains(&g[0]) {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query && !policy.allowed_tags.contains(&t[0]) {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    match crate::apiv1::model::set_locate_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /display/virtual/attach` (§165): body wins over legacy query aliases
+/// (`peer`/`peer_id`/`target`, `fps`/`target_fps`).
+async fn post_display_attach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut req = parse_body::<DisplayAttachRequest>(body)?;
+    if req.peer.is_none() {
+        req.peer = q_str("peer")
+            .or_else(|| q_str("peer_id"))
+            .or_else(|| q_str("target"));
+    }
+    if req.edge.is_none() {
+        req.edge = q_str("edge");
+    }
+    if req.width.is_none() {
+        req.width = q_str("width").and_then(|s| s.parse().ok());
+    }
+    if req.height.is_none() {
+        req.height = q_str("height").and_then(|s| s.parse().ok());
+    }
+    if req.fps.is_none() {
+        req.fps = q_str("fps")
+            .or_else(|| q_str("target_fps"))
+            .and_then(|s| s.parse().ok());
+    }
+    let edge = match req.edge.as_deref() {
+        Some(s) => Some(
+            s.parse::<tetherly_core::DisplayEdge>()
+                .map_err(|e| error(ErrorCode::BadRequest, format!("invalid edge '{s}': {e}")))?,
+        ),
+        None => None,
+    };
+    match crate::apiv1::model::display_attach(
+        node,
+        req.peer.as_deref().unwrap_or_default(),
+        edge,
+        req.width,
+        req.height,
+        req.fps,
+    )
+    .await
+    {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `POST /display/virtual/detach` (§165): body wins over legacy query.
+async fn post_display_detach(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let mut req = parse_body::<DisplayDetachRequest>(body)?;
+    if req.reason.is_none() {
+        req.reason = qmap.get("reason").cloned();
+    }
+    match crate::apiv1::model::display_detach(node, req.reason.as_deref()).await {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /display/virtual/policy` (§165): sparse update; body wins over
+/// legacy query aliases (`enable`/`allow_host`/`hosting`/`allow_extend`/
+/// `remote_extend`/`max_width`/`max_height`/`fps`/`timeout`, single-value
+/// `group`/`tag`/`type` append).
+async fn patch_display_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<DisplayPolicyPatch>(body)?;
+    if patch.enabled.is_none() {
+        patch.enabled = q_str("enabled")
+            .or_else(|| q_str("enable"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_hosting.is_none() {
+        patch.allow_hosting = q_str("allow_hosting")
+            .or_else(|| q_str("allow_host"))
+            .or_else(|| q_str("hosting"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_remote_extend.is_none() {
+        patch.allow_remote_extend = q_str("allow_remote_extend")
+            .or_else(|| q_str("allow_extend"))
+            .or_else(|| q_str("remote_extend"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_resolution_width.is_none() {
+        patch.max_resolution_width = q_str("max_resolution_width")
+            .or_else(|| q_str("max_width"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_resolution_height.is_none() {
+        patch.max_resolution_height = q_str("max_resolution_height")
+            .or_else(|| q_str("max_height"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_fps.is_none() {
+        patch.max_fps = q_str("max_fps")
+            .or_else(|| q_str("fps"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.idle_timeout_secs.is_none() {
+        patch.idle_timeout_secs = q_str("idle_timeout_secs")
+            .or_else(|| q_str("timeout"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_str("group")
+            .or_else(|| q_str("allowed_group"))
+            .filter(|g| !g.trim().is_empty())
+            .map(|g| vec![g]);
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_str("tag")
+            .or_else(|| q_str("allowed_tag"))
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t]);
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_str("type")
+            .or_else(|| q_str("device_type"))
+            .map(|t| vec![t]);
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.virtual_display_policy();
+    if let Some(v) = patch.enabled {
+        policy.enabled = v;
+    }
+    if let Some(v) = patch.allow_hosting {
+        policy.allow_hosting = v;
+    }
+    if let Some(v) = patch.allow_remote_extend {
+        policy.allow_remote_extend = v;
+    }
+    if let Some(v) = patch.max_resolution_width {
+        policy.max_resolution_width = v;
+    }
+    if let Some(v) = patch.max_resolution_height {
+        policy.max_resolution_height = v;
+    }
+    if let Some(v) = patch.max_fps {
+        policy.max_fps = v;
+    }
+    if let Some(v) = patch.idle_timeout_secs {
+        policy.idle_timeout_secs = v;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query && !policy.allowed_groups.contains(&g[0]) {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query && !policy.allowed_tags.contains(&t[0]) {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    match crate::apiv1::model::set_display_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /mic/policy` (§165): sparse update; body wins over legacy query
+/// aliases (`enable`/`allow_inbound`/`inbound`/`allow_capture`/`capture`/
+/// `ptt`/`max_rate`/`max_duration`/`privacy`/`start_muted`/`timeout`/
+/// `idle_timeout`, single-value `group`/`tag`/`type` append).
+async fn patch_mic_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<MicPolicyPatch>(body)?;
+    if patch.enabled.is_none() {
+        patch.enabled = q_str("enabled")
+            .or_else(|| q_str("enable"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_inbound_stream.is_none() {
+        patch.allow_inbound_stream = q_str("allow_inbound_stream")
+            .or_else(|| q_str("allow_inbound"))
+            .or_else(|| q_str("inbound"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_remote_capture.is_none() {
+        patch.allow_remote_capture = q_str("allow_remote_capture")
+            .or_else(|| q_str("allow_capture"))
+            .or_else(|| q_str("capture"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allow_intercom.is_none() {
+        patch.allow_intercom = q_str("allow_intercom")
+            .or_else(|| q_str("intercom"))
+            .or_else(|| q_str("ptt"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_sample_rate.is_none() {
+        patch.max_sample_rate = q_str("max_sample_rate")
+            .or_else(|| q_str("max_rate"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.max_session_duration_secs.is_none() {
+        patch.max_session_duration_secs = q_str("max_session_duration_secs")
+            .or_else(|| q_str("max_duration"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.enforce_privacy_indicator.is_none() {
+        patch.enforce_privacy_indicator = q_str("enforce_privacy_indicator")
+            .or_else(|| q_str("privacy_indicator"))
+            .or_else(|| q_str("privacy"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.default_muted.is_none() {
+        patch.default_muted = q_str("default_muted")
+            .or_else(|| q_str("start_muted"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.idle_timeout_secs.is_none() {
+        patch.idle_timeout_secs = q_str("idle_timeout_secs")
+            .or_else(|| q_str("idle_timeout"))
+            .or_else(|| q_str("timeout"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_str("group")
+            .or_else(|| q_str("allowed_group"))
+            .filter(|g| !g.trim().is_empty())
+            .map(|g| vec![g]);
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_str("tag")
+            .or_else(|| q_str("allowed_tag"))
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t]);
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_str("type")
+            .or_else(|| q_str("device_type"))
+            .map(|t| vec![t]);
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.microphone_policy();
+    if let Some(v) = patch.enabled {
+        policy.enabled = v;
+    }
+    if let Some(v) = patch.allow_inbound_stream {
+        policy.allow_inbound_stream = v;
+    }
+    if let Some(v) = patch.allow_remote_capture {
+        policy.allow_remote_capture = v;
+    }
+    if let Some(v) = patch.allow_intercom {
+        policy.allow_intercom = v;
+    }
+    if let Some(v) = patch.max_sample_rate {
+        policy.max_sample_rate = v;
+    }
+    if let Some(v) = patch.max_session_duration_secs {
+        policy.max_session_duration_secs = v;
+    }
+    if let Some(v) = patch.enforce_privacy_indicator {
+        policy.enforce_privacy_indicator = v;
+    }
+    if let Some(v) = patch.default_muted {
+        policy.default_muted = v;
+    }
+    if let Some(v) = patch.idle_timeout_secs {
+        policy.idle_timeout_secs = v;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query && !policy.allowed_groups.contains(&g[0]) {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query && !policy.allowed_tags.contains(&t[0]) {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    match crate::apiv1::model::set_mic_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /handoff/policy` (§165): sparse update; body wins over legacy
+/// query aliases (`max_entries`, single-value `group`/`tag`/`type` append).
+async fn patch_handoff_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+    let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    let q_str = |k: &str| qmap.get(k).cloned();
+    let mut patch = parse_body::<HandoffPolicyPatch>(body)?;
+    if patch.action.is_none() {
+        patch.action = q_str("action");
+    }
+    if patch.allowed_groups.is_none() {
+        patch.allowed_groups = q_str("group")
+            .filter(|g| !g.trim().is_empty())
+            .map(|g| vec![g]);
+    }
+    if patch.allowed_tags.is_none() {
+        patch.allowed_tags = q_str("tag")
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t]);
+    }
+    if patch.allowed_types.is_none() {
+        patch.allowed_types = q_str("type")
+            .or_else(|| q_str("device_type"))
+            .map(|t| vec![t]);
+    }
+    if patch.max_inbox_entries.is_none() {
+        patch.max_inbox_entries = q_str("max_inbox_entries")
+            .or_else(|| q_str("max_entries"))
+            .and_then(|s| s.parse().ok());
+    }
+    if patch.clear_filters.is_none() {
+        patch.clear_filters = q_str("clear_filters").and_then(|s| s.parse().ok());
+    }
+
+    let mut policy = node.handoff_policy();
+    if let Some(a) = &patch.action {
+        policy.action = a.parse::<tetherly_core::HandoffAction>().map_err(|e| {
+            error(
+                ErrorCode::BadRequest,
+                format!("invalid handoff action '{a}': {e}"),
+            )
+        })?;
+    }
+    let from_query = !qmap.is_empty();
+    if let Some(mut g) = patch.allowed_groups {
+        if from_query && !policy.allowed_groups.contains(&g[0]) {
+            g.append(&mut policy.allowed_groups);
+            g.sort();
+            g.dedup();
+        }
+        policy.allowed_groups = g;
+    }
+    if let Some(mut t) = patch.allowed_tags {
+        if from_query && !policy.allowed_tags.contains(&t[0]) {
+            t.append(&mut policy.allowed_tags);
+            t.sort();
+            t.dedup();
+        }
+        policy.allowed_tags = t;
+    }
+    if let Some(types) = &patch.allowed_types {
+        let mut parsed = Vec::new();
+        for t in types {
+            parsed.push(
+                t.parse::<crate::store::DeviceType>()
+                    .map_err(|e| error(ErrorCode::BadRequest, e.to_string()))?,
+            );
+        }
+        if from_query {
+            for ty in policy.allowed_types.drain(..) {
+                if !parsed.contains(&ty) {
+                    parsed.push(ty);
+                }
+            }
+        }
+        policy.allowed_types = parsed;
+    }
+    if let Some(m) = patch.max_inbox_entries {
+        policy.max_inbox_entries = m;
+    }
+    if patch.clear_filters == Some(true) {
+        policy.allowed_groups.clear();
+        policy.allowed_tags.clear();
+        policy.allowed_types.clear();
+    }
+    match crate::apiv1::model::set_handoff_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
 }
 
 /// `GET /inbox/{name}/content`: the raw file bytes with the sniffed mime

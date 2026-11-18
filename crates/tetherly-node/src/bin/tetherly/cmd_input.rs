@@ -13,14 +13,20 @@ pub(crate) async fn input(action: InputCmd) -> Result<()> {
         } => {
             let payload = serde_json::json!({ "peer": peer });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/input/start", &bytes)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "POST",
+                "/api/v1/input/start",
+                Some(&bytes),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "input start failed (HTTP {code}): {}",
@@ -40,14 +46,20 @@ pub(crate) async fn input(action: InputCmd) -> Result<()> {
             }
         }
         InputCmd::Stop { json, ui_port } => {
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/input/stop", b"{}")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = tetherly_node::loopback_request(
+                ui_port,
+                "POST",
+                "/api/v1/input/stop",
+                Some(b"{}".as_slice()),
+                tetherly_node::api_token_for(ui_port).as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 anyhow::bail!(
                     "input stop failed (HTTP {code}): {}",
@@ -136,14 +148,20 @@ pub(crate) async fn input(action: InputCmd) -> Result<()> {
 
 /// `tetherly input trace` -- dump the node's input-engine decision ring.
 pub(crate) async fn do_input_trace(ui_port: u16, limit: usize, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/input/trace")
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        "/api/v1/input/trace",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        )
+    })?;
     if code != 200 {
         anyhow::bail!(
             "failed to query input trace (HTTP {code}): {}",
@@ -207,10 +225,12 @@ pub(crate) async fn do_input_attach(
     if let Some(yv) = y {
         req["y"] = serde_json::json!(yv);
     }
-    let (code, body) = tetherly_node::loopback_post(
+    let (code, body) = tetherly_node::loopback_request(
         ui_port,
-        "/api/input/tunnel/attach",
-        &serde_json::to_vec(&req)?,
+        "POST",
+        "/api/v1/input/tunnel/attach",
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await?;
     if code != 200 {
@@ -253,10 +273,12 @@ pub(crate) async fn do_input_release(
     if let Some(r) = reason {
         req["reason"] = serde_json::json!(r);
     }
-    let (code, body) = tetherly_node::loopback_post(
+    let (code, body) = tetherly_node::loopback_request(
         ui_port,
-        "/api/input/tunnel/release",
-        &serde_json::to_vec(&req)?,
+        "POST",
+        "/api/v1/input/tunnel/release",
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await?;
     if code != 200 {
@@ -275,7 +297,14 @@ pub(crate) async fn do_input_release(
 }
 
 pub(crate) async fn do_input_status(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/input/tunnel").await?;
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        "/api/v1/input/tunnel",
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query input tunnel status (HTTP {code}): {err_msg}");
@@ -307,9 +336,9 @@ pub(crate) async fn do_input_status(ui_port: u16, json: bool) -> Result<()> {
     if let Some(pol) = v.get("policy").filter(|p| !p.is_null()) {
         let enabled = pol["enabled"].as_bool().unwrap_or(true);
         let inbound = pol["allow_inbound_control"].as_bool().unwrap_or(true);
-        let kb = pol["forward_keyboard"].as_bool().unwrap_or(true);
-        let mouse = pol["forward_mouse"].as_bool().unwrap_or(true);
-        let hotkey = pol["forward_hotkeys"].as_bool().unwrap_or(true);
+        let kb = pol["allow_keyboard"].as_bool().unwrap_or(true);
+        let mouse = pol["allow_mouse"].as_bool().unwrap_or(true);
+        let hotkey = pol["hotkey_release_enabled"].as_bool().unwrap_or(true);
         let timeout = pol["idle_timeout_secs"].as_u64().unwrap_or(300);
         println!("Policy:");
         println!("  Enabled:       {enabled}");
@@ -391,13 +420,13 @@ pub(crate) async fn do_input_policy(
                     req.insert("allow_inbound_control".into(), serde_json::json!(v));
                 }
                 if let Some(v) = kb {
-                    req.insert("forward_keyboard".into(), serde_json::json!(v));
+                    req.insert("allow_keyboard".into(), serde_json::json!(v));
                 }
                 if let Some(v) = m {
-                    req.insert("forward_mouse".into(), serde_json::json!(v));
+                    req.insert("allow_mouse".into(), serde_json::json!(v));
                 }
                 if let Some(v) = hk {
-                    req.insert("forward_hotkeys".into(), serde_json::json!(v));
+                    req.insert("hotkey_release_enabled".into(), serde_json::json!(v));
                 }
                 if let Some(v) = to {
                     req.insert("idle_timeout_secs".into(), serde_json::json!(v));
@@ -432,13 +461,13 @@ pub(crate) async fn do_input_policy(
                     req.insert("allow_inbound_control".into(), serde_json::json!(v));
                 }
                 if let Some(v) = keyboard {
-                    req.insert("forward_keyboard".into(), serde_json::json!(v));
+                    req.insert("allow_keyboard".into(), serde_json::json!(v));
                 }
                 if let Some(v) = mouse {
-                    req.insert("forward_mouse".into(), serde_json::json!(v));
+                    req.insert("allow_mouse".into(), serde_json::json!(v));
                 }
                 if let Some(v) = hotkey {
-                    req.insert("forward_hotkeys".into(), serde_json::json!(v));
+                    req.insert("hotkey_release_enabled".into(), serde_json::json!(v));
                 }
                 if let Some(v) = timeout {
                     req.insert("idle_timeout_secs".into(), serde_json::json!(v));
@@ -467,8 +496,14 @@ pub(crate) async fn do_input_policy(
             }
         }
         let body_bytes = serde_json::to_vec(&req)?;
-        let (code, body) =
-            tetherly_node::loopback_post(ui_port, "/api/input/policy", &body_bytes).await?;
+        let (code, body) = tetherly_node::loopback_request(
+            ui_port,
+            "PATCH",
+            "/api/v1/input/policy",
+            Some(&body_bytes),
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await?;
         if code != 200 {
             let err_msg = String::from_utf8_lossy(&body);
             anyhow::bail!("failed to update input policy (HTTP {code}): {err_msg}");
@@ -480,7 +515,14 @@ pub(crate) async fn do_input_policy(
         println!("Successfully updated virtual peripheral sharing policy.");
         print_input_policy_json(&body)?;
     } else {
-        let (code, body) = tetherly_node::loopback_get(ui_port, "/api/input/policy").await?;
+        let (code, body) = tetherly_node::loopback_request(
+            ui_port,
+            "GET",
+            "/api/v1/input/policy",
+            None,
+            tetherly_node::api_token_for(ui_port).as_deref(),
+        )
+        .await?;
         if code != 200 {
             let err_msg = String::from_utf8_lossy(&body);
             anyhow::bail!("failed to query input policy (HTTP {code}): {err_msg}");
@@ -504,9 +546,9 @@ pub(crate) fn print_input_policy_json(body: &[u8]) -> Result<()> {
 
     let enabled = pol["enabled"].as_bool().unwrap_or(true);
     let allow_inbound = pol["allow_inbound_control"].as_bool().unwrap_or(true);
-    let kb = pol["forward_keyboard"].as_bool().unwrap_or(true);
-    let mouse = pol["forward_mouse"].as_bool().unwrap_or(true);
-    let hotkey = pol["forward_hotkeys"].as_bool().unwrap_or(true);
+    let kb = pol["allow_keyboard"].as_bool().unwrap_or(true);
+    let mouse = pol["allow_mouse"].as_bool().unwrap_or(true);
+    let hotkey = pol["hotkey_release_enabled"].as_bool().unwrap_or(true);
     let timeout = pol["idle_timeout_secs"].as_u64().unwrap_or(300);
     let groups = pol["allowed_groups"]
         .as_array()

@@ -1478,3 +1478,11 @@
 - §164 CI windows 失败为 m3_2_peer_gone_returns_cursor 抖动（5s 上限 vs 2.5s 宽限期），rerun success——非代码问题，§164 关闭。
 - 契约 ×93（power5/media10/ancs8/input12/handoff11/focus9/camera7/mic7/audio8/locate8/display7，以 runtime 结构体为准）+ 测试 +3（41 绿）+ decl ×93。clippy -D warnings 干净。
 - 端点/CLI 未切（cmd_input 曾提前切 8 处已回退）；下批按域逐个：先端点后 CLI。
+
+## §165 第二批（§166 节，2026-11-18）：11 小域端点 + CLI 全量迁移 v1 完成
+
+- 端点 ×49 + model mappers 全套 + CLI 调用点 ×57（power8/media4/ancs6/input8/handoff7/focus7/camera6/mic6/audio6/locate5/display5）。每域垂直切片（mappers→端点→gate→CLI→check），lib/bins 每 步 0 错。
+- 契约修正：`ActiveDisplaySessionDto.mode` String→`DisplayModeDto`（runtime 是结构体；CLI 读 mode["width"]）。TS bindings 再生（2 行 diff），客户端无引用。
+- CLI 陷阱：input 请求键 forward_*→allow_*（deny_unknown_fields 400）；ancs remove-rule 改 DELETE 带 JSON 体；policy 写 POST→PATCH；printing 全部适配平铺 DTO。
+- 门禁：fmt 干净；clippy api+node --all-targets 0 错（修 9 个 model.rs 未用 import）；apiv1 28 / 契约 41 全绿；bindings 无 BLESS 一致。集成测试 + 全量交 CI。
+- 遗留：/legacy/ 别名、SPA legacy 路径、SSE watch、screen 大域 → §167。

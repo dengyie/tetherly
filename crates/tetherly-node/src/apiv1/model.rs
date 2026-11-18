@@ -8,20 +8,32 @@ use crate::Node;
 use std::collections::BTreeMap;
 use tetherly_api::{
     ActionHistory, ActionHistoryEntry, ActionPolicyDto, ActionTriggerReport, ActiveBenchSessionDto,
-    Activity, ActivityCandidate, ActivityHandoff, ActivityMessage, ActivityReply, AudioTierDto,
-    AuditClearReport, AuditEntryDto, AuditTrail, BenchDecision, BenchPolicyDto, BenchReportDto,
-    BenchStatus, CameraTierDto, ChannelTraffic, ClipClearReport, ClipContent, ClipHistory,
-    ClipHistoryEntry, ClipPolicyDto, ClipPollReport, ClipStatus, Device, DisplayTierDto,
-    FileBatchItem, FileBatchReport, FileDecision, FileDecisionReport, FileDispatchItem,
-    FileDispatchReport, FileOffer, FileOffers, HandoffStatus, HeartbeatConfig, Inbox, InboxFile,
-    Input, Layout, LayoutEdge, LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer,
-    LocalActionDto, LocalActions, LocalCaps, MessageDirection, MicTierDto, Outbox,
-    OutboxClearReport, OutboxEntryDto, OutboxResendReport, Pairing, PeerCaps, PeerCounts,
+    ActiveCameraSessionDto, ActiveInputSessionDto, Activity, ActivityCandidate, ActivityHandoff,
+    ActivityMessage, ActivityReply, AncsAllowRequest, AncsClearRulesReport, AncsConnectReport,
+    AncsDisconnectReport, AncsRule, AncsRuleReport, AncsStatus, AudioDecision,
+    AudioPolicyDto, AudioStatus, AudioTierDto,
+    AuditClearReport, AuditEntryDto, AuditTrail, BatteryPolicyDto, BatteryState, BatteryStateDto,
+    BenchDecision, BenchPolicyDto, BenchReportDto, BenchStatus, CameraDecision, CameraPolicyDto,
+    CameraStatus, CameraTierDto, ChannelTraffic, ClipClearReport, ClipContent, ClipHistory,
+    ClipHistoryEntry, ClipPolicyDto, ClipPollReport, ClipStatus, Device, DisplayDecision, DisplayModeDto, DisplayPolicyDto,
+    DisplayTierDto, DisplayVirtualStatus, FileBatchItem, FileBatchReport, FileDecision,
+    FileDecisionReport, FileDispatchItem, FileDispatchReport, FileOffer, FileOffers, FocusPeers,
+    FocusPolicyDto, FocusSetReport, FocusState, FocusStateDto, FocusSyncReport,
+    HandoffDispatchItem, HandoffInbox, HandoffInboxActionReport, HandoffInboxClearReport,
+    HandoffInboxEntryDto, HandoffPolicyDto, HandoffSendMultiReport, HandoffSendReport,
+    HandoffStatus, HeartbeatConfig, Inbox, InboxFile, Input, InputControl, InputPolicyDto,
+    InputStatus, InputTrace, InputTraceEntryDto, InputTunnelDecision, InputTunnelStatus, Layout,
+    LayoutEdge, LayoutPolicy, LinkPath, LinkQuality, LinkQualityPeer, LocalActionDto, LocalActions,
+    LocalCaps, LocatePolicyDto, LocateRingReport,
+    LocateStatus, LocateStopReport, MediaCommandMultiReport, MediaCommandReport,
+    MediaDispatchItem, MediaPolicyDto, MediaState, MediaStateDto, MediaStateUpdateReport,
+    MessageDirection, MicDecision, MicPolicyDto, MicStatus, MicTierDto, Outbox, OutboxClearReport,
+    OutboxEntryDto, OutboxResendReport, Pairing, PeerCaps, PeerCounts, PeerFocusDto,
     PeerProfileDto, PeerProfiles, Ports, ProtocolMessages, RecommendationDto, RecommendationStatus,
     RecommendationSummaryDto, RemoteActionDto, RemoteActions, ResumeMarker, ResumeMarkers,
-    Settings, SettingsGeneral, SettingsTransfer, Snapshot, Storage, StorageCleanReport,
-    StreamingRecommendationDto, System, TrafficTelemetry, Transfer, TransferDirection,
-    TransferPhase, TransferStats, Transfers, API_VERSION,
+    Settings, SettingsGeneral, SettingsTransfer, Snapshot, SpatialPositionDto, Storage,
+    StorageCleanReport, StreamingRecommendationDto, System, TrafficTelemetry, Transfer,
+    TransferDirection, TransferPhase, TransferStats, Transfers, API_VERSION,
 };
 use tetherly_core::{CoreError, DisplayEdge, PathKind, TrustedPeer};
 
@@ -1455,6 +1467,1216 @@ fn recommendation_dto(
             codec: r.mic.codec.as_str().to_string(),
         },
     }
+}
+
+// ---- §165: media control domain ----
+
+fn media_state_dto(f: tetherly_core::MediaStateFrame) -> MediaStateDto {
+    MediaStateDto {
+        player_id: f.player_id,
+        state: f.state.as_str().to_string(),
+        title: f.title,
+        artist: f.artist,
+        album: f.album,
+        position_ms: f.position_ms,
+        duration_ms: f.duration_ms,
+        volume_percent: f.volume_percent,
+        muted: f.muted,
+        can_play: f.can_play,
+        can_pause: f.can_pause,
+        can_go_next: f.can_go_next,
+        can_go_previous: f.can_go_previous,
+        can_seek: f.can_seek,
+        timestamp_ms: f.timestamp_ms,
+    }
+}
+
+/// `GET /media/state?peer=` — local or a peer's last playback snapshot.
+pub fn media_state(node: &Node, peer: Option<&str>) -> Result<MediaState, CoreError> {
+    let r = node.media_get_state(peer)?;
+    Ok(MediaState {
+        peer: r.peer,
+        state: r.state.map(media_state_dto),
+    })
+}
+
+/// `PATCH /media/state` — sparse local playback update; returns the
+/// post-broadcast frame.
+pub fn set_media_state(
+    node: &Node,
+    state: tetherly_core::MediaStateFrame,
+) -> Result<MediaStateUpdateReport, CoreError> {
+    let st = node.media_update_local_state(state)?;
+    Ok(MediaStateUpdateReport {
+        state: media_state_dto(st),
+    })
+}
+
+/// `POST /media/command` single-peer dispatch.
+pub async fn media_command(
+    node: &Node,
+    peer: &str,
+    command: tetherly_core::MediaCommand,
+    target_player: Option<String>,
+) -> Result<MediaCommandReport, CoreError> {
+    let r = node
+        .media_send_command(peer, command, target_player)
+        .await?;
+    Ok(MediaCommandReport {
+        id: r.id,
+        peer: r.peer,
+        peer_alias: r.peer_alias,
+        command: r.command,
+        target_player: r.target_player,
+        timestamp_ms: r.timestamp_ms,
+    })
+}
+
+/// `POST /media/command` selector fan-out.
+pub async fn media_command_multi(
+    node: &Node,
+    selector: &crate::store::TargetSelector,
+    command: tetherly_core::MediaCommand,
+    target_player: Option<String>,
+) -> Result<MediaCommandMultiReport, CoreError> {
+    let r = node
+        .media_send_command_multi(selector, command, target_player)
+        .await?;
+    Ok(MediaCommandMultiReport {
+        selector: r.selector.as_label(),
+        command: r.command,
+        target_count: r.target_count,
+        success_count: r.success_count,
+        skipped_offline_count: r.skipped_offline_count,
+        failed_count: r.failed_count,
+        dispatches: r
+            .dispatches
+            .into_iter()
+            .map(|d| MediaDispatchItem {
+                peer: d.peer,
+                peer_alias: d.peer_alias,
+                command_id: d.command_id,
+                success: d.success,
+                error: d.error,
+            })
+            .collect(),
+    })
+}
+
+fn media_policy_dto(p: crate::store::MediaControlPolicy) -> MediaPolicyDto {
+    MediaPolicyDto {
+        mode: p.mode.as_str().to_string(),
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+        max_volume_limit: p.max_volume_limit,
+        allow_seek: p.allow_seek,
+    }
+}
+
+/// `GET /media/policy` — media control governance policy.
+pub fn media_policy(node: &Node) -> MediaPolicyDto {
+    media_policy_dto(node.media_policy())
+}
+
+/// `PATCH /media/policy` — sparse policy update.
+pub fn set_media_policy(node: &Node, policy: crate::store::MediaControlPolicy) -> MediaPolicyDto {
+    let r = node
+        .set_media_policy(policy)
+        .expect("validated media policy");
+    media_policy_dto(r.policy)
+}
+
+// ---- §165: battery/power domain ----
+
+fn battery_state_dto(f: tetherly_core::BatteryStateFrame) -> BatteryStateDto {
+    BatteryStateDto {
+        battery_level: f.battery_level,
+        is_charging: f.is_charging,
+        power_source: f.power_source.as_str().to_string(),
+        battery_saver: f.battery_saver,
+        health_percent: f.health_percent,
+        timestamp_ms: f.timestamp_ms,
+    }
+}
+
+/// `GET /battery/state?peer=` — local or a peer's last broadcast measurement.
+pub fn battery_state(node: &Node, peer: Option<&str>) -> Result<BatteryState, CoreError> {
+    let r = node.battery_get_state(peer)?;
+    Ok(BatteryState {
+        peer: r.peer,
+        state: r.state.map(battery_state_dto),
+    })
+}
+
+/// `PATCH /battery/state` — sparse local state update; returns the
+/// post-broadcast frame.
+pub async fn set_battery_state(
+    node: &Node,
+    state: tetherly_core::BatteryStateFrame,
+) -> Result<BatteryStateDto, CoreError> {
+    let r = node.battery_update_local_state(state).await?;
+    Ok(battery_state_dto(r.state))
+}
+
+fn battery_policy_dto(p: crate::store::BatteryPolicy) -> BatteryPolicyDto {
+    BatteryPolicyDto {
+        low_battery_threshold: p.low_battery_threshold,
+        critical_battery_threshold: p.critical_battery_threshold,
+        alert_on_low_battery: p.alert_on_low_battery,
+        auto_throttle_on_battery_saver: p.auto_throttle_on_battery_saver,
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+/// `GET /battery/policy` — battery governance policy.
+pub fn battery_policy(node: &Node) -> BatteryPolicyDto {
+    battery_policy_dto(node.battery_policy())
+}
+
+/// `PATCH /battery/policy` — sparse policy update.
+pub fn set_battery_policy(node: &Node, policy: crate::store::BatteryPolicy) -> BatteryPolicyDto {
+    let r = node
+        .set_battery_policy(policy)
+        .expect("validated battery policy");
+    battery_policy_dto(r.policy)
+}
+
+// ---- §165: ANCS (iPhone notification bridge) domain ----
+
+/// Fold a runtime open-rule into the contract `AncsRule`.
+fn ancs_rule(r: crate::runtime::OpenRuleDto) -> AncsRule {
+    AncsRule {
+        app_id: r.app_id,
+        url: r.url,
+    }
+}
+
+pub fn ancs_status(node: &Node) -> AncsStatus {
+    let rep = node.ancs_report();
+    AncsStatus {
+        attached: rep.attached,
+        state: rep.state,
+        peripheral: rep.peripheral,
+        retry_at_ms: rep.retry_at_ms,
+        rules: rep.rules.into_iter().map(ancs_rule).collect(),
+        allowlist: rep.allowlist,
+    }
+}
+
+pub fn ancs_connect(node: &Node) -> Result<AncsConnectReport, CoreError> {
+    let rep = node.ancs_connect_reported()?;
+    Ok(AncsConnectReport {
+        state: rep.state,
+        retry_at_ms: rep.retry_at_ms,
+        message: rep.message,
+    })
+}
+
+pub fn ancs_disconnect(node: &Node) -> AncsDisconnectReport {
+    let rep = node.ancs_disconnect_reported();
+    AncsDisconnectReport {
+        state: rep.state,
+        retry_at_ms: rep.retry_at_ms,
+        message: rep.message,
+    }
+}
+
+pub fn ancs_allow(node: &Node, req: AncsAllowRequest) -> Result<AncsRuleReport, CoreError> {
+    let rep = node.add_open_rule_reported(tetherly_core::OpenRule {
+        app_id: req.app_id,
+        url: req.url,
+    })?;
+    Ok(AncsRuleReport {
+        action: rep.action,
+        rule: rep.rule.map(ancs_rule),
+        total_rules: rep.total_rules,
+        timestamp_ms: rep.timestamp_ms,
+    })
+}
+
+pub fn ancs_remove_rule(node: &Node, app_id: &str) -> AncsRuleReport {
+    let rep = node.remove_open_rule_reported(app_id);
+    AncsRuleReport {
+        action: rep.action,
+        rule: rep.rule.map(ancs_rule),
+        total_rules: rep.total_rules,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn ancs_clear_rules(node: &Node) -> AncsClearRulesReport {
+    let rep = node.clear_open_rules_reported();
+    AncsClearRulesReport {
+        cleared_count: rep.cleared_count,
+        total_rules: rep.total_rules,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+// ---- §165: input tunnel (remote pointer/keyboard) domain ----
+
+/// Fold a runtime active-tunnel session into the contract DTO.
+fn active_input_session_dto(s: crate::runtime::ActiveInputTunnelSession) -> ActiveInputSessionDto {
+    ActiveInputSessionDto {
+        session_id: s.session_id,
+        peer_id: s.peer_id,
+        role: s.role.as_str().to_string(),
+        requested_edge: s.requested_edge.map(|e| e.as_str().to_string()),
+        entry_x: s.entry_x,
+        entry_y: s.entry_y,
+        capture_width: s.capture_width,
+        capture_height: s.capture_height,
+        pre_arm_epoch: s.pre_arm_epoch,
+    }
+}
+
+/// Fold the store policy into the contract DTO (DeviceType -> wire strings).
+fn input_policy_dto(p: crate::store::InputTunnelPolicy) -> InputPolicyDto {
+    InputPolicyDto {
+        enabled: p.enabled,
+        allow_inbound_control: p.allow_inbound_control,
+        allow_keyboard: p.allow_keyboard,
+        allow_mouse: p.allow_mouse,
+        hotkey_release_enabled: p.hotkey_release_enabled,
+        idle_timeout_secs: p.idle_timeout_secs,
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+        keymap: p.keymap,
+        edge: p.edge,
+        wheel_speed: p.wheel_speed,
+    }
+}
+
+pub async fn input_status(node: &Node) -> InputStatus {
+    let rep = node.input_status_report().await;
+    InputStatus {
+        channel_open: rep.channel_open,
+        seat: rep.seat,
+        active_peer: rep.active_peer,
+        applied: rep.applied,
+        dropped: rep.dropped,
+        rx_buttons: rep.rx_buttons,
+        rx_wheel: rep.rx_wheel,
+        rx_keys: rep.rx_keys,
+        tx_buttons: rep.tx_buttons,
+    }
+}
+
+pub async fn input_trace(node: &Node) -> InputTrace {
+    let rep = node.input_trace_report().await;
+    InputTrace {
+        seat: rep.seat,
+        channel_open: rep.channel_open,
+        capacity: rep.capacity,
+        entries: rep
+            .entries
+            .into_iter()
+            .map(|e| InputTraceEntryDto {
+                ts_ms: e.ts_ms,
+                kind: e.kind,
+                detail: e.detail,
+            })
+            .collect(),
+    }
+}
+
+pub async fn input_control_start(
+    node: &Node,
+    peer: Option<String>,
+) -> Result<InputControl, CoreError> {
+    let rep = node.input_start_reported(peer.as_deref()).await?;
+    Ok(InputControl {
+        action: rep.action,
+        seat: rep.seat,
+        channel_open: rep.channel_open,
+        peer: rep.peer,
+        timestamp_ms: rep.timestamp_ms,
+    })
+}
+
+pub async fn input_control_stop(node: &Node) -> Result<InputControl, CoreError> {
+    let rep = node.input_stop_reported().await?;
+    Ok(InputControl {
+        action: rep.action,
+        seat: rep.seat,
+        channel_open: rep.channel_open,
+        peer: rep.peer,
+        timestamp_ms: rep.timestamp_ms,
+    })
+}
+
+pub async fn input_tunnel_status(node: &Node) -> InputTunnelStatus {
+    let rep = node.input_tunnel_status();
+    InputTunnelStatus {
+        active: rep.active,
+        session: rep.session.map(active_input_session_dto),
+        policy: input_policy_dto(rep.policy),
+        accessibility_trusted: rep.accessibility_trusted,
+        capture_active: rep.capture_active,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+fn input_tunnel_decision(rep: crate::runtime::InputTunnelDecisionReport) -> InputTunnelDecision {
+    InputTunnelDecision {
+        action: rep.action,
+        session_id: rep.session_id,
+        peer_id: rep.peer_id,
+        role: rep.role.map(|r| r.as_str().to_string()),
+        message: rep.message,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub async fn input_tunnel_attach(
+    node: &Node,
+    peer: &str,
+    edge: Option<tetherly_core::DisplayEdge>,
+    x: Option<i32>,
+    y: Option<i32>,
+) -> Result<InputTunnelDecision, CoreError> {
+    let rep = node.input_tunnel_attach(peer, edge, x, y).await?;
+    Ok(input_tunnel_decision(rep))
+}
+
+pub async fn input_tunnel_release(
+    node: &Node,
+    reason: Option<&str>,
+) -> Result<InputTunnelDecision, CoreError> {
+    let rep = node.input_tunnel_release(reason).await?;
+    Ok(input_tunnel_decision(rep))
+}
+
+pub fn input_policy(node: &Node) -> InputPolicyDto {
+    input_policy_dto(node.input_policy())
+}
+
+pub fn set_input_policy(
+    node: &Node,
+    policy: crate::store::InputTunnelPolicy,
+) -> Result<InputPolicyDto, CoreError> {
+    let rep = node.set_input_policy(policy)?;
+    Ok(input_policy_dto(rep.policy))
+}
+
+// ---- §165: handoff (URL/resource inbox) domain ----
+
+/// Fold a core inbox entry into the contract DTO. The core `HandoffEntry`
+/// does not carry the send-time `auto_open_requested` flag (it is consumed
+/// on receipt: auto-open leaves the entry `Opened`); surface that as the
+/// observable auto-open signal.
+fn handoff_entry_dto(e: tetherly_core::HandoffEntry) -> HandoffInboxEntryDto {
+    HandoffInboxEntryDto {
+        id: e.id,
+        from_peer: e.sender_id,
+        from_alias: (!e.sender_alias.is_empty()).then_some(e.sender_alias),
+        url: e.url,
+        title: e.title,
+        auto_open_requested: e.status == tetherly_core::HandoffStatus::Opened,
+        received_at_ms: e.received_ms,
+    }
+}
+
+/// Fold the store policy into the contract DTO.
+fn handoff_policy_dto(p: crate::store::HandoffPolicy) -> HandoffPolicyDto {
+    HandoffPolicyDto {
+        action: p.action.as_str().to_string(),
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+        max_inbox_entries: p.max_inbox_entries,
+    }
+}
+
+pub fn handoff_inbox(node: &Node, status: Option<tetherly_core::HandoffStatus>) -> HandoffInbox {
+    let list: Vec<_> = node.handoff_inbox_list(status);
+    let entries: Vec<HandoffInboxEntryDto> = list.into_iter().map(handoff_entry_dto).collect();
+    HandoffInbox {
+        count: entries.len(),
+        entries,
+    }
+}
+
+pub async fn handoff_send(
+    node: &Node,
+    peer: &str,
+    url: &str,
+    title: Option<&str>,
+    auto_open: bool,
+) -> Result<HandoffSendReport, CoreError> {
+    let rep = node.handoff_send(peer, url, title, auto_open).await?;
+    Ok(HandoffSendReport {
+        id: rep.id,
+        peer: rep.peer,
+        peer_alias: rep.peer_alias,
+        url: rep.url,
+        title: rep.title,
+        auto_open_requested: rep.auto_open_requested,
+        timestamp_ms: rep.timestamp_ms,
+    })
+}
+
+pub async fn handoff_send_multi(
+    node: &Node,
+    selector: &crate::store::TargetSelector,
+    url: &str,
+    title: Option<&str>,
+    auto_open: bool,
+) -> Result<HandoffSendMultiReport, CoreError> {
+    let rep = node
+        .handoff_send_multi(selector, url, title, auto_open)
+        .await?;
+    Ok(HandoffSendMultiReport {
+        selector: rep.selector.as_label(),
+        url: rep.url,
+        title: rep.title,
+        target_count: rep.target_count,
+        success_count: rep.success_count,
+        skipped_offline_count: rep.skipped_offline_count,
+        failed_count: rep.failed_count,
+        dispatches: rep
+            .dispatches
+            .into_iter()
+            .map(|d| HandoffDispatchItem {
+                peer: d.peer,
+                peer_alias: d.peer_alias,
+                id: d.handoff_id,
+                success: d.success,
+                error: d.error,
+            })
+            .collect(),
+    })
+}
+
+pub fn handoff_inbox_open(node: &Node, id: &str) -> Result<HandoffInboxActionReport, CoreError> {
+    let entry = node.handoff_inbox_open(id)?;
+    Ok(HandoffInboxActionReport {
+        action: "open".to_string(),
+        id: entry.id,
+        remaining: node.handoff_inbox_list(None).len(),
+        timestamp_ms: entry.opened_ms.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        }),
+    })
+}
+
+pub fn handoff_inbox_dismiss(node: &Node, id: &str) -> Result<HandoffInboxActionReport, CoreError> {
+    let entry = node.handoff_inbox_dismiss(id)?;
+    Ok(HandoffInboxActionReport {
+        action: "dismiss".to_string(),
+        id: entry.id,
+        remaining: node.handoff_inbox_list(None).len(),
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    })
+}
+
+pub fn handoff_inbox_clear(node: &Node) -> Result<HandoffInboxClearReport, CoreError> {
+    let cleared = node.handoff_inbox_clear()?;
+    Ok(HandoffInboxClearReport {
+        cleared_count: cleared,
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    })
+}
+
+pub fn handoff_policy(node: &Node) -> HandoffPolicyDto {
+    handoff_policy_dto(node.handoff_policy())
+}
+
+pub fn set_handoff_policy(
+    node: &Node,
+    policy: crate::store::HandoffPolicy,
+) -> Result<HandoffPolicyDto, CoreError> {
+    let rep = node.set_handoff_policy(policy)?;
+    Ok(handoff_policy_dto(rep.policy))
+}
+
+// ---- §165: focus (DND / quiet hours) domain ----
+
+/// Fold a core frame into the contract DTO (FocusMode -> wire string).
+fn focus_state_dto(f: tetherly_core::FocusStateFrame) -> FocusStateDto {
+    FocusStateDto {
+        enabled: f.enabled,
+        mode: f.mode.as_str().to_string(),
+        expires_ms: f.expires_ms,
+        reason: f.reason,
+        timestamp_ms: f.timestamp_ms,
+    }
+}
+
+/// Fold the store policy into the contract DTO.
+fn focus_policy_dto(p: crate::store::FocusPolicy) -> FocusPolicyDto {
+    FocusPolicyDto {
+        enabled: p.enabled,
+        default_mode: p.default_mode.as_str().to_string(),
+        mirror_inbound_focus: p.mirror_inbound_focus,
+        allow_emergency_breakthrough: p.allow_emergency_breakthrough,
+        quiet_hours_enabled: p.quiet_hours_enabled,
+        quiet_hours_start_minute: p.quiet_hours_start_minute,
+        quiet_hours_end_minute: p.quiet_hours_end_minute,
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+/// One peer's focus report (runtime `PeerFocusReport` folded).
+fn peer_focus_dto(p: crate::runtime::PeerFocusReport) -> PeerFocusDto {
+    PeerFocusDto {
+        peer: p.peer,
+        peer_alias: p.peer_alias,
+        state: focus_state_dto(p.state),
+        active: p.active,
+        remaining_secs: p.remaining_secs,
+    }
+}
+
+pub fn focus_state(node: &Node) -> FocusState {
+    let rep = node.focus_status();
+    FocusState {
+        state: FocusStateDto {
+            enabled: rep.enabled,
+            mode: rep.mode.as_str().to_string(),
+            expires_ms: rep.expires_ms,
+            reason: rep.reason,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        },
+        active: rep.active,
+        remaining_secs: rep.remaining_secs,
+    }
+}
+
+pub async fn set_focus_state(
+    node: &Node,
+    enabled: bool,
+    mode: Option<tetherly_core::FocusMode>,
+    duration_mins: Option<u32>,
+    reason: Option<String>,
+    broadcast: bool,
+) -> Result<FocusSetReport, CoreError> {
+    let rep = node
+        .set_focus_state(enabled, mode, duration_mins, reason, broadcast)
+        .await?;
+    Ok(FocusSetReport {
+        enabled: rep.enabled,
+        mode: rep.mode.as_str().to_string(),
+        active: rep.active,
+        expires_ms: rep.expires_ms,
+        reason: rep.reason,
+        broadcast_count: rep.broadcast_count,
+        message: rep.message,
+    })
+}
+
+pub fn focus_peers(node: &Node) -> FocusPeers {
+    let rep = node.peer_focus_states();
+    FocusPeers {
+        count: rep.count,
+        peers: rep.peers.into_iter().map(peer_focus_dto).collect(),
+    }
+}
+
+pub async fn focus_sync(node: &Node) -> Result<FocusSyncReport, CoreError> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let sent = node.request_peers_focus_sync().await?;
+    Ok(FocusSyncReport {
+        requested: sent,
+        responded: 0,
+        peers: Vec::new(),
+        timestamp_ms: now_ms,
+    })
+}
+
+pub fn focus_policy(node: &Node) -> FocusPolicyDto {
+    focus_policy_dto(node.focus_policy())
+}
+
+pub fn set_focus_policy(
+    node: &Node,
+    policy: crate::store::FocusPolicy,
+) -> Result<FocusPolicyDto, CoreError> {
+    let rep = node.set_focus_policy(policy)?;
+    Ok(focus_policy_dto(rep.policy))
+}
+
+// ---- §165: camera (virtual camera streaming) domain ----
+
+/// Fold a runtime session into the contract DTO (resolution flattened).
+fn active_camera_session_dto(s: crate::runtime::ActiveCameraSession) -> ActiveCameraSessionDto {
+    ActiveCameraSessionDto {
+        session_id: s.session_id,
+        peer_id: s.peer_id,
+        role: s.role.as_str().to_string(),
+        lens_id: s.lens_id,
+        width: s.resolution.width,
+        height: s.resolution.height,
+        target_fps: s.target_fps,
+        current_fps: s.current_fps,
+        codec: s.codec.as_str().to_string(),
+        flashlight_on: s.flashlight_on,
+        zoom_ratio: s.zoom_ratio,
+        frames_sent: s.frames_sent,
+        frames_received: s.frames_received,
+        bytes_transferred: s.bytes_transferred,
+        started_at_ms: s.started_at_ms,
+        last_activity_ms: s.last_activity_ms,
+    }
+}
+
+/// Fold the store policy into the contract DTO.
+fn camera_policy_dto(p: crate::store::CameraPolicy) -> CameraPolicyDto {
+    CameraPolicyDto {
+        enabled: p.enabled,
+        allow_inbound_stream: p.allow_inbound_stream,
+        allow_remote_capture: p.allow_remote_capture,
+        max_resolution_width: p.max_resolution_width,
+        max_resolution_height: p.max_resolution_height,
+        max_fps: p.max_fps,
+        enforce_privacy_shutter_indicator: p.enforce_privacy_shutter_indicator,
+        idle_timeout_secs: p.idle_timeout_secs,
+        allowed_groups: p.allowed_groups,
+        allowed_tags: p.allowed_tags,
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+pub fn camera_status(node: &Node) -> CameraStatus {
+    let rep = node.camera_status();
+    CameraStatus {
+        active: rep.active,
+        session: rep.session.map(active_camera_session_dto),
+        policy: camera_policy_dto(rep.policy),
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+fn camera_decision(rep: crate::runtime::CameraDecisionReport) -> CameraDecision {
+    CameraDecision {
+        action: rep.action,
+        session_id: rep.session_id,
+        peer_id: rep.peer_id,
+        role: rep.role.map(|r| r.as_str().to_string()),
+        message: rep.message,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub async fn camera_attach(
+    node: &Node,
+    peer: &str,
+    lens_id: Option<&str>,
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<u32>,
+    codec: Option<tetherly_core::CameraCodec>,
+    flashlight: Option<bool>,
+    zoom: Option<f32>,
+) -> Result<CameraDecision, CoreError> {
+    let rep = node
+        .camera_attach(peer, lens_id, width, height, fps, codec, flashlight, zoom)
+        .await?;
+    Ok(camera_decision(rep))
+}
+
+pub async fn camera_detach(node: &Node, reason: Option<&str>) -> Result<CameraDecision, CoreError> {
+    let rep = node.camera_detach(reason).await?;
+    Ok(camera_decision(rep))
+}
+
+pub fn camera_policy(node: &Node) -> CameraPolicyDto {
+    camera_policy_dto(node.camera_policy())
+}
+
+pub fn set_camera_policy(
+    node: &Node,
+    policy: crate::store::CameraPolicy,
+) -> Result<CameraPolicyDto, CoreError> {
+    let rep = node.set_camera_policy(policy)?;
+    Ok(camera_policy_dto(rep.policy))
+}
+
+// ---- §165b: mic domain ----
+
+fn active_mic_session_dto(
+    s: &crate::runtime::ActiveMicrophoneSession,
+) -> tetherly_api::ActiveMicSessionDto {
+    tetherly_api::ActiveMicSessionDto {
+        session_id: s.session_id.clone(),
+        peer_id: s.peer_id.clone(),
+        role: s.role.as_str().to_string(),
+        mode: s.mode.as_str().to_string(),
+        mic_id: s.mic_id.clone(),
+        codec: s.codec.as_str().to_string(),
+        sample_rate: s.sample_rate,
+        channels: s.channels,
+        gain: s.gain,
+        muted: s.muted,
+        noise_suppression: s.noise_suppression,
+        echo_cancellation: s.echo_cancellation,
+        auto_gain: s.auto_gain,
+        privacy_indicator_active: s.privacy_indicator_active,
+        frames_sent: s.frames_sent,
+        frames_received: s.frames_received,
+        bytes_transferred: s.bytes_transferred,
+        started_at_ms: s.started_at_ms,
+        last_activity_ms: s.last_activity_ms,
+    }
+}
+
+fn mic_policy_dto(p: &crate::store::MicrophonePolicy) -> MicPolicyDto {
+    MicPolicyDto {
+        enabled: p.enabled,
+        allow_inbound_stream: p.allow_inbound_stream,
+        allow_remote_capture: p.allow_remote_capture,
+        allow_intercom: p.allow_intercom,
+        max_sample_rate: p.max_sample_rate,
+        max_session_duration_secs: p.max_session_duration_secs,
+        enforce_privacy_indicator: p.enforce_privacy_indicator,
+        default_muted: p.default_muted,
+        idle_timeout_secs: p.idle_timeout_secs,
+        allowed_groups: p.allowed_groups.clone(),
+        allowed_tags: p.allowed_tags.clone(),
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+pub fn mic_status(node: &Node) -> MicStatus {
+    let rep = node.microphone_status();
+    MicStatus {
+        active: rep.active,
+        session: rep.session.as_ref().map(active_mic_session_dto),
+        policy: mic_policy_dto(&rep.policy),
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn mic_decision(rep: crate::runtime::MicrophoneDecisionReport) -> MicDecision {
+    MicDecision {
+        action: rep.action,
+        session_id: rep.session_id,
+        peer_id: rep.peer_id,
+        role: rep.role.map(|r| r.as_str().to_string()),
+        message: rep.message,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn mic_policy(node: &Node) -> MicPolicyDto {
+    mic_policy_dto(&node.microphone_policy())
+}
+
+pub async fn mic_attach(
+    node: &Node,
+    peer_query: &str,
+    mic_id: Option<&str>,
+    mode: tetherly_core::MicMode,
+    codec: Option<tetherly_core::MicCodec>,
+    sample_rate: Option<u32>,
+    channels: Option<u32>,
+    gain: Option<f32>,
+    muted: Option<bool>,
+    noise_suppression: Option<bool>,
+    echo_cancellation: Option<bool>,
+    auto_gain: Option<bool>,
+) -> Result<MicDecision, CoreError> {
+    node.mic_attach(
+        peer_query,
+        mic_id,
+        mode,
+        codec,
+        sample_rate,
+        channels,
+        gain,
+        muted,
+        noise_suppression,
+        echo_cancellation,
+        auto_gain,
+    )
+    .await
+    .map(mic_decision)
+}
+
+pub async fn mic_detach(node: &Node, reason: Option<&str>) -> Result<MicDecision, CoreError> {
+    node.mic_detach(reason).await.map(mic_decision)
+}
+
+pub fn set_mic_policy(
+    node: &Node,
+    policy: crate::store::MicrophonePolicy,
+) -> Result<MicPolicyDto, CoreError> {
+    let rep = node.set_microphone_policy(policy)?;
+    Ok(mic_policy_dto(&rep.policy))
+}
+
+// ---- §165b: audio routing domain ----
+
+fn spatial_position_dto(p: &tetherly_core::AudioSpatialPosition) -> SpatialPositionDto {
+    SpatialPositionDto {
+        x: p.x,
+        y: p.y,
+        z: p.z,
+    }
+}
+
+fn active_audio_session_dto(
+    s: &crate::runtime::ActiveAudioRoutingSession,
+) -> tetherly_api::ActiveAudioSessionDto {
+    tetherly_api::ActiveAudioSessionDto {
+        session_id: s.session_id.clone(),
+        peer_id: s.peer_id.clone(),
+        role: s.role.as_str().to_string(),
+        layout: s.layout.as_str().to_string(),
+        sample_rate: s.sample_rate,
+        channels: s.channels,
+        format: s.format.as_str().to_string(),
+        codec: s.codec.as_str().to_string(),
+        spatial_pos: s.spatial_pos.as_ref().map(spatial_position_dto),
+        volume_gain: s.volume_gain,
+        chunks_sent: s.chunks_sent,
+        chunks_received: s.chunks_received,
+        bytes_transferred: s.bytes_transferred,
+        started_at_ms: s.started_at_ms,
+        last_activity_ms: s.last_activity_ms,
+    }
+}
+
+fn audio_policy_dto(p: &crate::store::AudioRoutingPolicy) -> AudioPolicyDto {
+    AudioPolicyDto {
+        enabled: p.enabled,
+        allow_inbound_sink: p.allow_inbound_sink,
+        allow_outbound_routing: p.allow_outbound_routing,
+        max_volume_limit: p.max_volume_limit,
+        allow_spatial_rendering: p.allow_spatial_rendering,
+        idle_timeout_secs: p.idle_timeout_secs,
+        allowed_groups: p.allowed_groups.clone(),
+        allowed_tags: p.allowed_tags.clone(),
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+pub fn audio_status(node: &Node) -> AudioStatus {
+    let rep = node.audio_routing_status();
+    AudioStatus {
+        active: rep.active,
+        session: rep.session.as_ref().map(active_audio_session_dto),
+        policy: audio_policy_dto(&rep.policy),
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn audio_decision(rep: crate::runtime::AudioRoutingDecisionReport) -> AudioDecision {
+    AudioDecision {
+        action: rep.action,
+        session_id: rep.session_id,
+        peer_id: rep.peer_id,
+        role: rep.role.map(|r| r.as_str().to_string()),
+        message: rep.message,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn audio_policy(node: &Node) -> AudioPolicyDto {
+    audio_policy_dto(&node.audio_routing_policy())
+}
+
+pub fn set_audio_policy(
+    node: &Node,
+    policy: crate::store::AudioRoutingPolicy,
+) -> Result<AudioPolicyDto, CoreError> {
+    let rep = node.set_audio_routing_policy(policy)?;
+    Ok(audio_policy_dto(&rep.policy))
+}
+
+pub async fn audio_attach(
+    node: &Node,
+    peer_query: &str,
+    layout: Option<tetherly_core::AudioChannelLayout>,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
+    spatial_x: Option<f32>,
+    spatial_y: Option<f32>,
+    spatial_z: Option<f32>,
+    volume_gain: Option<f32>,
+) -> Result<AudioDecision, CoreError> {
+    node.audio_routing_attach(
+        peer_query,
+        layout,
+        sample_rate,
+        channels,
+        spatial_x,
+        spatial_y,
+        spatial_z,
+        volume_gain,
+    )
+    .await
+    .map(audio_decision)
+}
+
+pub async fn audio_detach(node: &Node, reason: Option<&str>) -> Result<AudioDecision, CoreError> {
+    node.audio_routing_detach(reason).await.map(audio_decision)
+}
+
+// ---- §165b: locate domain ----
+
+fn active_locate_ring_dto(
+    r: &crate::runtime::ActiveLocateRing,
+) -> tetherly_api::ActiveLocateRingDto {
+    tetherly_api::ActiveLocateRingDto {
+        request_id: r.request_id.clone(),
+        initiator_peer: r.initiator_peer.clone(),
+        initiator_alias: r.initiator_alias.clone(),
+        duration_secs: r.duration_secs,
+        pattern: r.pattern.as_str().to_string(),
+        override_silent: r.override_silent,
+        message: r.message.clone(),
+        started_at_ms: r.started_at_ms,
+        expires_at_ms: r.expires_at_ms,
+    }
+}
+
+fn locate_policy_dto(p: &crate::store::LocatorPolicy) -> LocatePolicyDto {
+    LocatePolicyDto {
+        enabled: p.enabled,
+        allow_override_silent: p.allow_override_silent,
+        max_duration_secs: p.max_duration_secs,
+        allowed_groups: p.allowed_groups.clone(),
+        allowed_tags: p.allowed_tags.clone(),
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+pub fn locate_status(node: &Node) -> LocateStatus {
+    let rep = node.locate_status();
+    LocateStatus {
+        is_ringing: rep.is_ringing,
+        active_ring: rep.active_ring.as_ref().map(active_locate_ring_dto),
+        policy: locate_policy_dto(&rep.policy),
+        message: rep.message,
+    }
+}
+
+pub fn locate_ring(rep: crate::runtime::LocateRingReport) -> LocateRingReport {
+    LocateRingReport {
+        request_id: rep.request_id,
+        target_peer: rep.target_peer,
+        duration_secs: rep.duration_secs,
+        pattern: rep.pattern.as_str().to_string(),
+        override_silent: rep.override_silent,
+        message: rep.message,
+    }
+}
+
+pub fn locate_stop(rep: crate::runtime::LocateStopReport) -> LocateStopReport {
+    LocateStopReport {
+        request_id: rep.request_id,
+        target_peer: rep.target_peer,
+        reason: rep.reason,
+        message: rep.message,
+    }
+}
+
+pub fn locate_policy(node: &Node) -> LocatePolicyDto {
+    locate_policy_dto(&node.locator_policy())
+}
+
+pub fn set_locate_policy(
+    node: &Node,
+    policy: crate::store::LocatorPolicy,
+) -> Result<LocatePolicyDto, CoreError> {
+    let rep = node.set_locator_policy(policy)?;
+    Ok(locate_policy_dto(&rep.policy))
+}
+
+pub async fn locate_ring_request(
+    node: &Node,
+    peer_target: &str,
+    duration_secs: Option<u32>,
+    pattern: Option<tetherly_core::LocatePattern>,
+    override_silent: Option<bool>,
+    message: Option<String>,
+) -> Result<LocateRingReport, CoreError> {
+    node.locate_ring(
+        peer_target,
+        duration_secs,
+        pattern,
+        override_silent,
+        message,
+    )
+    .await
+    .map(locate_ring)
+}
+
+pub async fn locate_stop_request(
+    node: &Node,
+    peer_target: Option<&str>,
+    request_id: Option<String>,
+    reason: Option<String>,
+) -> Result<LocateStopReport, CoreError> {
+    node.locate_stop(peer_target, request_id, reason)
+        .await
+        .map(locate_stop)
+}
+
+// ---- §165b: virtual display domain ----
+
+fn display_mode_dto(m: &tetherly_core::VirtualDisplayMode) -> DisplayModeDto {
+    DisplayModeDto {
+        width: m.width,
+        height: m.height,
+        refresh_rate: m.refresh_rate,
+        scale_factor: m.scale_factor,
+        pixel_format: match m.pixel_format {
+            tetherly_core::VirtualDisplayPixelFormat::Bgra8 => "bgra8".to_string(),
+            tetherly_core::VirtualDisplayPixelFormat::Rgba8 => "rgba8".to_string(),
+        },
+    }
+}
+
+fn active_display_session_dto(
+    s: &crate::runtime::ActiveVirtualDisplaySession,
+) -> tetherly_api::ActiveDisplaySessionDto {
+    tetherly_api::ActiveDisplaySessionDto {
+        session_id: s.session_id.clone(),
+        peer_id: s.peer_id.clone(),
+        role: s.role.as_str().to_string(),
+        assigned_edge: s.assigned_edge.to_string(),
+        mode: display_mode_dto(&s.mode),
+        codec: s.codec.as_str().to_string(),
+        target_fps: s.target_fps,
+        current_fps: s.current_fps,
+        rtt_us: s.rtt_us,
+        dropped_frames: s.dropped_frames,
+        started_at_ms: s.started_at_ms,
+        last_activity_ms: s.last_activity_ms,
+    }
+}
+
+fn display_policy_dto(p: &crate::store::VirtualDisplayPolicy) -> DisplayPolicyDto {
+    DisplayPolicyDto {
+        enabled: p.enabled,
+        allow_hosting: p.allow_hosting,
+        allow_remote_extend: p.allow_remote_extend,
+        max_resolution_width: p.max_resolution_width,
+        max_resolution_height: p.max_resolution_height,
+        max_fps: p.max_fps,
+        idle_timeout_secs: p.idle_timeout_secs,
+        allowed_groups: p.allowed_groups.clone(),
+        allowed_tags: p.allowed_tags.clone(),
+        allowed_types: p
+            .allowed_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect(),
+    }
+}
+
+pub fn display_status(node: &Node) -> DisplayVirtualStatus {
+    let rep = node.virtual_display_status();
+    DisplayVirtualStatus {
+        active: rep.active,
+        session: rep.session.as_ref().map(active_display_session_dto),
+        policy: display_policy_dto(&rep.policy),
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn display_decision(rep: crate::runtime::VirtualDisplayDecisionReport) -> DisplayDecision {
+    DisplayDecision {
+        action: rep.action,
+        session_id: rep.session_id,
+        peer_id: rep.peer_id,
+        role: rep.role.map(|r| r.as_str().to_string()),
+        message: rep.message,
+        timestamp_ms: rep.timestamp_ms,
+    }
+}
+
+pub fn display_policy(node: &Node) -> DisplayPolicyDto {
+    display_policy_dto(&node.virtual_display_policy())
+}
+
+pub fn set_display_policy(
+    node: &Node,
+    policy: crate::store::VirtualDisplayPolicy,
+) -> Result<DisplayPolicyDto, CoreError> {
+    let rep = node.set_virtual_display_policy(policy)?;
+    Ok(display_policy_dto(&rep.policy))
+}
+
+pub async fn display_attach(
+    node: &Node,
+    peer_query: &str,
+    edge: Option<tetherly_core::DisplayEdge>,
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<u32>,
+) -> Result<DisplayDecision, CoreError> {
+    node.virtual_display_attach(peer_query, edge, width, height, fps)
+        .await
+        .map(display_decision)
+}
+
+pub async fn display_detach(
+    node: &Node,
+    reason: Option<&str>,
+) -> Result<DisplayDecision, CoreError> {
+    node.virtual_display_detach(reason)
+        .await
+        .map(display_decision)
 }
 
 #[cfg(test)]

@@ -129,7 +129,15 @@ pub(crate) async fn display(action: DisplayCmd) -> Result<()> {
 }
 
 pub(crate) async fn do_virtual_display_status(ui_port: u16, json: bool) -> Result<()> {
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/display/virtual").await?;
+    let path = "/api/v1/display/virtual".to_string();
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query virtual display status (HTTP {code}): {err_msg}");
@@ -206,10 +214,13 @@ pub(crate) async fn do_virtual_display_attach(
     if let Some(f) = fps {
         req["fps"] = serde_json::json!(f);
     }
-    let (code, body) = tetherly_node::loopback_post(
+    let path = "/api/v1/display/virtual/attach".to_string();
+    let (code, body) = tetherly_node::loopback_request(
         ui_port,
-        "/api/display/virtual/attach",
-        &serde_json::to_vec(&req)?,
+        "POST",
+        &path,
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await?;
     if code != 200 {
@@ -253,10 +264,13 @@ pub(crate) async fn do_virtual_display_detach(
     if let Some(r) = reason {
         req["reason"] = serde_json::json!(r);
     }
-    let (code, body) = tetherly_node::loopback_post(
+    let path = "/api/v1/display/virtual/detach".to_string();
+    let (code, body) = tetherly_node::loopback_request(
         ui_port,
-        "/api/display/virtual/detach",
-        &serde_json::to_vec(&req)?,
+        "POST",
+        &path,
+        Some(&serde_json::to_vec(&req)?),
+        tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await?;
     if code != 200 {
@@ -396,10 +410,13 @@ pub(crate) async fn do_virtual_display_policy(
                 }
             }
         }
-        let (code, body) = tetherly_node::loopback_post(
+        let path = "/api/v1/display/virtual/policy".to_string();
+        let (code, body) = tetherly_node::loopback_request(
             ui_port,
-            "/api/display/virtual/policy",
-            &serde_json::to_vec(&req)?,
+            "PATCH",
+            &path,
+            Some(&serde_json::to_vec(&req)?),
+            tetherly_node::api_token_for(ui_port).as_deref(),
         )
         .await?;
         if code != 200 {
@@ -412,7 +429,15 @@ pub(crate) async fn do_virtual_display_policy(
         }
     }
 
-    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/display/virtual/policy").await?;
+    let path = "/api/v1/display/virtual/policy".to_string();
+    let (code, body) = tetherly_node::loopback_request(
+        ui_port,
+        "GET",
+        &path,
+        None,
+        tetherly_node::api_token_for(ui_port).as_deref(),
+    )
+    .await?;
     if code != 200 {
         let err_msg = String::from_utf8_lossy(&body);
         anyhow::bail!("failed to query virtual display policy (HTTP {code}): {err_msg}");
