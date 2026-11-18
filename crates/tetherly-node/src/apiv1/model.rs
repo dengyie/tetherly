@@ -2202,6 +2202,7 @@ fn camera_decision(rep: crate::runtime::CameraDecisionReport) -> CameraDecision 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn camera_attach(
     node: &Node,
     peer: &str,
@@ -2310,6 +2311,7 @@ pub fn mic_policy(node: &Node) -> MicPolicyDto {
     mic_policy_dto(&node.microphone_policy())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn mic_attach(
     node: &Node,
     peer_query: &str,
@@ -2436,6 +2438,7 @@ pub fn set_audio_policy(
     Ok(audio_policy_dto(&rep.policy))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn audio_attach(
     node: &Node,
     peer_query: &str,

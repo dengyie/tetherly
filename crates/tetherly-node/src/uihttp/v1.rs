@@ -379,7 +379,6 @@ pub(super) async fn route(
             node.clear_pin();
             Ok(no_content())
         }
-        ("GET", "/api/v1/input") => Ok(json(200, &crate::apiv1::model::input(node).await)),
         ("GET", "/api/v1/transfers") => Ok(json(200, &crate::apiv1::model::transfers(node))),
         ("GET", "/api/v1/inbox") => {
             // §162a: optional `search`/`limit` mirror the legacy inbox list
