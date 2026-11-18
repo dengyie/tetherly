@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Crates](https://img.shields.io/badge/Crates-6%20Modular%20Crates-purple.svg?style=flat-square)](Cargo.toml)
 [![Security](https://img.shields.io/badge/Crypto-SPAKE2%20%7C%20Noise%20IK-success.svg?style=flat-square)](crates/tetherly-crypto)
-[![Tests](https://img.shields.io/badge/tests-773%20passed-brightgreen.svg?style=flat-square)]()
+[![Tests](https://img.shields.io/badge/tests-800+%20passed-brightgreen.svg?style=flat-square)]()
 
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [核心特性](#核心特性) · [系统架构](#系统架构全景) · [Crate 拓扑](#工作区-crate-生态拓扑) · [快速上手](#快速上手) · [屏幕串流](#自适应屏幕串流流水线) · [安全模型](#密码学与安全架构)
 
@@ -204,16 +204,18 @@ FEC 前向纠错与平滑发包看门狗 (消减突发抖动与排队膨胀)
 
 正在运行的守护进程在 `http://127.0.0.1:45716` 提供纯粹的 JSON API 与 SSE 数据流：
 
+守护进程在 `http://127.0.0.1:45716` 提供版本化的 v1 契约接口（`/api/v1/*`，ADR-139）——Read/Write/Admin 三级 token 门禁，TS 类型由共享契约 crate（`tetherly-api`）生成。核心端点：
+
 | 接口端点 | 请求方法 | 功能说明 |
 | :--- | :--- | :--- |
-| `/api/status` | `GET` | 查询节点身份、开机时间、当前活动对端与连接健康度。 |
-| `/api/pin` | `POST` | 申请生成或吊销当前 3 分钟有效期的临时配对 PIN。 |
-| `/api/peers` | `GET` | 列出已发现和已连接的对端设备、往返延迟 (RTT) 与路由表。 |
-| `/api/clip` | `GET`/`POST`| 读取剪贴板环形历史记录或主动同步一条剪贴板内容。 |
-| `/api/files/offer` | `POST` | 向指定对端发起一条大文件断点续传邀请。 |
-| `/api/screen/start` | `POST` | 申请对端授权并拉起低延迟屏幕串流服务。 |
-| `/api/ancs/status` | `GET` | 检查 Apple Notification Center 蓝牙外设的连接状态。 |
-| `/api/events` | `GET` | 订阅全量拓扑变更、验证码提取与剪贴板事件的 SSE 长连接。 |
+| `/api/v1/system` | `GET` | 查询节点身份、开机时间、当前活动对端与连接健康度。 |
+| `/api/v1/pairing/pin` | `POST` | 申请生成或吊销当前 3 分钟有效期的临时配对 PIN。 |
+| `/api/v1/devices` | `GET` | 列出已配对设备、往返延迟 (RTT)、标签与设备档案。 |
+| `/api/v1/clip` | `GET`/`POST` | 读取剪贴板环形历史记录或主动同步一条剪贴板内容。 |
+| `/api/v1/transfers` | `POST` | 向指定对端发起一条大文件断点续传邀请。 |
+| `/api/v1/screen/start` | `POST` | 申请对端授权并拉起低延迟屏幕串流服务。 |
+| `/api/v1/ancs` | `GET` | 检查 Apple Notification Center 蓝牙外设的连接状态。 |
+| `/api/v1/events` | `GET` | 订阅全量拓扑变更、验证码提取与剪贴板事件的 SSE 长连接（快照重放 + `Last-Event-ID` 续传）。 |
 
 ---
 

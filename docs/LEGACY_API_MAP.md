@@ -4,7 +4,7 @@
 > 运行时命中按调用方分类见 `GET /api/v1/diagnostics` 的 `legacy_routes`（§129）。
 > Android 无 HTTP 层（JNI 直连），不受本表约束；旧控制台 `/legacy/` 整体随 M5 收敛删除。
 
-**静态调用点：239 个路由 / ~355 处调用。已迁 v1：§142–§146 六命令 + §149-§154 peers 域 + §156a profiles/caps 域 + §156b topology/routes/net 域（累计 30+ 旧路由）。**
+**M5 收敛完成（§169，2026-11-19）：legacy `/api/*` 路由面已整体删除（uihttp.rs 429 arms + 27 个 api_*.rs 模块 + requires_token 特权表），v0.2.63 起 daemon 只服务 `/`、`/assets/*` 与 `/api/v1/*`。下文批次表保留作迁移史存档与 v1 语义差异对照；`hub.legacy` 命中计数与 diagnostics 的 `legacy_routes` 观测字段保留至外部旧版客户端流量归零。**
 
 ## 已迁移（v1 对应端点）
 

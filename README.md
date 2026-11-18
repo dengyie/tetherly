@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Crates](https://img.shields.io/badge/Crates-6%20Modular%20Crates-purple.svg?style=flat-square)](Cargo.toml)
 [![Security](https://img.shields.io/badge/Crypto-SPAKE2%20%7C%20Noise%20IK-success.svg?style=flat-square)](crates/tetherly-crypto)
-[![Tests](https://img.shields.io/badge/tests-773%20passed-brightgreen.svg?style=flat-square)]()
+[![Tests](https://img.shields.io/badge/tests-800+%20passed-brightgreen.svg?style=flat-square)]()
 
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [Core Features](#core-features) · [Architecture](#system-architecture) · [Crate Ecosystem](#workspace-crate-topology) · [Quick Start](#quick-start) · [Screen Streaming](#adaptive-screen-streaming-pipeline) · [Security Model](#cryptographic-security-architecture)
 
@@ -202,16 +202,18 @@ Noise IK Encrypted Socket (Port 45717)
 
 Running daemons expose a rich set of programmatic endpoints on `http://127.0.0.1:45716`:
 
+Running daemons expose the versioned v1 contract (`/api/v1/*`, ADR-139) on `http://127.0.0.1:45716` — Read/Write/Admin token tiers, TS types generated from the shared contract crate (`tetherly-api`). Highlights:
+
 | Endpoint | Method | Functional Description |
 | :--- | :--- | :--- |
-| `/api/status` | `GET` | Node identity, uptime, active peers, and transport health. |
-| `/api/pin` | `POST` | Generate or revoke a 3-minute ephemeral pairing PIN. |
-| `/api/peers` | `GET` | List connected peers, link latency (RTT), and route states. |
-| `/api/clip` | `GET`/`POST`| Inspect clipboard history ring buffer or synchronize content. |
-| `/api/files/offer` | `POST` | Initiate an outbound streaming file transfer offer. |
-| `/api/screen/start` | `POST` | Request peer permission and begin low-latency screen streaming. |
-| `/api/ancs/status` | `GET` | Query Apple Notification Center BLE peripheral connection. |
-| `/api/events` | `GET` | Server-Sent Events (SSE) feed of real-time topology updates. |
+| `/api/v1/system` | `GET` | Node identity, uptime, active peers, and transport health. |
+| `/api/v1/pairing/pin` | `POST` | Rotate or revoke a 3-minute ephemeral pairing PIN. |
+| `/api/v1/devices` | `GET` | List paired peers, link latency (RTT), tags, and profiles. |
+| `/api/v1/clip` | `GET`/`POST` | Inspect clipboard history ring buffer or synchronize content. |
+| `/api/v1/transfers` | `POST` | Initiate an outbound streaming file transfer offer. |
+| `/api/v1/screen/start` | `POST` | Request peer permission and begin low-latency screen streaming. |
+| `/api/v1/ancs` | `GET` | Query Apple Notification Center BLE peripheral connection. |
+| `/api/v1/events` | `GET` | Server-Sent Events (SSE) feed with snapshot replay and `Last-Event-ID` resume. |
 
 ---
 
