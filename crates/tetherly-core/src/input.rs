@@ -892,6 +892,13 @@ impl InputServer {
         self.remote_entered_at = Some(std::time::Instant::now());
         self.remote_interior = false;
         self.buttons_down = 0;
+        // §171-D: mirror the emitted center into the engine's remote
+        // coordinate. The engine tracks `rem_x/rem_y` as the source of
+        // truth for `force_local` / boundary remaps; leaving them at the
+        // pre-promotion values made the first post-takeover local-return
+        // compute from a cursor position the viewer never showed.
+        self.rem_x = SCREEN_UNITS / 2;
+        self.rem_y = SCREEN_UNITS / 2;
         self.pending.clear();
         self.push(InputKind::Enter);
         self.push(InputKind::Move {
@@ -1253,6 +1260,12 @@ impl InputServer {
                 let may_cross = if into_edge {
                     self.tb_band_gate(y <= self.tb_band_px as i32, dy)
                 } else {
+                    // §171-B: outgoing motion voids any in-flight
+                    // slow-dwell — "quiet" must mean quiet while parked
+                    // at the edge, not quiet since some earlier visit.
+                    // (The gate itself only clears on fast pushes and
+                    // out-of-band motion; it never sees this path.)
+                    self.tb_band_quiet_since = None;
                     false
                 };
                 if may_cross {
@@ -1297,6 +1310,9 @@ impl InputServer {
                     let depth = self.height.saturating_sub(y);
                     self.tb_band_gate(depth <= self.tb_band_px as i32, dy)
                 } else {
+                    // §171-B: outgoing motion voids any in-flight
+                    // slow-dwell (twin of the Top-edge fix above).
+                    self.tb_band_quiet_since = None;
                     false
                 };
                 if may_cross {
@@ -2561,6 +2577,25 @@ mod tests {
         srv.on_remote_leave();
         assert_eq!(srv.seat(), CursorSeat::Local);
 
+        // §171-B: outgoing motion voids an in-flight slow dwell. Arm the
+        // dwell, pull away from the edge (dy > 0), come back after the dwell
+        // budget — the stale quiet timer must NOT let the visit cross.
+        let mut away = InputServer::new(1920, 1080);
+        away.set_edge(ScreenEdge::Top);
+        away.set_tb_redundancy_band(24, 120, 6);
+        assert_eq!(away.local_move_delta(960, 3, 0, -1), None, "arm the dwell");
+        assert_eq!(
+            away.local_move_delta(960, 40, 0, 4),
+            None,
+            "outgoing glide must not cross"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        assert_eq!(
+            away.local_move_delta(960, 2, 0, -1),
+            None,
+            "stale dwell from the earlier visit must not survive the away trip"
+        );
+
         // Fast push: crosses on the first event without any dwell.
         let mut fast = InputServer::new(1920, 1080);
         fast.set_edge(ScreenEdge::Top);
@@ -2659,6 +2694,27 @@ mod tests {
             None,
             "changed dwell config must re-arm the quiet timer"
         );
+    }
+
+    #[test]
+    fn force_remote_center_mirrors_center_into_remote_coords() {
+        // §171-D: the ADR-138 session promotion emits [Enter, Move{center}]
+        // but must also mirror SCREEN_UNITS/2 into rem_x/rem_y — force_local
+        // maps the park position back from denorm_y(rem_y), so a promotion
+        // that leaves the pre-session rem in place docks the cursor at a
+        // location the viewer never showed.
+        let mut srv = InputServer::new(1920, 1080);
+        srv.force_remote_center();
+        assert_eq!(srv.remote_pos(), (SCREEN_UNITS / 2, SCREEN_UNITS / 2));
+        let events = srv.drain();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].kind, InputKind::Enter));
+        match events[1].kind {
+            InputKind::Move { x, y } => {
+                assert_eq!((x, y), (SCREEN_UNITS / 2, SCREEN_UNITS / 2));
+            }
+            other => panic!("expected Move, got {other:?}"),
+        }
     }
 
     #[test]

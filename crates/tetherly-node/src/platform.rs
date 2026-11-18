@@ -2156,14 +2156,32 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                                 mask: tetherly_core::BTN_MIDDLE,
                                 down: false,
                             }),
-                            WM_MOUSEWHEEL => push(RawInput::Wheel {
-                                dx: 0,
-                                dy: (mi.mouseData >> 16) as i16,
-                            }),
-                            WM_MOUSEHWHEEL => push(RawInput::Wheel {
-                                dx: (mi.mouseData >> 16) as i16,
-                                dy: 0,
-                            }),
+                            WM_MOUSEWHEEL => {
+                                // RawInput::Wheel carries wheel LINES (one
+                                // unit = one detent), not raw WHEEL_DELTA
+                                // counts: the target-side injectors post one
+                                // line per unit (mac CGScrollEventUnit::Line,
+                                // Windows inject re-multiplies by 120).
+                                // Capturing `mouseData >> 16` verbatim and
+                                // re-scaling at inject amplified one notch by
+                                // 120x (§171-F). WHEEL_DELTA is fixed at 120;
+                                // finer-resolution wheels (smooth scrolling)
+                                // accumulate below one detent, so use a
+                                // sign-preserving round-down that never
+                                // invents a detent from sub-delta noise.
+                                let raw = (mi.mouseData >> 16) as i32;
+                                push(RawInput::Wheel {
+                                    dx: 0,
+                                    dy: (raw / 120) as i16,
+                                });
+                            }
+                            WM_MOUSEHWHEEL => {
+                                let raw = (mi.mouseData >> 16) as i32;
+                                push(RawInput::Wheel {
+                                    dx: (raw / 120) as i16,
+                                    dy: 0,
+                                });
+                            }
                             _ => {}
                         }
                     }

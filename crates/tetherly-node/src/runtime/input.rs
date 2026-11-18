@@ -2227,11 +2227,17 @@ impl Node {
         // clone_on_copy) and Clone-only on macOS; `control` is not used again.
         *self.shared.input_hook_control.lock().expect("hook_control") = Some(control);
         let (w, h) = crate::platform::screen_size();
-        self.shared
-            .input_engine
-            .lock()
-            .expect("engine")
-            .resize(w.max(1), h.max(1));
+        {
+            let mut engine = self.shared.input_engine.lock().expect("engine");
+            engine.resize(w.max(1), h.max(1));
+            // §171-C: mirror the persisted policy edge at capture start. The
+            // engine previously kept its default edge until the first
+            // attach/policy change called set_edge, so a cold-started daemon
+            // whose watcher arms the hooks before any session evaluated
+            // crossings against the wrong edge (registered un-mirrored item
+            // in the input-link ledger).
+            engine.set_edge(self.input_policy().resolved_edge());
+        }
         let node = self.clone_handle();
         std::thread::spawn(move || {
             while let Ok(ev) = rx.recv() {
