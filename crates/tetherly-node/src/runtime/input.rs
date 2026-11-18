@@ -607,6 +607,10 @@ impl Node {
                 peer = %peer_str,
                 "input tunnel resp: accepted"
             );
+            // §102.7 (m3_12 windows red): the takeover chain starts here —
+            // capture the ACCEPTED resp in the decision ring so a red run
+            // shows whether the pump died before or after this point.
+            self.trace_input("takeover", format!("resp ACCEPTED peer={peer_str}"));
             // v0.2.32: the accept carries the target's screen size; hand it
             // to the engine so remote deltas normalize against the PEER
             // screen (1 local px = 1 remote px at 100 %) instead of the
@@ -4523,6 +4527,14 @@ impl Node {
                     .expect("engine")
                     .on_peer_gone();
                 *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                // §102.7 (m3_12 windows red): pump-side teardown visibility —
+                // the release trace below only shows the grant side; ring a
+                // pump_exit-style entry first so red runs can tell "pump saw
+                // its channel die" apart from "release raced a fresh grant".
+                node.trace_input(
+                    "pump_exit",
+                    format!("target pump session gone peer={peer_id}"),
+                );
                 node.release_input_tunnel_local("peer session gone");
                 node.disarm_input_capture();
                 let (cx, cy) = node.shared.input_engine.lock().expect("engine").local_pos();
