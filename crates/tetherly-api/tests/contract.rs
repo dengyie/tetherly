@@ -1863,4 +1863,260 @@ mod commands {
             serde_json::from_value(serde_json::to_value(&agg).unwrap()).unwrap();
         assert_eq!(back_a, agg);
     }
+
+    #[test]
+    fn power_domain_reports_round_trip() {
+        // §165a: power resources mirror the legacy /api/power reports
+        // field-for-field; CLI printers depend on the exact shapes.
+
+        let st = BatteryStateDto {
+            battery_level: 76,
+            is_charging: false,
+            power_source: "battery".into(),
+            battery_saver: false,
+            health_percent: Some(92),
+            timestamp_ms: 1000,
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["power_source"], "battery");
+        assert_eq!(v["health_percent"], 92);
+        let back_s: BatteryStateDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_s, st);
+
+        let local = BatteryState {
+            peer: None,
+            state: Some(st),
+        };
+        let v = serde_json::to_value(&local).unwrap();
+        assert!(v["peer"].is_null());
+        let back_l: BatteryState = serde_json::from_value(v).unwrap();
+        assert_eq!(back_l, local);
+
+        // Sparse patch is strict; unknown fields rejected.
+        let patch: BatteryStatePatch =
+            serde_json::from_value(json!({"battery_level": 55, "is_charging": true})).unwrap();
+        assert_eq!(patch.battery_level, Some(55));
+        assert_eq!(patch.is_charging, Some(true));
+        assert_eq!(patch.power_source, None);
+        assert!(serde_json::from_value::<BatteryStatePatch>(json!({"z": 1})).is_err());
+
+        let pol = BatteryPolicyDto {
+            low_battery_threshold: 30,
+            critical_battery_threshold: 15,
+            alert_on_low_battery: true,
+            auto_throttle_on_battery_saver: false,
+            allowed_groups: vec!["ops".into()],
+            allowed_tags: vec![],
+            allowed_types: vec!["laptop".into()],
+        };
+        let v = serde_json::to_value(&pol).unwrap();
+        assert_eq!(v["low_battery_threshold"], 30);
+        assert_eq!(v["allowed_types"][0], "laptop");
+        let back_p: BatteryPolicyDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_p, pol);
+
+        let ppatch: BatteryPolicyPatch = serde_json::from_value(json!({
+            "low_battery_threshold": 25,
+            "auto_throttle_on_battery_saver": true,
+        }))
+        .unwrap();
+        assert_eq!(ppatch.low_battery_threshold, Some(25));
+        assert_eq!(ppatch.alert_on_low_battery, None);
+        assert!(serde_json::from_value::<BatteryPolicyPatch>(json!({"z": 1})).is_err());
+    }
+
+    #[test]
+    fn media_domain_reports_round_trip() {
+        // §165a: media resources mirror the legacy /api/media reports
+        // field-for-field; CLI printers depend on the exact shapes.
+
+        // Request is strict + sparse; command is the normalized wire string.
+        let req: MediaCommandRequest = serde_json::from_value(json!({
+            "peer": "peer-a",
+            "command": "volume",
+            "volume": 40,
+        }))
+        .unwrap();
+        assert_eq!(req.peer.as_deref(), Some("peer-a"));
+        assert_eq!(req.volume, Some(40));
+        assert_eq!(req.offset_ms, None);
+        assert!(serde_json::from_value::<MediaCommandRequest>(json!({"z": 1})).is_err());
+
+        let rep = MediaCommandReport {
+            id: "c1".into(),
+            peer: "peer-a".into(),
+            peer_alias: Some("Laptop".into()),
+            command: "seek:-30000".into(),
+            target_player: None,
+            timestamp_ms: 1000,
+        };
+        let v = serde_json::to_value(&rep).unwrap();
+        assert!(v["target_player"].is_null());
+        let back_r: MediaCommandReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back_r, rep);
+
+        let multi = MediaCommandMultiReport {
+            selector: "tag:kiosk".into(),
+            command: "play".into(),
+            target_count: 2,
+            success_count: 1,
+            skipped_offline_count: 1,
+            failed_count: 0,
+            dispatches: vec![MediaDispatchItem {
+                peer: "peer-a".into(),
+                peer_alias: None,
+                command_id: Some("c1".into()),
+                success: true,
+                error: None,
+            }],
+        };
+        let v = serde_json::to_value(&multi).unwrap();
+        assert_eq!(v["success_count"], 1);
+        assert_eq!(v["skipped_offline_count"], 1);
+        let back_m: MediaCommandMultiReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back_m, multi);
+
+        let frame = MediaStateDto {
+            player_id: "spotify".into(),
+            state: "playing".into(),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: "".into(),
+            position_ms: 30_000,
+            duration_ms: 200_000,
+            volume_percent: 55,
+            muted: false,
+            can_play: true,
+            can_pause: true,
+            can_go_next: true,
+            can_go_previous: false,
+            can_seek: true,
+            timestamp_ms: 1000,
+        };
+        let v = serde_json::to_value(&frame).unwrap();
+        assert_eq!(v["state"], "playing");
+        let back_f: MediaStateDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_f, frame);
+
+        let st = MediaState {
+            peer: None,
+            state: Some(frame.clone()),
+        };
+        let back_s: MediaState =
+            serde_json::from_value(serde_json::to_value(&st).unwrap()).unwrap();
+        assert_eq!(back_s, st);
+
+        let upd = MediaStateUpdateReport { state: frame };
+        let back_u: MediaStateUpdateReport =
+            serde_json::from_value(serde_json::to_value(&upd).unwrap()).unwrap();
+        assert_eq!(back_u, upd);
+
+        // Sparse patch is strict; unknown fields rejected.
+        let up: MediaStatePatch =
+            serde_json::from_value(json!({"volume_percent": 70, "muted": true})).unwrap();
+        assert_eq!(up.volume_percent, Some(70));
+        assert_eq!(up.muted, Some(true));
+        assert_eq!(up.position_ms, None);
+        assert!(serde_json::from_value::<MediaStatePatch>(json!({"z": 1})).is_err());
+
+        let pol = MediaPolicyDto {
+            mode: "allow".into(),
+            allowed_groups: vec!["media".into()],
+            allowed_tags: vec![],
+            allowed_types: vec!["desktop".into()],
+            max_volume_limit: 80,
+            allow_seek: true,
+        };
+        let v = serde_json::to_value(&pol).unwrap();
+        assert_eq!(v["max_volume_limit"], 80);
+        let back_p: MediaPolicyDto = serde_json::from_value(v).unwrap();
+        assert_eq!(back_p, pol);
+
+        let ppatch: MediaPolicyPatch =
+            serde_json::from_value(json!({"mode": "deny", "clear_filters": true})).unwrap();
+        assert_eq!(ppatch.mode.as_deref(), Some("deny"));
+        assert_eq!(ppatch.allowed_groups, None);
+        assert!(serde_json::from_value::<MediaPolicyPatch>(json!({"z": 1})).is_err());
+    }
+
+    #[test]
+    fn ancs_domain_reports_round_trip() {
+        // §165a: ANCS resources mirror the legacy /api/ancs reports
+        // field-for-field; CLI printers depend on the exact shapes.
+
+        let rule = AncsRule {
+            app_id: "com.apple.mail".into(),
+            url: String::new(),
+        };
+        let v = serde_json::to_value(&rule).unwrap();
+        assert_eq!(v["url"], "");
+        let back_r: AncsRule = serde_json::from_value(v).unwrap();
+        assert_eq!(back_r, rule);
+
+        let st = AncsStatus {
+            attached: true,
+            state: "connected".into(),
+            peripheral: Some("iPhone".into()),
+            retry_at_ms: None,
+            rules: vec![rule.clone()],
+            allowlist: vec!["com.apple.mail".into()],
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["state"], "connected");
+        assert_eq!(v["rules"][0]["app_id"], "com.apple.mail");
+        assert!(v["retry_at_ms"].is_null());
+        let back_s: AncsStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back_s, st);
+
+        let conn = AncsConnectReport {
+            state: "connected".into(),
+            retry_at_ms: None,
+            message: "ancs attached".into(),
+        };
+        let v = serde_json::to_value(&conn).unwrap();
+        assert!(v["retry_at_ms"].is_null());
+        let back_c: AncsConnectReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back_c, conn);
+
+        let disc = AncsDisconnectReport {
+            state: "disconnected".into(),
+            retry_at_ms: Some(2000),
+            message: "ancs detached".into(),
+        };
+        let back_d: AncsDisconnectReport =
+            serde_json::from_value(serde_json::to_value(&disc).unwrap()).unwrap();
+        assert_eq!(back_d, disc);
+
+        // Allow request: url defaults to empty; app_id required.
+        let req: AncsAllowRequest =
+            serde_json::from_value(json!({"app_id": "com.apple.mail"})).unwrap();
+        assert_eq!(req.url, "");
+        assert!(serde_json::from_value::<AncsAllowRequest>(json!({"url": "x"})).is_err());
+
+        let rep = AncsRuleReport {
+            action: "add".into(),
+            rule: Some(rule),
+            total_rules: 1,
+            timestamp_ms: 1000,
+        };
+        let v = serde_json::to_value(&rep).unwrap();
+        assert_eq!(v["action"], "add");
+        let back_rp: AncsRuleReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back_rp, rep);
+
+        let clr = AncsClearRulesReport {
+            cleared_count: 3,
+            total_rules: 0,
+            timestamp_ms: 1000,
+        };
+        let back_cl: AncsClearRulesReport =
+            serde_json::from_value(serde_json::to_value(&clr).unwrap()).unwrap();
+        assert_eq!(back_cl, clr);
+
+        // Remove request: sparse + strict (query `app_id` preferred on the wire).
+        let rm: AncsRemoveRequest =
+            serde_json::from_value(json!({"app_id": "com.apple.mail"})).unwrap();
+        assert_eq!(rm.app_id.as_deref(), Some("com.apple.mail"));
+        assert!(serde_json::from_value::<AncsRemoveRequest>(json!({"z": 1})).is_err());
+    }
 }

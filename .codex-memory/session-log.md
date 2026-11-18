@@ -1473,3 +1473,8 @@
 - 语义细节：legacy query 变体对 action/bench policy allow-list 是「追加去重」语义（body 是替换）——PATCH handler 用 from_query 标记区分；max_timeout 过 ActionValidator::clamp_timeout；bench direction 长宽表 lenient 解析（pull/download/rx/recv）。
 - 坑：route() 是返回 UiResponse 的函数体而非闭包——dispatch arm 里 `?` 与 `return Err(...)` 不可用，arm 早退写 `return error(...)`、拆出的 async fn（返回 Handled）才用 `Ok/Err` 包裹；parse_body 有 `T: Default` 约束，strict DTO 用新增 parse_body_strict；clippy extend_with_drain 4 处（extend(drain)→append）。
 - 门禁：fmt/clippy --all-targets 0 错；契约 38 / uihttp 80（新增 v1_action_bench_serve_and_gate）全绿。全量交 CI。
+## §165 第一批（2026-11-18）：11 小域契约层 DTO-only 全量落 v1
+
+- §164 CI windows 失败为 m3_2_peer_gone_returns_cursor 抖动（5s 上限 vs 2.5s 宽限期），rerun success——非代码问题，§164 关闭。
+- 契约 ×93（power5/media10/ancs8/input12/handoff11/focus9/camera7/mic7/audio8/locate8/display7，以 runtime 结构体为准）+ 测试 +3（41 绿）+ decl ×93。clippy -D warnings 干净。
+- 端点/CLI 未切（cmd_input 曾提前切 8 处已回退）；下批按域逐个：先端点后 CLI。

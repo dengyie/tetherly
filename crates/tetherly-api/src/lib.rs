@@ -3004,6 +3004,1633 @@ pub struct RecommendationStatus {
     pub timestamp_ms: u64,
 }
 
+// ---- §165a: battery/power domain ----
+
+/// One battery measurement (local or a peer's broadcast).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BatteryStateDto {
+    /// Battery level percentage: 0..=100.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub battery_level: u8,
+    pub is_charging: bool,
+    /// `PowerSource` lowercase string (`battery`/`ac`/`wireless`/`unknown`).
+    pub power_source: String,
+    pub battery_saver: bool,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub health_percent: Option<u8>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `GET /battery/state?peer=` report (legacy `BatteryStatusReport` with the
+/// `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BatteryState {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    /// Absent when the target has never broadcast a measurement.
+    #[cfg_attr(test, ts(optional))]
+    pub state: Option<BatteryStateDto>,
+}
+
+/// `PATCH /battery/state` body: sparse local state update.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct BatteryStatePatch {
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub battery_level: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub is_charging: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub power_source: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub battery_saver: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub health_percent: Option<u8>,
+}
+
+/// The battery governance policy as one flat resource
+/// (legacy `BatteryPolicyReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct BatteryPolicyDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub low_battery_threshold: u8,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub critical_battery_threshold: u8,
+    pub alert_on_low_battery: bool,
+    pub auto_throttle_on_battery_saver: bool,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// Allowed device form factors, as the `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /battery/policy` body: sparse policy fields (absent stays; the
+/// `clear_filters` sweep wipes all three allow-lists in one call).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct BatteryPolicyPatch {
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub low_battery_threshold: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub critical_battery_threshold: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub alert_on_low_battery: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub auto_throttle_on_battery_saver: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+// ---- §165a: media control domain ----
+
+/// `POST /media/command` body: one playback command, single peer or
+/// selector fan-out (`all`/`tag`/`group`/`device_type`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MediaCommandRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    /// `play`/`pause`/`play_pause`/`stop`/`next`/`prev`/`seek`/`volume`/`toggle_mute`.
+    #[cfg_attr(test, ts(optional))]
+    pub command: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub volume: Option<u8>,
+    /// Seek offset for `seek` (ms; negative rewinds).
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub offset_ms: Option<i64>,
+    #[cfg_attr(test, ts(optional))]
+    pub target_player: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub tag: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub group: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub device_type: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub all: Option<bool>,
+}
+
+/// `POST /media/command` single-peer result (legacy `MediaCommandSendResult`
+/// with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MediaCommandReport {
+    pub id: String,
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    /// Normalized `MediaCommand` wire string (e.g. `play`, `seek:-30000`).
+    pub command: String,
+    #[cfg_attr(test, ts(optional))]
+    pub target_player: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// One peer's slice of a selector fan-out dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MediaDispatchItem {
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub command_id: Option<String>,
+    pub success: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub error: Option<String>,
+}
+
+/// `POST /media/command` selector fan-out report (legacy
+/// `MultiMediaCommandReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MediaCommandMultiReport {
+    /// Selector wire string (e.g. `all`, `tag:kiosk`, `type:phone`).
+    pub selector: String,
+    pub command: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub success_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub skipped_offline_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub failed_count: usize,
+    pub dispatches: Vec<MediaDispatchItem>,
+}
+
+/// One media playback state snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MediaStateDto {
+    pub player_id: String,
+    /// `PlaybackState` lowercase string (`stopped`/`playing`/`paused`).
+    pub state: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub position_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub duration_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub volume_percent: u8,
+    pub muted: bool,
+    pub can_play: bool,
+    pub can_pause: bool,
+    pub can_go_next: bool,
+    pub can_go_previous: bool,
+    pub can_seek: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `GET /media/state?peer=` report (legacy `MediaStatusReport` with the
+/// `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MediaState {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    /// Absent when nothing has been broadcast yet.
+    #[cfg_attr(test, ts(optional))]
+    pub state: Option<MediaStateDto>,
+}
+
+/// `PATCH /media/state` body: sparse local playback state update.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MediaStatePatch {
+    #[cfg_attr(test, ts(optional))]
+    pub player_id: Option<String>,
+    /// `PlaybackState` lowercase string.
+    #[cfg_attr(test, ts(optional))]
+    pub state: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub title: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub artist: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub album: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub position_ms: Option<u64>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub duration_ms: Option<u64>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub volume_percent: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub muted: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub can_play: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub can_pause: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub can_go_next: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub can_go_previous: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub can_seek: Option<bool>,
+}
+
+/// `PATCH /media/state` report: the sanitized state after the update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MediaStateUpdateReport {
+    pub state: MediaStateDto,
+}
+
+/// The media control policy as one flat resource
+/// (legacy `MediaPolicyReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MediaPolicyDto {
+    /// `MediaControlMode` snake_case string (`allow`/`prompt_only`/`disabled`).
+    pub mode: String,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// Allowed device form factors, as the `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_volume_limit: u8,
+    pub allow_seek: bool,
+}
+
+/// `PATCH /media/policy` body: sparse policy fields (absent stays; the
+/// `clear_filters` sweep wipes all three allow-lists in one call).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MediaPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_volume_limit: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_seek: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+// ---- §165b: input tunnel domain ----
+
+/// One active input-tunnel session (legacy `ActiveInputTunnelSession`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActiveInputSessionDto {
+    pub session_id: String,
+    pub peer_id: String,
+    /// `InputTunnelRole` snake_case string (`controller`/`target`).
+    pub role: String,
+    #[cfg_attr(test, ts(optional))]
+    pub requested_edge: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub entry_x: Option<i32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub entry_y: Option<i32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub capture_width: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub capture_height: Option<u32>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pre_arm_epoch: u64,
+}
+
+/// `GET /input` report — input sharing status (legacy `InputStatusReport`
+/// with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InputStatus {
+    pub channel_open: bool,
+    /// `CursorSeat` snake_case string (`local`/`remote`).
+    pub seat: String,
+    #[cfg_attr(test, ts(optional))]
+    pub active_peer: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub applied: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dropped: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rx_buttons: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rx_wheel: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rx_keys: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tx_buttons: u64,
+}
+
+/// One input-engine decision ring entry (legacy `InputTraceEntry`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InputTraceEntryDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub ts_ms: u64,
+    pub kind: String,
+    pub detail: String,
+}
+
+/// `GET /input/trace` report (legacy `InputTraceReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InputTrace {
+    pub seat: String,
+    pub channel_open: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub capacity: usize,
+    pub entries: Vec<InputTraceEntryDto>,
+}
+
+/// `POST /input/start` + `POST /input/stop` control report
+/// (legacy `InputControlReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InputControl {
+    pub action: String,
+    pub seat: String,
+    pub channel_open: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `GET /input/tunnel` report (legacy `InputTunnelStatusReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InputTunnelStatus {
+    pub active: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub session: Option<ActiveInputSessionDto>,
+    pub policy: InputPolicyDto,
+    pub accessibility_trusted: bool,
+    pub capture_active: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /input/tunnel/attach` + `POST /input/tunnel/release` decision
+/// report (legacy `InputTunnelDecisionReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InputTunnelDecision {
+    pub action: String,
+    #[cfg_attr(test, ts(optional))]
+    pub session_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_id: Option<String>,
+    /// `InputTunnelRole` snake_case string.
+    #[cfg_attr(test, ts(optional))]
+    pub role: Option<String>,
+    pub message: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// The input-tunnel governance policy as one flat resource
+/// (legacy `InputTunnelPolicy` with enums folded to strings).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InputPolicyDto {
+    pub enabled: bool,
+    pub allow_inbound_control: bool,
+    pub allow_keyboard: bool,
+    pub allow_mouse: bool,
+    pub hotkey_release_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub idle_timeout_secs: u32,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub keymap: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub edge: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub wheel_speed: f64,
+}
+
+/// `PATCH /input/policy` body: sparse policy fields (absent stays; the
+/// `clear_filters` sweep wipes all three allow-lists in one call).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct InputPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_inbound_control: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_keyboard: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_mouse: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub hotkey_release_enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub idle_timeout_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub keymap: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub edge: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub wheel_speed: Option<f64>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /input/tunnel/attach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct InputAttachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub edge: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub x: Option<i32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub y: Option<i32>,
+}
+
+/// `POST /input/tunnel/release` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct InputReleaseRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+/// `POST /input/start` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct InputStartRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+}
+
+// ---- §165b: handoff domain ----
+
+/// One inbound handoff inbox entry (legacy `HandoffInboxEntryDto`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HandoffInboxEntryDto {
+    pub id: String,
+    pub from_peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub from_alias: Option<String>,
+    pub url: String,
+    pub title: String,
+    pub auto_open_requested: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub received_at_ms: u64,
+}
+
+/// `GET /handoff/inbox` report (legacy `HandoffInboxReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HandoffInbox {
+    pub count: usize,
+    pub entries: Vec<HandoffInboxEntryDto>,
+}
+
+/// `POST /handoff/send` single-peer result (legacy `HandoffSendResult`
+/// with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HandoffSendReport {
+    pub id: String,
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    pub url: String,
+    pub title: String,
+    pub auto_open_requested: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// One peer's slice of a handoff fan-out dispatch (legacy `PeerHandoffSendItem`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HandoffDispatchItem {
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub id: Option<String>,
+    pub success: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub error: Option<String>,
+}
+
+/// `POST /handoff/send` selector fan-out report (legacy
+/// `MultiHandoffSendReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HandoffSendMultiReport {
+    /// Selector wire string (e.g. `all`, `tag:kiosk`, `type:phone`).
+    pub selector: String,
+    pub url: String,
+    pub title: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub success_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub skipped_offline_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub failed_count: usize,
+    pub dispatches: Vec<HandoffDispatchItem>,
+}
+
+/// `POST /handoff/inbox/open` + `POST /handoff/inbox/dismiss` report
+/// (legacy `HandoffInboxActionReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HandoffInboxActionReport {
+    /// `"open"` or `"dismiss"`.
+    pub action: String,
+    pub id: String,
+    pub remaining: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /handoff/inbox/clear` report (legacy `HandoffInboxClearReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HandoffInboxClearReport {
+    pub cleared_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// The handoff policy as one flat resource (legacy `HandoffPolicy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HandoffPolicyDto {
+    /// Handoff admission action (`HandoffPolicyAction` snake_case string).
+    pub action: String,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_inbox_entries: usize,
+}
+
+/// `PATCH /handoff/policy` body: sparse policy fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct HandoffPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub action: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_inbox_entries: Option<usize>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /handoff/send` body: one link, single peer or selector fan-out.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct HandoffSendRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    pub url: String,
+    #[cfg_attr(test, ts(optional))]
+    pub title: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub auto_open: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub tag: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub group: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub device_type: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub all: Option<bool>,
+}
+
+/// `POST /handoff/inbox/open` + `.../dismiss` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct HandoffInboxActionRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub id: Option<String>,
+}
+
+// ---- §165b: focus domain ----
+
+/// One focus-state frame (legacy `FocusStateFrame` with the mode folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FocusStateDto {
+    pub enabled: bool,
+    /// `FocusMode` snake_case string (`dnd`/`work`/`meeting`/`sleep`).
+    pub mode: String,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub expires_ms: Option<u64>,
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// One peer's focus report (legacy `PeerFocusReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PeerFocusDto {
+    pub peer: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_alias: Option<String>,
+    pub state: FocusStateDto,
+    pub active: bool,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub remaining_secs: Option<u64>,
+}
+
+/// `GET /focus/peers` report (legacy `PeersFocusReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FocusPeers {
+    pub count: usize,
+    pub peers: Vec<PeerFocusDto>,
+}
+
+/// `GET /focus/state` report: local focus state (legacy `LocalFocusReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FocusState {
+    pub state: FocusStateDto,
+    pub active: bool,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub remaining_secs: Option<u64>,
+}
+
+/// `POST /focus/state` report (legacy `FocusSetReport` with the `ok`
+/// envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FocusSetReport {
+    pub enabled: bool,
+    /// `FocusMode` snake_case string.
+    pub mode: String,
+    pub active: bool,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub expires_ms: Option<u64>,
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub broadcast_count: usize,
+    pub message: String,
+}
+
+/// `POST /focus/sync` report (legacy `FocusSyncReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FocusSyncReport {
+    pub requested: usize,
+    pub responded: usize,
+    pub peers: Vec<PeerFocusDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// The focus / quiet-hours policy as one flat resource (legacy `FocusPolicy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FocusPolicyDto {
+    pub enabled: bool,
+    /// `FocusMode` snake_case string.
+    pub default_mode: String,
+    pub mirror_inbound_focus: bool,
+    pub allow_emergency_breakthrough: bool,
+    pub quiet_hours_enabled: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub quiet_hours_start_minute: u16,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub quiet_hours_end_minute: u16,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /focus/policy` body: sparse policy fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct FocusPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub default_mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub mirror_inbound_focus: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_emergency_breakthrough: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub quiet_hours_enabled: Option<bool>,
+    /// `HH:MM` shorthand folded into minutes on apply.
+    #[cfg_attr(test, ts(optional))]
+    pub quiet_hours_start: Option<String>,
+    /// `HH:MM` shorthand folded into minutes on apply.
+    #[cfg_attr(test, ts(optional))]
+    pub quiet_hours_end: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub quiet_hours_start_minute: Option<u16>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub quiet_hours_end_minute: Option<u16>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /focus/state` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct FocusSetRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    /// Duration in minutes (`duration`/`duration_minutes` aliases folded).
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub duration_mins: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub broadcast: Option<bool>,
+}
+
+// ---- §165b: camera domain ----
+
+/// One active camera streaming session (legacy `ActiveCameraSession`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActiveCameraSessionDto {
+    pub session_id: String,
+    pub peer_id: String,
+    /// `CameraRole` snake_case string (`viewer`/`lens`).
+    pub role: String,
+    pub lens_id: String,
+    pub width: u32,
+    pub height: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_fps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_fps: u32,
+    /// `CameraCodec` snake_case string.
+    pub codec: String,
+    pub flashlight_on: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub zoom_ratio: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_transferred: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_activity_ms: u64,
+}
+
+/// `GET /camera` report (legacy `CameraStatusReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct CameraStatus {
+    pub active: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub session: Option<ActiveCameraSessionDto>,
+    pub policy: CameraPolicyDto,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /camera/attach` + `POST /camera/detach` decision report
+/// (legacy `CameraDecisionReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct CameraDecision {
+    pub action: String,
+    #[cfg_attr(test, ts(optional))]
+    pub session_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_id: Option<String>,
+    /// `CameraRole` snake_case string.
+    #[cfg_attr(test, ts(optional))]
+    pub role: Option<String>,
+    pub message: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// The camera policy as one flat resource (legacy `CameraPolicy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct CameraPolicyDto {
+    pub enabled: bool,
+    pub allow_inbound_stream: bool,
+    pub allow_remote_capture: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_resolution_width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_resolution_height: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_fps: u32,
+    pub enforce_privacy_shutter_indicator: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub idle_timeout_secs: u32,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /camera/policy` body: sparse policy fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct CameraPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_inbound_stream: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_remote_capture: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_resolution_width: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_resolution_height: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_fps: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub enforce_privacy_shutter_indicator: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub idle_timeout_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /camera/attach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct CameraAttachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub lens_id: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub width: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub height: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub fps: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub codec: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub flashlight: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub zoom: Option<f32>,
+}
+
+/// `POST /camera/detach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct CameraDetachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+// ---- §165b: mic domain ----
+
+/// One active microphone session (legacy `ActiveMicrophoneSession`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActiveMicSessionDto {
+    pub session_id: String,
+    pub peer_id: String,
+    /// `MicRole` snake_case string (`listener`/`source`).
+    pub role: String,
+    /// `MicMode` snake_case string (`stream`/`intercom`).
+    pub mode: String,
+    pub mic_id: String,
+    /// `MicCodec` snake_case string.
+    pub codec: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sample_rate: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub channels: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub gain: f32,
+    pub muted: bool,
+    pub noise_suppression: bool,
+    pub echo_cancellation: bool,
+    pub auto_gain: bool,
+    pub privacy_indicator_active: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub frames_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_transferred: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_activity_ms: u64,
+}
+
+/// `GET /mic` report (legacy `MicrophoneStatusReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MicStatus {
+    pub active: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub session: Option<ActiveMicSessionDto>,
+    pub policy: MicPolicyDto,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /mic/attach` + `POST /mic/detach` decision report
+/// (legacy `MicrophoneDecisionReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MicDecision {
+    pub action: String,
+    #[cfg_attr(test, ts(optional))]
+    pub session_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_id: Option<String>,
+    /// `MicRole` snake_case string.
+    #[cfg_attr(test, ts(optional))]
+    pub role: Option<String>,
+    pub message: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// The microphone policy as one flat resource (legacy `MicrophonePolicy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MicPolicyDto {
+    pub enabled: bool,
+    pub allow_inbound_stream: bool,
+    pub allow_remote_capture: bool,
+    pub allow_intercom: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_sample_rate: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_session_duration_secs: u32,
+    pub enforce_privacy_indicator: bool,
+    pub default_muted: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub idle_timeout_secs: u32,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /mic/policy` body: sparse policy fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MicPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_inbound_stream: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_remote_capture: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_intercom: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_sample_rate: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_session_duration_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub enforce_privacy_indicator: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub default_muted: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub idle_timeout_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /mic/attach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MicAttachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub mic_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub codec: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub sample_rate: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub channels: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub gain: Option<f32>,
+    #[cfg_attr(test, ts(optional))]
+    pub muted: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub noise_suppression: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub echo_cancellation: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub auto_gain: Option<bool>,
+}
+
+/// `POST /mic/detach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct MicDetachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+// ---- §165b: audio routing domain ----
+
+/// Spatial position (x/y/z metres).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SpatialPositionDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub x: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub y: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub z: f32,
+}
+
+/// One active audio-routing session (legacy `ActiveAudioRoutingSession`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActiveAudioSessionDto {
+    pub session_id: String,
+    pub peer_id: String,
+    /// `AudioRoutingRole` snake_case string (`speaker`/`source`).
+    pub role: String,
+    /// `AudioChannelLayout` snake_case string (`mono`/`stereo`).
+    pub layout: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub sample_rate: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub channels: u8,
+    /// `AudioSampleFormat` snake_case string.
+    pub format: String,
+    /// `AudioStreamCodec` snake_case string.
+    pub codec: String,
+    #[cfg_attr(test, ts(optional))]
+    pub spatial_pos: Option<SpatialPositionDto>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub volume_gain: f32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunks_sent: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunks_received: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_transferred: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_activity_ms: u64,
+}
+
+/// `GET /audio` report (legacy `AudioRoutingStatusReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AudioStatus {
+    pub active: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub session: Option<ActiveAudioSessionDto>,
+    pub policy: AudioPolicyDto,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /audio/attach` + `POST /audio/detach` decision report
+/// (legacy `AudioRoutingDecisionReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AudioDecision {
+    pub action: String,
+    #[cfg_attr(test, ts(optional))]
+    pub session_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_id: Option<String>,
+    /// `AudioRoutingRole` snake_case string.
+    #[cfg_attr(test, ts(optional))]
+    pub role: Option<String>,
+    pub message: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// The audio-routing policy as one flat resource (legacy `AudioRoutingPolicy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AudioPolicyDto {
+    pub enabled: bool,
+    pub allow_inbound_sink: bool,
+    pub allow_outbound_routing: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_volume_limit: u8,
+    pub allow_spatial_rendering: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub idle_timeout_secs: u32,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /audio/policy` body: sparse policy fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct AudioPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_inbound_sink: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_outbound_routing: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_volume_limit: Option<u8>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_spatial_rendering: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub idle_timeout_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /audio/attach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct AudioAttachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub layout: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub sample_rate: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub channels: Option<u8>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub spatial_x: Option<f32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub spatial_y: Option<f32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub spatial_z: Option<f32>,
+    #[cfg_attr(test, ts(optional))]
+    pub spatial_position: Option<SpatialPositionDto>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub volume_gain: Option<f32>,
+}
+
+/// `POST /audio/detach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct AudioDetachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+// ---- §165b: locate domain ----
+
+/// One active acoustic locate ring (legacy `ActiveLocateRing`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActiveLocateRingDto {
+    pub request_id: String,
+    pub initiator_peer: String,
+    pub initiator_alias: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub duration_secs: u32,
+    /// `LocatePattern` snake_case string (`pulse`/`sos`/`chime`).
+    pub pattern: String,
+    pub override_silent: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub message: Option<String>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub expires_at_ms: u64,
+}
+
+/// `GET /locate/status` report (legacy `LocateStatusReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LocateStatus {
+    pub is_ringing: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub active_ring: Option<ActiveLocateRingDto>,
+    pub policy: LocatePolicyDto,
+    pub message: String,
+}
+
+/// `POST /locate/ring` report (legacy `LocateRingReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LocateRingReport {
+    pub request_id: String,
+    pub target_peer: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub duration_secs: u32,
+    /// `LocatePattern` snake_case string.
+    pub pattern: String,
+    pub override_silent: bool,
+    pub message: String,
+}
+
+/// `POST /locate/stop` report (legacy `LocateStopReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LocateStopReport {
+    #[cfg_attr(test, ts(optional))]
+    pub request_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub target_peer: Option<String>,
+    pub reason: String,
+    pub message: String,
+}
+
+/// The locator policy as one flat resource (legacy `LocatorPolicy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LocatePolicyDto {
+    pub enabled: bool,
+    pub allow_override_silent: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_duration_secs: u32,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /locate/policy` body: sparse policy fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct LocatePolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_override_silent: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_duration_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /locate/ring` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct LocateRingRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub duration_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub pattern: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub override_silent: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub message: Option<String>,
+}
+
+/// `POST /locate/stop` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct LocateStopRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub request_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+// ---- §165b: virtual display domain ----
+
+/// One active virtual-display session (legacy `ActiveVirtualDisplaySession`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ActiveDisplaySessionDto {
+    pub session_id: String,
+    pub peer_id: String,
+    /// `VirtualDisplayRole` snake_case string (`viewer`/`host`).
+    pub role: String,
+    /// `DisplayEdge` snake_case string.
+    pub assigned_edge: String,
+    /// `VirtualDisplayMode` snake_case string.
+    pub mode: String,
+    /// `VirtualDisplayCodec` snake_case string.
+    pub codec: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub target_fps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub current_fps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub rtt_us: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dropped_frames: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_activity_ms: u64,
+}
+
+/// `GET /display/virtual` report (legacy `VirtualDisplayStatusReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DisplayVirtualStatus {
+    pub active: bool,
+    #[cfg_attr(test, ts(optional))]
+    pub session: Option<ActiveDisplaySessionDto>,
+    pub policy: DisplayPolicyDto,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /display/virtual/attach` + `.../detach` decision report
+/// (legacy `VirtualDisplayDecisionReport` folded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DisplayDecision {
+    pub action: String,
+    #[cfg_attr(test, ts(optional))]
+    pub session_id: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub peer_id: Option<String>,
+    /// `VirtualDisplayRole` snake_case string.
+    #[cfg_attr(test, ts(optional))]
+    pub role: Option<String>,
+    pub message: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// The virtual-display policy as one flat resource (legacy `VirtualDisplayPolicy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DisplayPolicyDto {
+    pub enabled: bool,
+    pub allow_hosting: bool,
+    pub allow_remote_extend: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_resolution_width: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_resolution_height: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub max_fps: u32,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub idle_timeout_secs: u32,
+    pub allowed_groups: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    /// `DeviceType` snake_case strings.
+    pub allowed_types: Vec<String>,
+}
+
+/// `PATCH /display/virtual/policy` body: sparse policy fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct DisplayPolicyPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_hosting: Option<bool>,
+    #[cfg_attr(test, ts(optional))]
+    pub allow_remote_extend: Option<bool>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_resolution_width: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_resolution_height: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub max_fps: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub idle_timeout_secs: Option<u32>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_groups: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_tags: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub allowed_types: Option<Vec<String>>,
+    #[cfg_attr(test, ts(optional))]
+    pub clear_filters: Option<bool>,
+}
+
+/// `POST /display/virtual/attach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct DisplayAttachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub peer: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub edge: Option<String>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub width: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub height: Option<u32>,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub fps: Option<u32>,
+}
+
+/// `POST /display/virtual/detach` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct DisplayDetachRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+// ---- §165a: ANCS domain ----
+
+/// One ANCS open-rule allowlist entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AncsRule {
+    pub app_id: String,
+    pub url: String,
+}
+
+/// `GET /ancs` report (legacy `AncsReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AncsStatus {
+    pub attached: bool,
+    pub state: String,
+    #[cfg_attr(test, ts(optional))]
+    pub peripheral: Option<String>,
+    /// Next reconnect attempt (absent when not scheduled).
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub retry_at_ms: Option<u64>,
+    pub rules: Vec<AncsRule>,
+    pub allowlist: Vec<String>,
+}
+
+/// `POST /ancs/connect` report (legacy `AncsConnectReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AncsConnectReport {
+    pub state: String,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub retry_at_ms: Option<u64>,
+    pub message: String,
+}
+
+/// `POST /ancs/disconnect` report (legacy `AncsDisconnectReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AncsDisconnectReport {
+    pub state: String,
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub retry_at_ms: Option<u64>,
+    pub message: String,
+}
+
+/// `POST /ancs/allow` body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct AncsAllowRequest {
+    pub app_id: String,
+    #[serde(default = "default_ancs_url")]
+    pub url: String,
+}
+
+fn default_ancs_url() -> String {
+    String::new()
+}
+
+/// `POST /ancs/allow` + `DELETE /ancs/allow` report
+/// (legacy `AncsRuleReport` with the `ok` envelope folded off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AncsRuleReport {
+    /// `"add"` or `"remove"`.
+    pub action: String,
+    #[cfg_attr(test, ts(optional))]
+    pub rule: Option<AncsRule>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_rules: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `POST /ancs/rules/clear` report (legacy `AncsClearRulesReport` folded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AncsClearRulesReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub cleared_count: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_rules: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
+/// `DELETE /ancs/allow` body variant (query `app_id` preferred).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct AncsRemoveRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub app_id: Option<String>,
+}
+
 // ---- M2e: activity feed ----
 
 /// Direction of a peer direct message relative to this node.
@@ -3298,6 +4925,98 @@ mod bindings {
             decl::<RecommendationDto>(&cfg),
             decl::<RecommendationSummaryDto>(&cfg),
             decl::<RecommendationStatus>(&cfg),
+            decl::<BatteryStateDto>(&cfg),
+            decl::<BatteryState>(&cfg),
+            decl::<BatteryStatePatch>(&cfg),
+            decl::<BatteryPolicyDto>(&cfg),
+            decl::<BatteryPolicyPatch>(&cfg),
+            decl::<MediaCommandRequest>(&cfg),
+            decl::<MediaCommandReport>(&cfg),
+            decl::<MediaDispatchItem>(&cfg),
+            decl::<MediaCommandMultiReport>(&cfg),
+            decl::<MediaStateDto>(&cfg),
+            decl::<MediaState>(&cfg),
+            decl::<MediaStatePatch>(&cfg),
+            decl::<MediaStateUpdateReport>(&cfg),
+            decl::<MediaPolicyDto>(&cfg),
+            decl::<MediaPolicyPatch>(&cfg),
+            decl::<AncsRule>(&cfg),
+            decl::<AncsStatus>(&cfg),
+            decl::<AncsConnectReport>(&cfg),
+            decl::<AncsDisconnectReport>(&cfg),
+            decl::<AncsAllowRequest>(&cfg),
+            decl::<AncsRuleReport>(&cfg),
+            decl::<AncsClearRulesReport>(&cfg),
+            decl::<AncsRemoveRequest>(&cfg),
+            decl::<ActiveInputSessionDto>(&cfg),
+            decl::<InputStatus>(&cfg),
+            decl::<InputTraceEntryDto>(&cfg),
+            decl::<InputTrace>(&cfg),
+            decl::<InputControl>(&cfg),
+            decl::<InputTunnelStatus>(&cfg),
+            decl::<InputTunnelDecision>(&cfg),
+            decl::<InputPolicyDto>(&cfg),
+            decl::<InputPolicyPatch>(&cfg),
+            decl::<InputAttachRequest>(&cfg),
+            decl::<InputReleaseRequest>(&cfg),
+            decl::<InputStartRequest>(&cfg),
+            decl::<HandoffInboxEntryDto>(&cfg),
+            decl::<HandoffInbox>(&cfg),
+            decl::<HandoffSendReport>(&cfg),
+            decl::<HandoffDispatchItem>(&cfg),
+            decl::<HandoffSendMultiReport>(&cfg),
+            decl::<HandoffInboxActionReport>(&cfg),
+            decl::<HandoffInboxClearReport>(&cfg),
+            decl::<HandoffPolicyDto>(&cfg),
+            decl::<HandoffPolicyPatch>(&cfg),
+            decl::<HandoffSendRequest>(&cfg),
+            decl::<HandoffInboxActionRequest>(&cfg),
+            decl::<FocusStateDto>(&cfg),
+            decl::<PeerFocusDto>(&cfg),
+            decl::<FocusPeers>(&cfg),
+            decl::<FocusState>(&cfg),
+            decl::<FocusSetReport>(&cfg),
+            decl::<FocusSyncReport>(&cfg),
+            decl::<FocusPolicyDto>(&cfg),
+            decl::<FocusPolicyPatch>(&cfg),
+            decl::<FocusSetRequest>(&cfg),
+            decl::<ActiveCameraSessionDto>(&cfg),
+            decl::<CameraStatus>(&cfg),
+            decl::<CameraDecision>(&cfg),
+            decl::<CameraPolicyDto>(&cfg),
+            decl::<CameraPolicyPatch>(&cfg),
+            decl::<CameraAttachRequest>(&cfg),
+            decl::<CameraDetachRequest>(&cfg),
+            decl::<ActiveMicSessionDto>(&cfg),
+            decl::<MicStatus>(&cfg),
+            decl::<MicDecision>(&cfg),
+            decl::<MicPolicyDto>(&cfg),
+            decl::<MicPolicyPatch>(&cfg),
+            decl::<MicAttachRequest>(&cfg),
+            decl::<MicDetachRequest>(&cfg),
+            decl::<SpatialPositionDto>(&cfg),
+            decl::<ActiveAudioSessionDto>(&cfg),
+            decl::<AudioStatus>(&cfg),
+            decl::<AudioDecision>(&cfg),
+            decl::<AudioPolicyDto>(&cfg),
+            decl::<AudioPolicyPatch>(&cfg),
+            decl::<AudioAttachRequest>(&cfg),
+            decl::<AudioDetachRequest>(&cfg),
+            decl::<ActiveLocateRingDto>(&cfg),
+            decl::<LocateStatus>(&cfg),
+            decl::<LocateRingReport>(&cfg),
+            decl::<LocateStopReport>(&cfg),
+            decl::<LocatePolicyDto>(&cfg),
+            decl::<LocatePolicyPatch>(&cfg),
+            decl::<LocateRingRequest>(&cfg),
+            decl::<LocateStopRequest>(&cfg),
+            decl::<ActiveDisplaySessionDto>(&cfg),
+            decl::<DisplayVirtualStatus>(&cfg),
+            decl::<DisplayDecision>(&cfg),
+            decl::<DisplayPolicyDto>(&cfg),
+            decl::<DisplayPolicyPatch>(&cfg),
+            decl::<DisplayAttachRequest>(&cfg),
+            decl::<DisplayDetachRequest>(&cfg),
         ] {
             out.push_str(&d);
             out.push('\n');

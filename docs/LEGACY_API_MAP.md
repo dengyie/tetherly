@@ -242,3 +242,21 @@
 | `POST /api/bench/policy` | `PATCH /bench/policy` | PATCH 语义修正；body 稀疏 + query 兼容（body 胜出）；legacy query 对 allow-list 是追加去重 |
 | `GET /api/recommendation?peer=` | `GET /recommendation?peer=` | `ok` 折掉；tier DTO 展开（codec 折 as_str 字符串）；未知 peer→404 |
 | `GET /api/recommendation` | `GET /recommendation` | 聚合视图（peers 数组 + timestamp） |
+
+## 已迁移契约层（§165 第一批，11 小域 DTO-only）
+
+> 本批只落 tetherly-api 契约（93 DTO），端点/CLI 未切——下表各行待后续批 §165 续（标 ⏳）。域与 legacy 路径映射不变。
+
+| 域 | legacy 路径 | v1 契约（已落） | 端点 | CLI |
+|---|---|---|---|---|
+| power | api/power/* | BatteryState/BatteryStatePatch/BatteryPolicyDto/BatteryPolicyPatch 等 5 | ⏳ | ⏳ |
+| media | api/media/* | MediaCommandRequest/Report/MultiReport/MediaState*/MediaPolicy* 等 10 | ⏳ | ⏳ |
+| ancs | api/ancs/* | AncsRule/Status/ConnectReport/DisconnectReport/AllowRequest/RuleReport/ClearRulesReport/RemoveRequest 8 | ⏳ | ⏳ |
+| input | api/input/* | InputStatus/Trace/TunnelStatus/TunnelDecision/InputPolicy* 等 12 | ⏳ | ⏳ |
+| handoff | api/handoff/* | HandoffInbox*/SendReport/SendMultiReport/Policy* 等 11 | ⏳ | ⏳ |
+| focus | api/focus/* | FocusState*/PeerFocus/FocusPeers/FocusSetReport/FocusSyncReport/FocusPolicy* 等 9 | ⏳ | ⏳ |
+| camera | api/camera/* | CameraStatus/Decision/Policy*/AttachRequest/DetachRequest 7 | ⏳ | ⏳ |
+| mic | api/mic/* | MicStatus/Decision/Policy*/AttachRequest/DetachRequest 7 | ⏳ | ⏳ |
+| audio | api/audio/* | AudioStatus/Decision/Policy*/AttachRequest/DetachRequest + SpatialPosition 8 | ⏳ | ⏳ |
+| locate | api/locate/* | LocateStatus/RingReport/StopReport/Policy*/RingRequest/StopRequest 8 | ⏳ | ⏳ |
+| display | api/display/* | DisplayVirtualStatus/Decision/Policy*/AttachRequest/DetachRequest 7 | ⏳ | ⏳ |
