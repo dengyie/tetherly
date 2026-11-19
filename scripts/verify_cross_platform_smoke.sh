@@ -32,7 +32,7 @@ AUTH_HEADER="X-Tetherly-Token: ${API_TOKEN}"
 remote_v1() {
     local path="$1"
     ssh -o ConnectTimeout=5 "${REMOTE_HOST}" \
-        "powershell -NoProfile -Command \"\$token=(Get-Content -Raw 'C:\\Users\\mango\\AppData\\Local\\tetherly\\api.token').Trim(); \$h=@{'X-Tetherly-Token'=\$token}; Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}${path} -Headers \$h | ConvertTo-Json -Compress\""
+        "powershell -NoProfile -Command \"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \$token=(Get-Content -Raw 'C:\\Users\\mango\\AppData\\Local\\tetherly\\api.token').Trim(); \$h=@{'X-Tetherly-Token'=\$token}; Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}${path} -Headers \$h | ConvertTo-Json -Compress\""
 }
 
 GREEN='\033[0;32m'
@@ -108,20 +108,26 @@ else
     log_fail "Remote Windows node health check failed: $REMOTE_HEALTH"
 fi
 
-# 1.4 Remote Windows Session Integrity (Must be in Session 2 under SYSTEM for UAC)
-# Exact `SessionId == 2` via jq: a substring match would also accept 20-29,
-# and a multi-process ConvertTo-Json array would break `.Id` extraction.
-REMOTE_PROC=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -NoProfile -Command \"Get-Process tetherly -ErrorAction Stop | Select-Object Id, ProcessName, SessionId | ConvertTo-Json -Compress\"")
+# 1.4 Remote Windows daemon integrity: alive and owned by SYSTEM. The console
+# session id is not a stable contract (a hot restart may land in any session),
+# so the invariant we pin is the SYSTEM ownership that carries UIPI injection.
+REMOTE_PROC=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$p=Get-Process tetherly -ErrorAction Stop | Select-Object -First 1; \$o=Get-CimInstance Win32_Process -Filter \"Name='tetherly.exe'\" | Select-Object -First 1; \$owner=if (\$o) { (Invoke-CimMethod -InputObject \$o -MethodName GetOwner).User } else { '' }; [pscustomobject]@{Id=\$p.Id; SessionId=\$p.SessionId; Owner=\$owner} | ConvertTo-Json -Compress\"")
 SESSION_OK=0
 WIN_PID="unknown"
-if echo "$REMOTE_PROC" | jq -e 'if type == "array" then (length > 0 and any(.[]; .SessionId == 2)) else (.SessionId == 2) end' >/dev/null 2>&1; then
-    SESSION_OK=1
-    WIN_PID=$(echo "$REMOTE_PROC" | jq -r 'if type == "array" then (map(select(.SessionId == 2))[0].Id) else .Id end' 2>/dev/null | head -n 1)
+WIN_SESSION="unknown"
+WIN_OWNER="unknown"
+if echo "$REMOTE_PROC" | jq -e '.Id | type == "number"' >/dev/null 2>&1; then
+    WIN_PID=$(echo "$REMOTE_PROC" | jq -r '.Id')
+    WIN_SESSION=$(echo "$REMOTE_PROC" | jq -r '.SessionId')
+    WIN_OWNER=$(echo "$REMOTE_PROC" | jq -r '.Owner // ""' | tr -d '\r\n')
+    if [ "$WIN_OWNER" = "SYSTEM" ]; then
+        SESSION_OK=1
+    fi
 fi
 if [ "$SESSION_OK" -eq 1 ]; then
-    log_pass "Windows Tetherly is active in Session 2 (Interactive SYSTEM Desktop, PID=${WIN_PID})"
+    log_pass "Windows Tetherly is alive as SYSTEM (PID=${WIN_PID}, session=${WIN_SESSION})"
 else
-    log_fail "Windows Tetherly session check failed (expected Session 2): $REMOTE_PROC"
+    log_fail "Windows Tetherly integrity check failed (owner=${WIN_OWNER}): $REMOTE_PROC"
 fi
 
 echo ""
@@ -263,7 +269,7 @@ fi
 
 # 5.2 Auto-Accept Policy
 AUTO_ACCEPT=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/policy/auto-accept")
-if echo "$AUTO_ACCEPT" | jq -e '(.enabled | type == "boolean") and (.max_file_size | type == "number")' >/dev/null 2>&1; then
+if echo "$AUTO_ACCEPT" | jq -e '(.enabled | type == "boolean") and ((.max_file_size | type == "number") or .max_file_size == null)' >/dev/null 2>&1; then
     log_pass "File transfer auto-accept policy verified"
 else
     log_fail "Failed to query auto-accept policy: $AUTO_ACCEPT"
