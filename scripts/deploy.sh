@@ -114,11 +114,11 @@ deploy_mac() {
     MAC_BIN="$TMP_DIR/tetherly-macos-arm64"
     if [ -n "$RUN_ID" ]; then
         echo "==> Fetching macOS binary from GitHub Actions run ${RUN_ID}..."
-        gh run download "$RUN_ID" -n "tetherly-macos-arm64" -D "$TMP_DIR"
-        gh run download "$RUN_ID" -n "tetherly-release-digests" -D "$TMP_DIR"
+        gh run download "$RUN_ID" -n "tetherly-macos-arm64" -D "$TMP_DIR" --skip-existing
+        gh run download "$RUN_ID" -n "tetherly-release-digests" -D "$TMP_DIR" --skip-existing
     else
         echo "==> Fetching macOS binary from GitHub Release ${TAG}..."
-        gh release download "$TAG" -p "tetherly-macos-arm64" -p "SHA256SUMS" -D "$TMP_DIR"
+        gh release download "$TAG" -p "tetherly-macos-arm64" -p "SHA256SUMS" -D "$TMP_DIR" --skip-existing
     fi
     if [ ! -s "$TMP_DIR/SHA256SUMS" ]; then
         echo "Error: release digest manifest is missing; refusing deployment." >&2
@@ -202,11 +202,11 @@ deploy_windows() {
 
     if [ -n "$RUN_ID" ]; then
         echo "==> Fetching Windows binaries from GitHub Actions run ${RUN_ID}..."
-        gh run download "$RUN_ID" -n "tetherly-windows-x86_64" -D "$TMP_DIR"
-        gh run download "$RUN_ID" -n "tetherly-release-digests" -D "$TMP_DIR"
+        gh run download "$RUN_ID" -n "tetherly-windows-x86_64" -D "$TMP_DIR" --skip-existing
+        gh run download "$RUN_ID" -n "tetherly-release-digests" -D "$TMP_DIR" --skip-existing
     else
         echo "==> Fetching Windows binaries from GitHub Release ${TAG}..."
-        gh release download "$TAG" -p "tetherly-windows-x86_64.exe" -p "tetherly-cli-windows-x86_64.exe" -p "SHA256SUMS" -D "$TMP_DIR"
+        gh release download "$TAG" -p "tetherly-windows-x86_64.exe" -p "tetherly-cli-windows-x86_64.exe" -p "SHA256SUMS" -D "$TMP_DIR" --skip-existing
     fi
     if [ ! -s "$TMP_DIR/SHA256SUMS" ]; then
         echo "Error: release digest manifest is missing; refusing deployment." >&2
