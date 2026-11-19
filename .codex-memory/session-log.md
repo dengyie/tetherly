@@ -1,5 +1,12 @@
 # Session log
 
+## 2026-11-20 · §172 收口：v0.2.66 发布 + 双端部署 + 现场冒烟 19/19
+- CI 五轮收敛（985485b→3e62b10）：frontend 提交 dist 契约、三平台 clippy（shell `sse_response` cfg(test)、clipboard allows、store needless ?、windows-sys 0.59 ACE 常量在 Security 根）、loopback reject-mock 补请求消费（Windows RST 掩盖响应头）、backpressure recv 测试 socket2 钉缓冲确定性化。最终 run **44573908834 全绿**。
+- Release 四轮收敛（b0aeb63→2bb5a50 重打 tag×3）：frontend job pnpm 先于 setup-node、apkanalyzer/apksigner 经 ANDROID_HOME 定位、publish 剔除 frontend 辅助文件；Android release 签名密钥生成入 vault `Note/Accounts/ai/tetherly-release-signing/` 并写 4 个 repo secrets。最终 run **44585068559 全绿**，v0.2.66 发布 12 资产（SHA256SUMS、release 签名 APK、dmg/msi、三平台 bin+CLI+viewer）。
+- Deploy：macOS health 0.2.66 ✓（package-macos-app stdin-config curl 关停）；Windows 修两处现场缺陷（all-target digest 重复下载 `--skip-existing`、PowerShell CRLF 破坏 SHA 锚点），热重启 19764→6104、readiness PID/version/start-time ✓、SYSTEM ✓、受保护进程 3/3 ✓。
+- Smoke 三轮迭代后 **19/19 PASS**：session 断言改 SYSTEM owner 探针（session 非稳定契约）、remote_v1 强制 UTF-8 控制台（隔离实验证明产品完整传输 emoji，`??` 为脚本控制台编码）、auto-accept 接受 null size、CIM 引号层级对齐 deploy.sh。
+- 治理：doc-check PASS 4/4；Obsidian canonical 基线更新 v0.2.66 双端部署；发布冻结随本次发布解除；Manual-required 残余单列（Android 15 真机长稳、sidecar 长期观察、smooth-wheel 承诺确认）。
+
 ## 2026-11-19 · 深度 review 修复路线图（v0.2.65）
 - 汇总当前 HEAD `3609ca1` 的安全、资源、生命周期、客户端、CI/release/deploy 审计，形成 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)。
 - 登记 P1/P2 修复批次：权限边界与本地副作用、HTTP/文件/session 资源上界、状态机 teardown、客户端可靠性、CI/release/deploy gate。

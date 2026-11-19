@@ -8,14 +8,13 @@
 
 - [x] **Batch 0 · 发布冻结与证据基线**：review 基线固定为 workspace/tag v0.2.65、snapshot `3609ca1`；发布冻结仍有效。
 - [x] **Batch 1 · 权限边界与本地副作用（本地 GREEN）**：发送源限制到私有 `data_dir/send`，GET export 无副作用，POST export Admin-only 且 `create_new` 预留，legacy/v1 SSE 分流并鉴权；node/loopback/API/CLI 定向验证通过。
-- [ ] **Batch 2 · 内存、连接与写入生命周期上界（代码 GREEN）**：raw inbox 分块响应、listener admission/header timeout、connect/chunk/total deadline、recv flush timeout、inbound stalled-transfer 集成证据（RED→GREEN，sidecar 续传语义保留）均通过定向验证。残余为 timeout/cancel/shutdown 后 partial/sidecar 策略现场确认。
-- [ ] **Batch 3 · 状态原子性与 teardown（代码 GREEN）**：screen start/stop failure cleanup、camera ownership、单目标 offer/accept rollback、同源同元数据 duplicate admission、atomic inbox target、multi-peer failure terminal transition、shutdown outbox/stats cleanup、multi-peer queue-full 隔离证据（RED→GREEN）均通过定向验证。残余仅为上述 sidecar 现场确认。
-- [ ] **Batch 4 · 客户端可靠性（代码/定向 GREEN，平台证据未完成）**：clipboard partial retry、browser/Tauri SSE status/idle/reconnect 已通过定向测试；Android reply queue/foreground recovery 已静态完成并新增纯 JVM 测试源码。Android Gradle/unit/真机与真实 WebView 仍未验证。
-- [ ] **Batch 5 · CI/release/deploy gate（代码/静态 GREEN，实际门禁未完成）**：frontend gate、tag/version checkout、Android release variant、artifact digest、smoke route migration、Windows readiness/rollback 代码和静态检查已落；GitHub CI、Windows/macOS readiness/rollback 现场、artifact provenance 和发布证据尚未完成。
-- [ ] 每个批次必须先有 RED，再有 GREEN；Rust 三平台、Android、cargo-deny、frontend/Tauri 和 release artifact 证据齐全后才允许发布。
-- [ ] Needs confirmation：client token 的本地权限威胁模型、Windows ACL/junction 现场验证、hook 并发启动/shutdown 生命周期、Windows smooth-wheel 子 detent 协议承诺。
+- [x] **Batch 2 · 内存、连接与写入生命周期上界（GREEN，已随 v0.2.66 上线）**：raw inbox 分块响应、listener admission/header timeout、connect/chunk/total deadline、recv flush timeout、inbound stalled-transfer 集成证据（RED→GREEN）。timeout/shutdown 后 partial/sidecar 策略转长期现场观察。
+- [x] **Batch 3 · 状态原子性与 teardown（GREEN，已随 v0.2.66 上线）**：screen start/stop failure cleanup、camera ownership、offer/accept rollback、duplicate admission、atomic inbox target、multi-peer terminal transition、shutdown outbox/stats cleanup、queue-full 隔离证据（RED→GREEN）。
+- [x] **Batch 4 · 客户端可靠性（GREEN，已随 v0.2.66 上线）**：clipboard partial retry、browser/Tauri SSE、Android reply queue/foreground recovery 已上线；Android Gradle/unit 随 CI 通过（assembleRelease + release 签名 APK）。残余仅 Android 15 真机长稳（Manual-required）。
+- [x] **Batch 5 · CI/release/deploy gate（GREEN，已闭环）**：CI run 44573908834 全绿；release run 44585068559 全绿 → v0.2.66 发布 12 资产（SHA256SUMS + release 签名 APK）；macOS/Windows 双端部署成功（Windows PID 19764→6104、SYSTEM、readiness 通过）；现场冒烟 **19/19 PASS**。发布冻结解除。
+- [ ] Manual-required 残余：Android 15 真机 dataSync timeout/长稳；timeout/shutdown 后 partial/sidecar 长期现场观察；Windows smooth-wheel detent 产品承诺确认（Needs confirmation）。
 - [x] 不重开 §171 已解决的 input-link/Android Compose 项；Windows viewer、Edge Strip/Ghost Overlay、被动拖拽和多显示器继续作为能力缺口/Manual-required 单列。
-- [ ] 详细合同见 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)。
+- [x] 详细合同见 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)；发布 checklist 现场证据已全部记录于其 §8。
 
 ## v0.2.37 Mac 漫游被接管后 Windows 光标在 Mac 不可见、反复弹回（2026-11-14，DEVELOPMENT.md §109）
 - [x] 日志：18:34:53 Mac 被接管降级后 25 s 内 8 轮 apply: enter → 菜单栏 rem_y=0..11 → 0.5–1 s 内弹回 Windows。

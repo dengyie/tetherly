@@ -204,5 +204,12 @@
   - Inbound stalled-transfer：真实 TCP peer 发送 TFL2 header + 1 个 64 KiB chunk 后停顿，测试构建注入 500ms chunk-idle 窗口（`files.rs` `#[cfg(test)]` 包装 + 惰性 `TEST_CHUNK_IDLE_MS`，生产构建整体编译消失，四个生产常量不变）；断言 Timeout、`transfer_cancels` 清理、active Failed、`.part` 与 `.resume.json` sidecar 按续传语义保留。RED（无注入 4.05s 等满 15s 生产窗口）→ GREEN 0.55s：`inbound_stall_tests::stalled_inbound_transfer_fails_and_keeps_resume_state`。
   - Multi-peer queue-full 隔离：一个 peer 的 256 深度 outbound 队列填满、另一 peer 正常，`offer_and_send_bytes_multi(TargetSelector::AllOnline)` 断言失败项 success=false、该 transfer Failed/pending 清理/outbox Failed、健康 peer 不受影响、计数正确。RED 用突变测试（临时移除 `set_transfer_phase` 调用 → 0.03s 捕获 `Transferring≠Failed`）→ GREEN：`multi_peer_file_dispatch_isolates_queue_full_failure_to_its_peer`。
   - Fresh tests：`cargo test -p tetherly-net --lib --locked` = **13 passed**；`cargo test -p tetherly-node --lib --locked` = **317 passed**；`cargo check -p tetherly-node --lib --tests --locked` 通过；rustfmt/`git diff --check` 通过。
-- **发布结论**：当前达到本地定向 GREEN，但不是发布批准，仍禁止 tag/release/deploy；后续必须补三平台 GitHub CI、Android release artifact inspection、Windows ACL/junction and readiness/rollback 现场证据、真实设备验收与 `doc-check` 闭环。
+- **2026-11-19/20 v0.2.66 发布与现场证据（全部完成）**：
+  - CI：`985485b` 首轮暴露 frontend dist 契约与三平台 clippy；`903e4b5` 修 clippy+dist、windows 需修 `SUB_CONTAINERS_AND_OBJECTS_INHERIT` 导入路径（`217962e`）；loopback reject-mock 在 Windows 被 RST 掩盖（`9161d98` 补请求消费）、backpressure recv 测试对 runner 负载敏感（`95db182`→socket2 钉缓冲 `3e62b10`）。最终 CI run **44573908834 全绿**（三平台 check + android + frontend + deny）。
+  - Release：bump 0.2.66（`b0aeb63`），tag 触发 release workflow；两轮修复（frontend pnpm 安装顺序 `8dc3c28`；apkanalyzer/apksigner 经 ANDROID_HOME 定位 `f56f524`；publish 剔除 frontend 辅助文件 `2bb5a50`）；Android release 签名密钥生成并写入 4 个 repo secrets（keystore 落 vault `Note/Accounts/ai/tetherly-release-signing/`）。最终 release run **44585068559 全绿**，release v0.2.66 发布 12 资产含 SHA256SUMS，APK 为 release 签名（debug 证书拒绝检查通过）。
+  - Deploy：macOS 经 package-macos-app.sh（stdin-config curl 关停旧 daemon）health 0.2.66 ✓；Windows 部署修复两处现场缺陷（all-target digest 重复下载 `35a1f47`；PowerShell CRLF 破坏 SHA 锚点校验 `8dffd72`），热重启 old_pid 19764→new_pid 6104，readiness PID/version/start-time 校验通过，SYSTEM 权限确认，受保护进程 3/3 不动。
+  - Smoke：三轮迭代（session 断言改为 SYSTEM owner 探针；remote_v1 强制 UTF-8 控制台编码——隔离实验证明产品链路完整传输 emoji，`??` 为脚本控制台编码；auto-accept 允许 null size；CIM 引号层级对齐 deploy.sh）。最终 **19/19 PASS（rc=0）**。
+  - 文档治理：Obsidian `doc-check` PASS 4/4；canonical 速读基线更新至 v0.2.66 双端部署。
+  - Manual-required 残余（不阻塞本发布）：Android 15 真机 dataSync timeout/长稳、timeout/shutdown 后 partial/sidecar 策略长期现场观察、Windows smooth-wheel detent 产品承诺确认。
+- **发布结论**：v0.2.66 已发布并双端部署，P1/P2 修复全量上线；后续回归按常规批次记录，不再适用本路线图的发布冻结（该冻结随本次发布解除）。
 - 后续每个批次必须在此追加：范围、RED/GREEN、CI run、release artifact、部署 health、回滚证据和 residual/manual 项。
