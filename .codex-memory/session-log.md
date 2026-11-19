@@ -1,4 +1,12 @@
 # Session log
+## 2026-11-20 · v0.2.68：会话所有权治理（暂态回收不再拆线）
+- 深审 v0.2.67 自动重连链路发现矛盾：`NotifyListener.onDestroy/onListenerDisconnected` 与 `ForegroundKeep.onDestroy` 无条件 `session.stop()`——ROM 暂态重绑通知监听（.51/.52 现场实证的模式）即拆线，且无任何路径重启（TetherlyApp 自动启动只在进程冷启动跑一次），配对安装从此静默失联直至下次冷启动。前台服务同理被一并停掉。
+- 修复（commit **eed4612**）：所有权决策收敛到新 `SessionOwnershipPolicy`（5 事件决策表，JVM 单测锁定）：仅 `EXPLICIT_STOP`（ForegroundKeep.stop，现显式补 session.stop）与 `FGS_TIMEOUT`（已含 RestartCoordinator 立即重拨）拆线；`LISTENER_DISCONNECTED/LISTENER_DESTROYED/SERVICE_DESTROYED` 不动会话，重绑落入幂等 `onListenerConnected`。
+- 本地验证：Rust android crate 3/3、fmt/clippy/diff-check 过；本地 JVM 跑不了——本机仅 JDK 25，AGP 8.7.3 拒绝（要求 ≤21），JVM 单测（SessionOwnershipPolicyTest 3 例等）由 CI Android job 验证。
+- CI 44629841213 六作业全绿（android unit + assemble 均 BUILD SUCCESSFUL）；release 44631506377 全绿 → **v0.2.68 发布 12 资产**（APK SHA256 `45a2873d…`，SHA256SUMS 一致）。
+- 用户指令：项目迭代优先，云手机验证暂停；`.52` reboot 后 frpc 未恢复两台仍失联（需云控制台人工恢复）。
+- 红线入册（用户死命令）：[[Note/Infra/云手机 ADB 中继运维手册]] 速读区 + 变更记录双写「严禁重启两台三星云手机」，冷启动类测试一律降级 force-stop + relaunch，整机重启须用户批准。
+
 ## 2026-11-20 · v0.2.67：Android 配对安装自动重连（现场缺陷闭环）
 - 现场缺陷（.51/.52 真机发现）：配对节点 force-stop/升级后冷启动停在连接表单，需手动点「保存并连接」。修复 commit **2c00c08** `feat(android): §172 — auto-reconnect a paired install on process start`。
 - 实现：`AutoConnectPolicy.kt` 冷启动门控（`desktopAddr.isNotBlank() && identity.bin 已持久化` 才自动拨号，全新安装永不自拨默认地址）；`NodeSession.ensureStarted()` 幂等门（替代裸 attach，避免 listener/前台路径与 Application.onCreate 竞争时拆线重拨）；`TetherlyApp.onCreate` 自动启动；`ForegroundKeep` start/onStartCommand 收敛到 ensureStarted。3 个 JVM 单测（paired 自启 / fresh 永不 / 空地址阻断）。
