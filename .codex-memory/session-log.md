@@ -1,4 +1,11 @@
 # Session log
+## 2026-11-20 · v0.2.66 Android 云手机真机验收（用户授权云手机测试）
+- 两台三星云手机（SM-F900F / Android 13，10.144.144.51/52:5555）从 debug 签名旧版升级 release 签名 v0.2.66（versionCode 2066，签名密钥 vault Note/Accounts/ai/tetherly-release-signing/）。
+- .52 全链路 GREEN：adb reverse 45717 → UI PIN 配对（Noise）→ tdev_breflgheng3owukz 已连接；Mac devices online+trusted rtt 20–30ms；NotifyListener 被系统绑定；`cmd notification post` 测试通知 → 零明文 candidate（TetherlySmoke/Shell）到达 Mac 活动流；捕获即触发 ForegroundKeep FGS（dataSync，startForegroundCount=1，PROC_STATE_TOP）——§172 FGS 真机生命周期通过（Android 13 无 6h onTimeout 语义，重启路径仍列 Android 15 Manual-required）。
+- .51 配对成功（tdev_4kcq2woqljktkk6y 已连接）后 force-stop→relaunch 未自动重连（UI 需手动连接，记录为产品观察项：paired 节点冷启动不自动重连）；其 settings put 监听写入未触发 NMS 重绑（binding died 后不再自动恢复，toggle 无效），reboot 恢复中其 frpc 隧道未回（云机控制台侧需重拉），开机绑定验证待 .51 恢复后补。
+- UI 自动化取证：Compose 坐标随分辨率变化须从 uiautomator dump 提取；`input text` 空格截断，PIN 需去空格。
+- 配套修复/沉淀：deploy.sh all-target digest `--skip-existing`、SHA 锚点 CRLF 清理、冒烟脚本 SYSTEM owner 探针 + UTF-8 控制台 + null size；vault 速记两条流水；doc-check PASS。
+
 
 ## 2026-11-20 · §172 收口：v0.2.66 发布 + 双端部署 + 现场冒烟 19/19
 - CI 五轮收敛（985485b→3e62b10）：frontend 提交 dist 契约、三平台 clippy（shell `sse_response` cfg(test)、clipboard allows、store needless ?、windows-sys 0.59 ACE 常量在 Security 根）、loopback reject-mock 补请求消费（Windows RST 掩盖响应头）、backpressure recv 测试 socket2 钉缓冲确定性化。最终 run **44573908834 全绿**。
