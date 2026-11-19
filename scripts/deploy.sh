@@ -245,6 +245,8 @@ deploy_windows() {
     OLD_START_TICKS=$(printf '%s' "$OLD_PROCESS" | jq -r '.start_ticks // empty')
     OLD_EXE=$(printf '%s' "$OLD_PROCESS" | jq -r '.path // empty')
     OLD_SHA256=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"(Get-FileHash -Algorithm SHA256 -LiteralPath '$OLD_EXE').Hash.ToLowerInvariant()\"")
+    # PowerShell over ssh emits CRLF; a trailing CR breaks the hex anchor check.
+    OLD_SHA256=$(printf '%s' "$OLD_SHA256" | tr -d '\r\n')
     if [ -z "$OLD_PID" ] || [ -z "$OLD_START_TICKS" ] || [ -z "$OLD_EXE" ] || ! [[ "$OLD_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
         echo "Error: failed to capture old daemon PID/start time; refusing restart." >&2
         exit 1
