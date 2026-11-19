@@ -350,6 +350,15 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: drop frontend-dist helper files from the release set
+        run: |
+          set -euo pipefail
+          test -d dist
+          # The frontend artifact carries index.html + assets/ for the Tauri
+          # bundler; the dist is committed in-repo and embedded into the
+          # binaries, so it is not a release asset and `gh release create
+          # dist/*` cannot take directories anyway.
+          rm -rf dist/assets dist/index.html
       - name: create digest manifest
         run: |
           set -euo pipefail
