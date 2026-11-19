@@ -119,11 +119,10 @@ class ForegroundKeep : Service() {
         // stale command from attaching a second native session after stop().
         if (!lifecycle.markRunning()) return START_NOT_STICKY
         return try {
-            // A process-recreated START_STICKY service has no launch-side
-            // session marker and must attach again.
-            if (!sessionStarted.compareAndSet(true, false)) {
-                TetherlyApp.instance.session.start()
-            }
+            // Idempotent: Application.onCreate auto-starts a paired install on
+            // process recreation, and ensureStarted skips the redundant
+            // attach instead of tearing down and redialing.
+            TetherlyApp.instance.session.ensureStarted()
             START_STICKY
         } catch (_: Throwable) {
             lifecycle.markFailed()
@@ -161,7 +160,6 @@ class ForegroundKeep : Service() {
         private const val NOTIFICATION_ID = 1
         private const val RESTART_DELAY_MS = 1_000L
         private val lifecycle = ForegroundKeepStateMachine()
-        private val sessionStarted = AtomicBoolean(false)
         private val stopRequested = AtomicBoolean(false)
 
         /** Current service lifecycle, safe to read from the Compose poller. */
@@ -175,13 +173,12 @@ class ForegroundKeep : Service() {
             try {
                 // Attach before the asynchronous service callback so a
                 // notification arriving immediately after listener connect is
-                // not silently dropped.
-                TetherlyApp.instance.session.start()
-                sessionStarted.set(true)
+                // not silently dropped. Idempotent: Application.onCreate may
+                // already have auto-started a paired install.
+                TetherlyApp.instance.session.ensureStarted()
                 val i = Intent(ctx, ForegroundKeep::class.java)
                 if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
             } catch (_: Throwable) {
-                sessionStarted.set(false)
                 TetherlyApp.instance.session.stop()
                 lifecycle.markFailed()
             }
@@ -190,7 +187,6 @@ class ForegroundKeep : Service() {
         fun stop(ctx: Context) {
             RestartCoordinator.cancel()
             stopRequested.set(true)
-            sessionStarted.set(false)
             lifecycle.markStopped()
             ctx.stopService(Intent(ctx, ForegroundKeep::class.java))
         }

@@ -20,9 +20,28 @@ class NodeSession(ctx: Context) {
     @Volatile
     private var deviceId: String = ""
 
+    @Volatile
+    private var started: Boolean = false
+
     /** Local device_id, or "unavailable" before the first successful attach. */
     val identity: String
         get() = if (deviceId.isEmpty()) "unavailable" else deviceId
+
+    /**
+     * True once the native layer has persisted an identity for this install:
+     * a restart can then re-attach without the first-time PIN.
+     */
+    fun pairedBefore(): Boolean = AutoConnectPolicy.identityPersisted(dataDir)
+
+    /**
+     * attach() replaces any previous session internally, but a redundant
+     * attach still tears down and redials; callers that may race the
+     * listener/foreground path use this idempotent form instead.
+     */
+    fun ensureStarted() {
+        if (started) return
+        start()
+    }
 
     fun start() {
         if (!NativeBridge.ensureLoaded()) return
@@ -32,12 +51,18 @@ class NodeSession(ctx: Context) {
         val err = NativeBridge.attach(dataDir.absolutePath, addr.first, addr.second, prefs.pin)
         if (err.isEmpty()) {
             deviceId = NativeBridge.deviceId()
+            started = true
         }
     }
 
     fun stop() {
+        started = false
         NativeBridge.stop()
     }
+
+    /** Cold-start gate: reconnect automatically only after a prior pairing. */
+    fun shouldAutoStart(): Boolean =
+        AutoConnectPolicy.shouldAutoStart(prefs.desktopAddr, pairedBefore())
 
     fun state(): Int = NativeBridge.state()
 
