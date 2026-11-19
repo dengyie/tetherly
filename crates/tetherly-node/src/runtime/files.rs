@@ -237,14 +237,11 @@ pub struct TransferStats {
     pub failed_count: u64,
 }
 
-/// Directory from which privileged file-send routes may read.
-///
-/// The daemon may run as SYSTEM/root while its loopback HTTP clients run as an
-/// ordinary user. Keeping the source under a daemon-owned directory prevents a
-/// token holder from turning the daemon into an arbitrary local-file reader.
-
 /// Resolve and validate a file-send source against the daemon's staging root.
 ///
+/// The daemon may run as SYSTEM/root while its loopback HTTP clients run as an
+/// ordinary user; keeping the source under a daemon-owned directory prevents a
+/// token holder from turning the daemon into an arbitrary local-file reader.
 /// Both the lexical `ParentDir` check and canonical containment check are
 /// intentional: the first keeps the request contract unambiguous, while the
 /// second closes symlink escapes. The returned path is canonical so all later

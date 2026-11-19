@@ -93,7 +93,7 @@ pub fn ensure_private_dir(dir: &Path) -> std::io::Result<PathBuf> {
     }
     #[cfg(windows)]
     set_private_directory_acl(dir)?;
-    Ok(fs::canonicalize(dir)?)
+    fs::canonicalize(dir)
 }
 
 #[cfg(windows)]

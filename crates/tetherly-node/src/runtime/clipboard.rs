@@ -150,6 +150,7 @@ impl ClipboardDeliveryState {
         });
     }
 
+    #[allow(clippy::type_complexity)]
     fn due(
         &mut self,
         now_ms: u64,
@@ -491,6 +492,7 @@ impl Node {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_clipboard_delivery(
         &self,
         set: &ClipSet,
