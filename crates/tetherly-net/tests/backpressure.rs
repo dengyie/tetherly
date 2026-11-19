@@ -125,3 +125,62 @@ async fn a_reading_peer_never_reports_write_stalled() {
     }
     server.await.unwrap();
 }
+
+/// A cancelled send can leave committed bytes in the outbox. A later receive
+/// must apply the same write budget while finishing those bytes instead of
+/// hanging forever before it reads the peer's next frame.
+#[tokio::test]
+async fn recv_path_flush_stall_yields_write_stalled() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        let _sess = accept_session(stream, peer, &cfg(0x71, "server"))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(120)).await;
+    });
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let mut sess = dial_session(stream, addr, &cfg(0x81, "client"))
+        .await
+        .unwrap();
+
+    // Fill the socket and cancel while send_inner is parked in its write. The
+    // frame is already encrypted and committed, so recv_inner must drain it.
+    let mut cancelled = false;
+    for _ in 0..4096 {
+        match tokio::time::timeout(Duration::from_millis(100), sess.send_inner(filler())).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => panic!("unexpected send error before cancellation: {error:?}"),
+            Err(_) => {
+                cancelled = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        cancelled,
+        "socket buffer never filled; test cannot cancel a write"
+    );
+
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        SESSION_WRITE_TIMEOUT + Duration::from_secs(1),
+        sess.recv_inner(),
+    )
+    .await
+    .expect("recv-path flush must be bounded");
+    assert!(
+        matches!(result, Err(NetError::WriteStalled)),
+        "expected recv-path WriteStalled, got {result:?}"
+    );
+    assert!(
+        started.elapsed() >= SESSION_WRITE_TIMEOUT,
+        "the stall must come from the write timeout ({SESSION_WRITE_TIMEOUT:?}), but returned after {:?}",
+        started.elapsed()
+    );
+
+    server.abort();
+}

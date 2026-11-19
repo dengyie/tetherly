@@ -158,6 +158,16 @@ pub(super) struct OutboundFile {
     pub(super) size: u64,
 }
 
+/// An already-validated inbox file ready for a bounded HTTP download.
+/// Keeping the open handle here avoids re-resolving the user-controlled name
+/// after the path checks have completed.
+pub struct InboxFileDownload {
+    pub name: String,
+    pub mime: &'static str,
+    pub size: u64,
+    pub file: std::fs::File,
+}
+
 /// Sidecar persisted next to a `.part` file: lets an interrupted incoming
 /// transfer resume after a process restart. No file content, only progress.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -777,12 +787,10 @@ impl Node {
         }
     }
 
-    /// Read the bytes and MIME type of a completed file from the inbox,
-    /// enforcing strict path traversal guards and FILE_MAX limits.
-    pub fn read_inbox_file(
-        &self,
-        name: &str,
-    ) -> Result<(String, &'static str, Vec<u8>), CoreError> {
+    /// Open a completed inbox file for a bounded download, enforcing strict
+    /// path traversal guards and FILE_MAX limits without reading its contents
+    /// into memory.
+    pub fn open_inbox_download(&self, name: &str) -> Result<InboxFileDownload, CoreError> {
         if name.is_empty()
             || name.contains('/')
             || name.contains('\\')
@@ -801,18 +809,28 @@ impl Node {
         let inbox_dir = self.shared.cfg.data_dir.join("inbox");
         let file_path = inbox_dir.join(&clean_name);
 
-        if !file_path.exists() || !file_path.is_file() {
+        let file = std::fs::File::open(&file_path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CoreError::File("file not found in inbox".into())
+            } else {
+                CoreError::from(e)
+            }
+        })?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
             return Err(CoreError::File("file not found in inbox".into()));
         }
-
-        let meta = std::fs::metadata(&file_path)?;
         if meta.len() > tetherly_core::FILE_MAX {
             return Err(CoreError::FileTooLarge(meta.len()));
         }
 
-        let bytes = std::fs::read(&file_path)?;
         let mime = mime_type_from_name(&clean_name);
-        Ok((clean_name, mime, bytes))
+        Ok(InboxFileDownload {
+            name: clean_name,
+            mime,
+            size: meta.len(),
+            file,
+        })
     }
 
     /// Record a chunk-aligned resume marker in the hub and on disk (sidecar).

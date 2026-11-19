@@ -865,16 +865,21 @@ pub(crate) async fn screen_whiteboard(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let is_json = j || json;
-            let uri = if let Some(ref o) = out {
-                format!("/api/v1/screen/whiteboard/export?out={}", urlencode_path(o))
+            let (method, uri, body) = if let Some(path) = out.clone() {
+                let body = serde_json::to_vec(&serde_json::json!({ "out": path }))?;
+                (
+                    "POST",
+                    "/api/v1/screen/whiteboard/export".to_string(),
+                    Some(body),
+                )
             } else {
-                "/api/v1/screen/whiteboard/export".to_string()
+                ("GET", "/api/v1/screen/whiteboard/export".to_string(), None)
             };
             let (code, resp) = tetherly_node::loopback_request(
                 port,
-                "GET",
+                method,
                 &uri,
-                None,
+                body.as_deref(),
                 tetherly_node::api_token_for(port).as_deref(),
             )
             .await
@@ -901,8 +906,8 @@ pub(crate) async fn screen_whiteboard(
                     .unwrap_or(0);
                 if let Some(ref dest) = out {
                     println!(
-                                    "Whiteboard vector snapshot successfully exported ({items} items) to: {dest}"
-                                );
+                        "Whiteboard vector snapshot successfully exported ({items} items) to: {dest}"
+                    );
                 } else {
                     println!(
                         "{}",

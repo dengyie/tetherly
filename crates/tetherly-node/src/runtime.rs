@@ -40,7 +40,7 @@ use tetherly_core::{
 use tetherly_crypto::Identity;
 use tetherly_net::session::{CONTROL_PORT, FILE_PORT, INPUT_PORT, SCREEN_PORT};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex as AsyncMutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex as AsyncMutex, Semaphore};
 use tracing::debug;
 
 mod actions;
@@ -129,6 +129,10 @@ const SUPERSEDED_SESSION_GRACE: Duration = Duration::from_secs(2);
 /// Screen fragments are large, so their queue is short: a frame that cannot fit
 /// is dropped rather than queued behind a slow link.
 const SCREEN_QUEUE_DEPTH: usize = 32;
+
+/// Process-wide cap for file-channel handlers. LAN and overlay listeners use
+/// the same semaphore so alternate paths cannot multiply pre-auth sockets.
+const FILE_HANDLER_LIMIT: usize = 32;
 
 #[derive(Clone)]
 
@@ -825,6 +829,10 @@ struct Shared {
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
     screen_prev_frame: Mutex<Option<Vec<u8>>>,
+    /// Global admission budget for file-channel handlers. LAN and overlay
+    /// listeners share this semaphore so alternate paths cannot multiply the
+    /// number of pre-auth sockets beyond the process-wide bound.
+    file_admission: Arc<Semaphore>,
     shutdown: watch::Sender<bool>,
     overlay: Mutex<OverlayStatus>,
     /// ANCS ingress. Present only when a transport was attached.
@@ -870,6 +878,11 @@ struct Shared {
     last_auto_sync_hash: Mutex<Option<String>>,
     /// Clip::change_token at the last auto-sync read (None = read next).
     last_clip_token: Mutex<Option<u64>>,
+    /// Serialize clipboard dispatches so polling and explicit sends cannot
+    /// create competing sequence numbers or duplicate retries.
+    clipboard_send_lock: AsyncMutex<()>,
+    /// Bounded per-peer clipboard delivery state owned by the clipboard module.
+    clipboard_delivery: Mutex<clipboard::ClipboardDeliveryState>,
     handoff_policy: Mutex<HandoffPolicy>,
     handoff_inbox: Mutex<HandoffInboxTable>,
     handoff_seq: AtomicU64,
@@ -932,19 +945,19 @@ struct Shared {
     /// stint on a daemon whose log level cannot be raised (the Windows
     /// SYSTEM service) without SSH'ing into its log file.
     pub(crate) input_trace: Mutex<VecDeque<input::InputTraceEntry>>,
+    /// Monotonic generation shared by both screen roles. Every replacement
+    /// claims a new value; all session-scoped state is owned by this token.
+    pub(crate) screen_session_gen: std::sync::atomic::AtomicU64,
     /// Monotonic generation of the active 45720 server channel. Each
-    /// `attach_screen_server` increments it; a pump loop may only run the
-    /// engine-level `on_peer_gone` reset when its generation is still the
-    /// newest — a replaced loop's teardown must not reset its successor.
+    /// `attach_screen_server` mirrors its ownership token here.
     pub(crate) screen_channel_gen: std::sync::atomic::AtomicU64,
     /// Monotonic generation of the active 45720 client (viewer) channel.
-    /// Each `attach_screen_client` increments it; a client pump loop may only
-    /// clear `screen_peer` / `screen_ctl` / `screen_client_out` when its
-    /// generation is still the newest — a replaced loop's exit must not wipe
-    /// the registration triple its successor just wrote (and the reuse check
-    /// in `remote_session_start` reads `screen_peer`, so a stale wipe also
-    /// defeats channel reuse).
+    /// Each `attach_screen_client` mirrors its ownership token here.
     pub(crate) screen_client_gen: std::sync::atomic::AtomicU64,
+    /// Serializes screen registration writes with generation-owned teardown.
+    /// The generation check and all slot clears must be one critical section;
+    /// otherwise an old task can check ownership, yield, and clear a successor.
+    pub(crate) screen_registration: AsyncMutex<()>,
     /// Handle of the running inbound input-client task. A newer accept
     /// aborts the previous one so stacked inbound sessions can never leave
     /// two clients racing on `input_sink` / the real injection sink.
@@ -1273,6 +1286,83 @@ where
             }
         }
     });
+}
+
+/// File-channel accept loop with a process-wide admission budget. The permit is
+/// moved into the handler task and therefore covers header parsing and the full
+/// transfer lifetime. LAN and overlay listeners share the same semaphore.
+fn node_file_accept_loop<F, Fut>(node: Node, listener: TcpListener, label: &'static str, handler: F)
+where
+    F: Fn(Node, TcpStream, SocketAddr) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<(), tetherly_net::NetError>> + Send,
+{
+    let mut stop = node.shared.shutdown.subscribe();
+    let handler = Arc::new(handler);
+    tokio::spawn(async move {
+        loop {
+            if *stop.borrow() {
+                break;
+            }
+            let accepted = tokio::select! {
+                _ = stop.changed() => {
+                    if *stop.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                accepted = listener.accept() => accepted,
+            };
+            match accepted {
+                Ok((stream, addr)) => {
+                    // Acquire before spawning the handler task. This keeps the
+                    // admission queue bounded by the listener itself, while the
+                    // select makes a waiter drop its socket on shutdown.
+                    let permit = tokio::select! {
+                        _ = wait_for_shutdown(&mut stop) => {
+                            drop(stream);
+                            break;
+                        }
+                        permit = node.shared.file_admission.clone().acquire_owned() => {
+                            match permit {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    drop(stream);
+                                    break;
+                                }
+                            }
+                        }
+                    };
+                    let node = node.clone_handle();
+                    let handler = handler.clone();
+                    let mut handler_stop = node.shared.shutdown.subscribe();
+                    tokio::spawn(async move {
+                        let result = tokio::select! {
+                            _ = wait_for_shutdown(&mut handler_stop) => Ok(()),
+                            result = async move {
+                                let _permit = permit;
+                                handler(node, stream, addr).await
+                            } => result,
+                        };
+                        if let Err(e) = result {
+                            debug!(%e, %addr, label, "channel");
+                        }
+                    });
+                }
+                Err(e) => {
+                    debug!(%e, label, "accept");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    });
+}
+
+/// Wait until shutdown is requested, including the already-shutdown state.
+async fn wait_for_shutdown(stop: &mut watch::Receiver<bool>) {
+    if *stop.borrow() {
+        return;
+    }
+    let _ = stop.changed().await;
 }
 
 fn route_addr(table: &RouteTable, device_id: &str) -> Option<SocketAddr> {

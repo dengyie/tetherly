@@ -114,31 +114,31 @@ impl Node {
     pub(super) async fn attach_screen_server(&self, mut sess: ActiveSession) {
         let peer_id = sess.peer_id.clone();
         let (tx, mut rx) = mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
-        // Generation tag: when this loop exits it must only run the
-        // engine-level `on_peer_gone` if it is STILL the active channel — a
-        // replacement attach (new dial) must not be reset by this loop's
-        // teardown racing behind it. The fetch_add happens INSIDE the engine
-        // lock so an old loop's exit check (same lock) can never interleave
-        // between "gen still looks current" and this attach's
-        // `on_peer_connected` — the m6_7 CI race: a middle generation's
-        // teardown ran its check before the next attach bumped the gen, then
-        // its `on_peer_gone` landed after the new attach, wiping the fresh
-        // consent and wedging the engine back at `Requested`/`Idle`.
+        // Claim one generation for every screen role. Registration and the
+        // generation claim are serialized with teardown so an old pump cannot
+        // check ownership, yield, and clear a replacement's state.
         let my_gen = {
-            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            let _registration = self.shared.screen_registration.lock().await;
             let gen = self
                 .shared
+                .screen_session_gen
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.shared
                 .screen_channel_gen
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                .store(gen, std::sync::atomic::Ordering::SeqCst);
             let displays = self.screen_displays();
-            if !displays.is_empty() {
-                engine.set_displays(displays);
+            {
+                let mut engine = self.shared.screen_engine.lock().expect("screen");
+                if !displays.is_empty() {
+                    engine.set_displays(displays);
+                }
+                engine.on_peer_connected();
             }
-            engine.on_peer_connected();
+            *self.shared.screen_out.lock().await = Some(tx.clone());
+            *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
             gen
         };
-        *self.shared.screen_out.lock().await = Some(tx);
-        *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
         self.refresh_screen_codec();
         // A new screen session re-evaluates every ADR-083/084/085 bandwidth
         // tier from scratch — not just bitrate. The fps/scale/profile flags
@@ -919,43 +919,55 @@ impl Node {
                     }
                 }
             }
-            // Only reset the engine when this loop still owns the channel:
-            // a newer attach has incremented the generation past ours. The
-            // check runs INSIDE the engine lock, the same lock the attach
-            // holds while bumping the generation — so an exit can never
-            // observe "still newest" and then land its `on_peer_gone` after
-            // a new attach's `on_peer_connected` (the m6_7 CI race). The
-            // async channel/peer clears happen after the guard is dropped
-            // (MutexGuard is not Send across the awaits below).
+            // Session-owned teardown: registration lock covers the generation
+            // check and every session-scoped slot/state mutation. No await is
+            // allowed while ownership is being decided or state is cleared.
             let still_active = {
-                let mut engine = node.shared.screen_engine.lock().expect("screen");
+                let _registration = node.shared.screen_registration.lock().await;
                 let current = node
                     .shared
-                    .screen_channel_gen
+                    .screen_session_gen
                     .load(std::sync::atomic::Ordering::SeqCst);
-                if current == my_gen + 1 {
-                    engine.on_peer_gone();
+                if current == my_gen {
+                    {
+                        let mut engine = node.shared.screen_engine.lock().expect("screen");
+                        engine.on_peer_gone();
+                    }
+                    *node.shared.screen_peer.lock().expect("screen_peer") = None;
+                    *node.shared.screen_out.lock().await = None;
+                    node.shared
+                        .screen_privacy_enabled
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    node.shared
+                        .screen_privacy_lock_input
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    node.shared
+                        .screen_peer_recording
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    node.shared
+                        .screen_peer_watermark_enforced
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    true
+                } else {
+                    false
                 }
-                current == my_gen + 1
             };
             if still_active {
-                *node.shared.screen_peer.lock().expect("screen_peer") = None;
-                *node.shared.screen_out.lock().await = None;
+                node.shared.screen_privacy_last_change_us.store(
+                    node.shared.clock.unix_us(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
-            node.shared
-                .screen_privacy_enabled
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            node.shared
-                .screen_privacy_lock_input
-                .store(false, std::sync::atomic::Ordering::Relaxed);
             let final_state = node.screen_state();
             let final_allowed =
                 matches!(final_state, ScreenState::Allowed | ScreenState::Streaming);
-            node.emit(UiEvent::screen_state_changed(
-                final_state.as_str(),
-                final_allowed,
-                None,
-            ));
+            if still_active {
+                node.emit(UiEvent::screen_state_changed(
+                    final_state.as_str(),
+                    final_allowed,
+                    None,
+                ));
+            }
         });
     }
 
@@ -964,22 +976,26 @@ impl Node {
     /// sink, and acks the sequence it accepted.
     pub(super) async fn attach_screen_client(&self, mut sess: ActiveSession) {
         let peer_id = sess.peer_id.clone();
-        // Client-side generation tag (mirror of the server-side
-        // `screen_channel_gen`): this loop may only clear the registration
-        // triple on exit if it is STILL the newest client channel. Bumped
-        // before the fields are written so a replaced loop's exit check
-        // always observes a newer generation.
-        let my_client_gen = self
-            .shared
-            .screen_client_gen
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let (ctl_tx, mut ctl_rx) = mpsc::channel::<ControlMsg>(SCREEN_QUEUE_DEPTH);
-        *self.shared.screen_ctl.lock().await = Some(ctl_tx);
-        let (client_frame_tx, mut client_frame_rx) =
-            mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
-        *self.shared.screen_client_out.lock().await = Some(client_frame_tx);
-        *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
+        // Claim the shared ownership token before publishing any client slot.
+        // This serializes replacement with both server and client teardown.
+        let (my_client_gen, mut ctl_rx, mut client_frame_rx) = {
+            let _registration = self.shared.screen_registration.lock().await;
+            let gen = self
+                .shared
+                .screen_session_gen
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.shared
+                .screen_client_gen
+                .store(gen, std::sync::atomic::Ordering::SeqCst);
+            let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(SCREEN_QUEUE_DEPTH);
+            let (client_frame_tx, client_frame_rx) =
+                mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
+            *self.shared.screen_ctl.lock().await = Some(ctl_tx);
+            *self.shared.screen_client_out.lock().await = Some(client_frame_tx);
+            *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
+            (gen, ctl_rx, client_frame_rx)
+        };
         // A new screen session re-evaluates the ADR-078 bitrate tier.
         self.shared
             .screen_bitrate_applied
@@ -2881,57 +2897,70 @@ impl Node {
                 }
             }
             receiver.on_peer_gone();
-            *node
-                .shared
-                .screen_playout_stats
-                .lock()
-                .expect("playout stats") = receiver.playout_stats();
-            *node
-                .shared
-                .screen_cursor_stats
-                .lock()
-                .expect("cursor stats") = receiver.cursor_stats();
-            *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
-            *node.shared.screen_seq_trace.lock().expect("seq trace") = receiver.trace_pairs();
-            *node.shared.screen_sync_stats.lock().expect("sync stats") = receiver.sync_stats();
-            // Only clear the registration triple when this loop is still the
-            // newest client channel. A replaced loop's late exit must not wipe
-            // the fields its successor just wrote: `screen_ctl=None` breaks
-            // every control send of the new session, and `screen_peer=None`
-            // defeats the cross-session channel-reuse check in
-            // `remote_session_start`.
-            let still_newest_client = node
-                .shared
-                .screen_client_gen
-                .load(std::sync::atomic::Ordering::SeqCst)
-                == my_client_gen;
+            let final_playout_stats = receiver.playout_stats();
+            let final_cursor_stats = receiver.cursor_stats();
+            let final_rx_stats = receiver.stats();
+            let final_seq_trace = receiver.trace_pairs();
+            let final_sync_stats = receiver.sync_stats();
+            // Receiver state is session-owned too: a stale client must not
+            // reset adaptive/privacy disclosure state for a replacement.
+            let still_newest_client = {
+                let _registration = node.shared.screen_registration.lock().await;
+                let current = node
+                    .shared
+                    .screen_session_gen
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if current == my_client_gen {
+                    *node
+                        .shared
+                        .screen_playout_stats
+                        .lock()
+                        .expect("playout stats") = final_playout_stats;
+                    *node
+                        .shared
+                        .screen_cursor_stats
+                        .lock()
+                        .expect("cursor stats") = final_cursor_stats;
+                    *node.shared.screen_rx_stats.lock().expect("screen rx") = final_rx_stats;
+                    *node.shared.screen_seq_trace.lock().expect("seq trace") = final_seq_trace;
+                    *node.shared.screen_sync_stats.lock().expect("sync stats") = final_sync_stats;
+                    *node.shared.screen_peer.lock().expect("screen_peer") = None;
+                    *node.shared.screen_ctl.lock().await = None;
+                    *node.shared.screen_client_out.lock().await = None;
+                    node.shared
+                        .screen_privacy_enabled
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    node.shared
+                        .screen_privacy_lock_input
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    node.shared
+                        .screen_peer_recording
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    node.shared
+                        .screen_peer_watermark_enforced
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    true
+                } else {
+                    false
+                }
+            };
             if still_newest_client {
-                *node.shared.screen_peer.lock().expect("screen_peer") = None;
-                *node.shared.screen_ctl.lock().await = None;
-                *node.shared.screen_client_out.lock().await = None;
-            }
-            node.shared
-                .screen_privacy_enabled
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            node.shared
-                .screen_privacy_lock_input
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            node.shared
-                .screen_bitrate_applied
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            node.shared
-                .screen_fps_applied
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            node.shared
-                .screen_scale_applied
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            node.shared
-                .screen_profile_applied
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            node.shared
-                .screen_peer_watermark_enforced
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            if still_newest_client {
+                node.shared
+                    .screen_bitrate_applied
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                node.shared
+                    .screen_fps_applied
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                node.shared
+                    .screen_scale_applied
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                node.shared
+                    .screen_profile_applied
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                node.shared.screen_privacy_last_change_us.store(
+                    node.shared.clock.unix_us(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 node.emit(UiEvent::screen_state_changed("idle", false, None));
             }
         });

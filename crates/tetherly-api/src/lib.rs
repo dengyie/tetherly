@@ -6197,6 +6197,28 @@ pub struct ScreenRecordingSnapshotRequest {
     pub format: Option<String>,
 }
 
+/// `POST /screen/snapshot` export request. GET accepts only read-only format
+/// selection; output destinations are carried in this body so the handler can
+/// apply the export-directory policy before invoking the runtime.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenSnapshotRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub format: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub out: Option<String>,
+}
+
+/// `POST /screen/whiteboard/export` export request.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct ScreenWhiteboardExportRequest {
+    #[cfg_attr(test, ts(optional))]
+    pub out: Option<String>,
+}
+
 /// Screen v1 contract: `ScreenCursorPatch` (sparse, deny_unknown_fields).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -6969,7 +6991,17 @@ mod bindings {
     use ts_rs::{Config, TS};
 
     fn decl<T: TS>(cfg: &Config) -> String {
-        format!("export {}\n", T::decl(cfg))
+        let raw = format!("export {}\n", T::decl(cfg));
+        // ts-rs leaves a trailing space after the field separator whenever a
+        // doc comment forces a line wrap; trim line ends so the committed
+        // bindings stay `git diff --check` clean.
+        let mut trimmed = raw
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        trimmed.push('\n');
+        trimmed
     }
 
     fn render() -> String {
@@ -7013,6 +7045,7 @@ mod bindings {
             decl::<TransferDirection>(&cfg),
             decl::<TransferPhase>(&cfg),
             decl::<Transfer>(&cfg),
+            decl::<TransferStats>(&cfg),
             decl::<Transfers>(&cfg),
             decl::<InboxFile>(&cfg),
             decl::<Inbox>(&cfg),
@@ -7023,6 +7056,7 @@ mod bindings {
             decl::<LayoutPolicy>(&cfg),
             decl::<Settings>(&cfg),
             decl::<SettingsGeneral>(&cfg),
+            decl::<TrayOwner>(&cfg),
             decl::<SettingsTransfer>(&cfg),
             decl::<SettingsPatch>(&cfg),
             decl::<InboxOpenRequest>(&cfg),
@@ -7301,6 +7335,8 @@ mod bindings {
             decl::<ScreenRecordingStartRequest>(&cfg),
             decl::<ScreenPlaybackStartRequest>(&cfg),
             decl::<ScreenRecordingSnapshotRequest>(&cfg),
+            decl::<ScreenSnapshotRequest>(&cfg),
+            decl::<ScreenWhiteboardExportRequest>(&cfg),
             decl::<ScreenCursorPatch>(&cfg),
             decl::<ScreenTrendlinePatch>(&cfg),
             decl::<ScreenProbePatch>(&cfg),
@@ -7369,6 +7405,7 @@ mod bindings {
             decl::<DisplayDecision>(&cfg),
             decl::<DisplayPolicyDto>(&cfg),
             decl::<DisplayPolicyPatch>(&cfg),
+            decl::<DisplayModeDto>(&cfg),
             decl::<DisplayAttachRequest>(&cfg),
             decl::<DisplayDetachRequest>(&cfg),
         ] {

@@ -58,6 +58,7 @@ fn device_and_counts(id: &str) -> Vec<Mark> {
 pub fn project(ev: &UiEvent) -> Vec<Mark> {
     use UiEvent as E;
     match ev {
+        E::V1 { .. } => Vec::new(),
         E::PeerUp { device_id, .. }
         | E::PeerDown { device_id }
         | E::PeerBlocked { device_id, .. }
@@ -103,9 +104,10 @@ pub fn project(ev: &UiEvent) -> Vec<Mark> {
         | E::ResourceHandoffReceived { .. }
         | E::ResourceHandoffDispatched { .. }
         | E::NotificationBannerSent { .. } => invalidate(Topic::Activity),
-        E::ClipboardSynced { .. } | E::ClipboardCleared { .. } | E::ClipboardSyncBlocked { .. } => {
-            invalidate(Topic::Clipboard)
-        }
+        E::ClipboardSynced { .. }
+        | E::ClipboardDelivery { .. }
+        | E::ClipboardCleared { .. }
+        | E::ClipboardSyncBlocked { .. } => invalidate(Topic::Clipboard),
         E::FileAutoAcceptChanged { .. }
         | E::AncsRuleChanged { .. }
         | E::NotifyConfigChanged { .. }

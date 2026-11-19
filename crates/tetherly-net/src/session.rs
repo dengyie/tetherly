@@ -110,7 +110,7 @@ impl ActiveSession {
     }
 
     pub async fn send_inner(&mut self, mut frame: InnerFrame) -> Result<(), NetError> {
-        self.flush_outbox().await?;
+        self.flush_outbox_bounded().await?;
         if self.rekey_due(unix_now()) {
             self.drive_rekey().await?;
         }
@@ -119,7 +119,7 @@ impl ActiveSession {
         // A fresh transport never needs a rekey, so this does not re-enter.
         let ct = self.transport.encrypt(&plain)?;
         self.queue_tagged(TAG_DATA, &ct)?;
-        self.flush_outbox().await
+        self.flush_outbox_bounded().await
     }
 
     /// Commit `tag | u32 len | body` to the outbox. Synchronous, so a frame is
@@ -137,7 +137,9 @@ impl ActiveSession {
     }
 
     /// Push committed bytes to the socket. Cancellation-safe: `write` either
-    /// accepted `n` bytes (recorded before the next await) or none.
+    /// accepted `n` bytes (recorded before the next await) or none. Keep the
+    /// committed bytes until `flush` completes: if that await is cancelled,
+    /// the next attempt retries the flush without writing the frame twice.
     async fn flush_outbox(&mut self) -> Result<(), NetError> {
         while self.outbox_sent < self.outbox.len() {
             let n = self.writer.write(&self.outbox[self.outbox_sent..]).await?;
@@ -147,14 +149,24 @@ impl ActiveSession {
             self.outbox_sent += n;
         }
         if !self.outbox.is_empty() {
+            self.writer.flush().await?;
             self.outbox.clear();
             self.outbox_sent = 0;
             if self.outbox.capacity() > OUTBOX_RETAIN {
                 self.outbox.shrink_to(OUTBOX_RETAIN);
             }
-            self.writer.flush().await?;
         }
         Ok(())
+    }
+
+    /// Bound every outbox write, including flushes triggered by receive and
+    /// rekey paths. A timeout drops only this future; `flush_outbox` retains
+    /// its progress so a later call can resume without duplicating bytes.
+    async fn flush_outbox_bounded(&mut self) -> Result<(), NetError> {
+        match tokio::time::timeout(SESSION_WRITE_TIMEOUT, self.flush_outbox()).await {
+            Ok(result) => result,
+            Err(_) => Err(NetError::WriteStalled),
+        }
     }
 
     /// [`send_inner`] under [`SESSION_WRITE_TIMEOUT`]. Bounding the write turns
@@ -173,7 +185,7 @@ impl ActiveSession {
     pub async fn recv_inner(&mut self) -> Result<InnerFrame, NetError> {
         // Bytes a cancelled send (or a rekey `m2`) committed must reach the
         // peer even if this side only ever receives from now on.
-        self.flush_outbox().await?;
+        self.flush_outbox_bounded().await?;
         if self.rekey_due(unix_now()) {
             self.drive_rekey().await?;
         }
@@ -225,7 +237,7 @@ impl ActiveSession {
             self.rekey_state = Some(RekeyInFlight { hs });
         }
         // `m1` must be on the wire before waiting for the reply.
-        self.flush_outbox().await?;
+        self.flush_outbox_bounded().await?;
         self.await_rekey_reply().await
     }
 
@@ -284,7 +296,7 @@ impl ActiveSession {
         transport.set_started(unix_now());
         self.transport = transport;
         debug!(peer = %self.peer_id, "noise rekey complete (responder)");
-        self.flush_outbox().await
+        self.flush_outbox_bounded().await
     }
 
     pub fn handshake_hash(&self) -> &[u8; 32] {

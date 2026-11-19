@@ -17,6 +17,7 @@ const transfers = (over: Partial<Transfers> = {}): Transfers => ({
   active_count: 0,
   terminal_count: 0,
   transfers: [],
+  stats: { bytes_sent: 0, bytes_received: 0, completed_count: 0, failed_count: 0 },
   ...over,
 });
 
@@ -52,6 +53,7 @@ const settings = (over: Partial<Settings> = {}): Settings => ({
     reconnect: true,
     loopback_only: false,
     overlay_enabled: true,
+    tray_owner: "daemon",
   },
   transfer: { auto_accept: false },
   ...over,

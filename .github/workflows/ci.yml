@@ -9,6 +9,25 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - name: install frontend dependencies
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+      - name: check, test, build, and verify committed dist
+        working-directory: client
+        run: pnpm build:ci
+
   check:
     strategy:
       fail-fast: false

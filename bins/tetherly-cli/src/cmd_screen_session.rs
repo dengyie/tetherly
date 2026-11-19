@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Screen session lifecycle: allow/revoke/start/stop/status/snapshot.
 
-use super::util::{loopback_get, loopback_post, urlencode_path};
+use super::util::{loopback_get, loopback_post};
 use super::*;
 
 /// `tetherly-cli screen allow` -- Allow arm of the screen dispatcher.
@@ -896,7 +896,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Motion Scroll:  status: {} · max_disp: {motion_max_disp}px · motion_frames: {motion_frames_sent} · fallback: {motion_fallback} · saved: {motion_saved_bytes}B",
-                if motion_enabled { "enabled" } else { "disabled" }
+                if motion_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let tile_enabled = v
@@ -960,7 +964,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
             };
             println!(
                 "  Tile Dictionary:  status: {} · entries: {tile_cache_entries} · hits: {tile_cache_hits} · misses: {tile_cache_misses} · hit_ratio: {hit_pct:.1}% · saved: {tile_cache_saved_bytes}B",
-                if tile_cache_enabled { "enabled" } else { "disabled" }
+                if tile_cache_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let focus_enabled = v
@@ -1043,7 +1051,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Palette:     status: {} · max_colors: {tile_palette_max_colors} · solid: {tile_palette_solid_tiles} · bilevel: {tile_palette_bilevel_tiles} · palette: {tile_palette_palette_tiles} · truecolor: {tile_palette_truecolor_tiles} · saved: {tile_palette_saved_bytes}B",
-                if tile_palette_enabled { "enabled" } else { "disabled" }
+                if tile_palette_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let tile_predict_enabled = v
@@ -1069,7 +1081,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         if tile_predict_enabled || tile_predict_tiles_sent > 0 || tile_predict_saved_bytes > 0 {
             println!(
                 "  Tile Predict:     status: {} · filter: {tile_predict_filter_mode} · rct: {tile_predict_enable_rct} · predict_tiles: {tile_predict_tiles_sent} · saved: {tile_predict_saved_bytes}B",
-                if tile_predict_enabled { "enabled" } else { "disabled" }
+                if tile_predict_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let tile_present_enabled = v
@@ -1110,7 +1126,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Present:     status: {} · vsync: {tile_present_vsync_mode} · double_buf: {tile_present_double_buffer} · anti_tear: {tile_present_tear_prevention} · committed_tx: {tile_present_committed_transactions} · swapped: {tile_present_swapped_frames} · torn_prevented: {tile_present_torn_frames_prevented} · avg_latency: {tile_present_avg_swap_latency_us}µs",
-                if tile_present_enabled { "enabled" } else { "disabled" }
+                if tile_present_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let tile_nack_enabled = v
@@ -1144,7 +1164,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Micro-NACK:  status: {} · timeout: {tile_nack_timeout_ms}ms · max_retries: {tile_nack_max_retries} · nack_sent: {tile_nack_requests_sent} · retransmitted: {tile_nack_tiles_retransmitted} · degraded: {tile_nack_degraded_commits}",
-                if tile_nack_enabled { "enabled" } else { "disabled" }
+                if tile_nack_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let tile_saliency_enabled = v
@@ -1187,7 +1211,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Saliency:    status: {} · high_thresh: {tile_saliency_high_threshold} · low_thresh: {tile_saliency_low_threshold} · drop_bg_congest: {tile_saliency_drop_background_on_congestion} · critical: {tile_saliency_critical_tiles} · normal: {tile_saliency_normal_tiles} · background: {tile_saliency_background_tiles} · bg_skipped: {tile_saliency_background_skipped}",
-                if tile_saliency_enabled { "enabled" } else { "disabled" }
+                if tile_saliency_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let tile_lod_enabled = v
@@ -1226,7 +1254,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile LoD Downsample: status: {} · max_lod: Lod{tile_lod_max_lod} · auto_lod_congest: {tile_lod_auto_lod_on_congestion} · lod0: {tile_lod0_tiles} · lod1: {tile_lod1_tiles} · lod2: {tile_lod2_tiles} · bytes_saved: {tile_lod_bytes_saved} B",
-                if tile_lod_enabled { "enabled" } else { "disabled" }
+                if tile_lod_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let tile_batch_enabled = v
@@ -1264,7 +1296,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Batching:    status: {} · target_chunk: {tile_batch_target_chunk_bytes} B · pacing: {tile_batch_pacing_interval_us} µs · batches: {tile_batches_sent} · chunks: {tile_chunks_sent} · avg_chunk: {tile_batch_avg_chunk_bytes} B · pauses: {tile_batch_pacing_pauses}",
-                if tile_batch_enabled { "enabled" } else { "disabled" }
+                if tile_batch_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
         let tile_motion_enabled = v
@@ -1298,7 +1334,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Motion Est:  status: {} · max_disp: {tile_motion_max_displacement} px · min_match: {tile_motion_min_match_ratio}% · motion_tiles: {tile_motion_tiles_sent} · fallback_tiles: {tile_motion_fallback_tiles_sent} · bytes_saved: {tile_motion_bytes_saved} B",
-                if tile_motion_enabled { "enabled" } else { "disabled" }
+                if tile_motion_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
         }
     }
@@ -1424,17 +1464,30 @@ pub(crate) async fn screen_snapshot(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let query = match (&out, format.as_str()) {
-        (Some(o), f) => format!("?format={f}&out={}", urlencode_path(o)),
-        (None, f) => format!("?format={f}"),
-    };
-    let uri = format!("/api/screen/snapshot{query}");
-    let (code, resp) = loopback_get(ui_port, &uri).await.map_err(|e| {
-        anyhow::anyhow!(
-            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let (code, resp) = if let Some(path) = out {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "format": format,
+            "out": path,
+        }))?;
+        tetherly_loopback::loopback_post(ui_port, "/api/v1/screen/snapshot", &body)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?
+    } else {
+        let uri = format!("/api/v1/screen/snapshot?format={format}");
+        tetherly_loopback::loopback_get(ui_port, &uri)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                  start one with `tetherly --data-dir <dir> run` first"
-        )
-    })?;
+                )
+            })?
+    };
     if code != 200 {
         anyhow::bail!(
             "screen snapshot failed (HTTP {code}): {}",

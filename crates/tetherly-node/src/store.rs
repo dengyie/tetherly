@@ -48,7 +48,12 @@ pub const MICROPHONE_POLICY_FILE: &str = "microphone_policy.json";
 pub const BENCH_POLICY_FILE: &str = "bench_policy.json";
 pub const BANDWIDTH_PROFILES_FILE: &str = "bandwidth_profiles.json";
 pub const GESTURE_MAP_FILE: &str = "gesture_map.json";
+pub const SEND_STAGING_DIR: &str = "send";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
+
+pub fn send_staging_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(SEND_STAGING_DIR)
+}
 
 pub fn default_data_dir() -> PathBuf {
     if let Ok(p) = std::env::var("TETHERLY_DATA_DIR") {
@@ -67,6 +72,151 @@ pub fn ensure_dir(dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     restrict_user_only(dir);
     Ok(())
+}
+
+/// Create a daemon-owned private directory and reject symlink/reparse roots.
+/// On Windows, install a protected DACL for the current owner, SYSTEM and
+/// Administrators; on Unix, restrict access to the owner.
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let metadata = fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private directory must be a real directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    set_private_directory_acl(dir)?;
+    Ok(fs::canonicalize(dir)?)
+}
+
+#[cfg(windows)]
+fn set_private_directory_acl(path: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{
+        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SET_ACCESS, SE_FILE_OBJECT,
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT, TRUSTEE_IS_SID, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::ACL;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+
+    const DACL_SECURITY_INFORMATION: u32 = 4;
+    const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+    let path_w: Vec<u16> = path
+        .to_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF8 path"))?
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let current_sid = current_user_sid()?;
+    let system_sid = sid_from_string("S-1-5-18");
+    let admins_sid = sid_from_string("S-1-5-32-544");
+    let mut entries = Vec::new();
+    for sid in [&current_sid, &system_sid, &admins_sid] {
+        entries.push(EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_ALL_ACCESS,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: 0,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: 0,
+                ptstrName: sid.as_ptr() as *mut u16,
+            },
+        });
+    }
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    // A null old ACL plus SET_ACCESS creates a DACL containing only the listed
+    // principals; protected DACL prevents inheritance from a user-writable parent.
+    let rc = unsafe {
+        SetEntriesInAclW(
+            entries.len() as u32,
+            entries.as_ptr(),
+            std::ptr::null_mut(),
+            &mut acl,
+        )
+    };
+    if rc != ERROR_SUCCESS || acl.is_null() {
+        return Err(std::io::Error::from_raw_os_error(rc as i32));
+    }
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            path_w.as_ptr() as *mut u16,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null_mut(),
+        )
+    };
+    unsafe {
+        let _ = LocalFree(acl as *mut _);
+    }
+    if rc != ERROR_SUCCESS {
+        return Err(std::io::Error::from_raw_os_error(rc as i32));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn current_user_sid() -> std::io::Result<Vec<u8>> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut needed = 0u32;
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed) };
+    if needed == 0 {
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut buffer = vec![0u8; needed as usize];
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr() as *mut _,
+            needed,
+            &mut needed,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    let sid = user.User.Sid;
+    use windows_sys::Win32::Security::{GetLengthSid, IsValidSid};
+    if unsafe { IsValidSid(sid) } == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid current SID",
+        ));
+    }
+    let len = unsafe { GetLengthSid(sid) } as usize;
+    if len == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid current SID length",
+        ));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(sid as *const u8, len).to_vec() })
 }
 
 fn restrict_user_only(path: &Path) {

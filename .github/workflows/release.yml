@@ -6,20 +6,104 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v0.1.4)'
-        required: false
+        description: 'Release tag (e.g. v0.2.65)'
+        required: true
         default: ''
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      version_code: ${{ steps.release.outputs.version_code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: resolve and checkout immutable release tag
+        id: release
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${TAG_INPUT}"
+          fi
+          if ! [[ "${tag}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tag must match vX.Y.Z: ${tag}" >&2
+            exit 1
+          fi
+          git fetch --force --tags origin "refs/tags/${tag}:refs/tags/${tag}"
+          git checkout --detach "refs/tags/${tag}"
+          [ "$(git describe --tags --exact-match HEAD)" = "${tag}" ]
+
+          version="${tag#v}"
+          cargo_version="$(sed -n '/^\[workspace.package\]/,/^\[/{ s/.*"\([0-9][^"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
+          client_version="$(sed -n 's/.*"version": "\([0-9][^"]*\)".*/\1/p' client/package.json | head -n 1)"
+          tauri_version="$(sed -n 's/.*"version": "\([0-9][^"]*\)".*/\1/p' client/src-tauri/tauri.conf.json | head -n 1)"
+          for actual in "${cargo_version}" "${client_version}" "${tauri_version}"; do
+            [ "${actual}" = "${version}" ] || {
+              echo "version mismatch for ${tag}: expected ${version}, got ${actual}" >&2
+              exit 1
+            }
+          done
+          pnpm --dir client install --frozen-lockfile
+          (cd client && pnpm check && pnpm test && pnpm build)
+          test -z "$(git status --porcelain -- client/dist)" || {
+            echo 'committed client/dist is stale for release source' >&2
+            exit 1
+          }
+          IFS=. read -r major minor patch <<< "${version}"
+          [ "${major}" -le 2100 ] && [ "${minor}" -lt 1000 ] && [ "${patch}" -lt 1000 ]
+          version_code=$((major * 1000000 + minor * 1000 + patch))
+          [ "${version_code}" -gt 0 ] && [ "${version_code}" -le 2100000000 ]
+          {
+            printf 'tag=%s\n' "${tag}"
+            printf 'version=%s\n' "${version}"
+            printf 'version_code=%s\n' "${version_code}"
+          } >> "${GITHUB_OUTPUT}"
+
+  frontend:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - name: enable pnpm
+        run: corepack enable
+      - name: build frontend from release source
+        working-directory: client
+        run: pnpm install --frozen-lockfile && pnpm build:ci
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tetherly-frontend-dist
+          path: client/dist
+          if-no-files-found: error
+
   # Building on ubuntu-22.04 (glibc 2.35) leaves the artifact demanding
   # GLIBC_2.34, which will not load on the glibc 2.31 hosts the spec claims to
   # support. Build inside a Debian 11 (glibc 2.31) container instead: the
   # dynamic symbol floor then stays <= 2.31, so one binary runs on Debian 11 /
   # Ubuntu 20.04 and everything newer.
   build-linux:
+    needs: [prepare, frontend]
     runs-on: ubuntu-latest
     container: debian:bullseye
     defaults:
@@ -43,6 +127,8 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git pkg-config binutils xz-utils
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: build release binaries
@@ -71,6 +157,7 @@ jobs:
           if-no-files-found: error
 
   build-desktop:
+    needs: [prepare, frontend]
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +172,8 @@ jobs:
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: build release binaries
@@ -115,6 +204,7 @@ jobs:
   # include_str!), so no Node step is needed — the bundler reads
   # client/src-tauri/tauri.conf.json with frontendDist ../dist as-is.
   bundle-desktop:
+    needs: [prepare, frontend]
     strategy:
       fail-fast: false
       matrix:
@@ -129,6 +219,12 @@ jobs:
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: tetherly-frontend-dist
+          path: client/dist
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -152,9 +248,20 @@ jobs:
           if-no-files-found: error
 
   build-android:
+    needs: [prepare, frontend]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: import release signing key
+        env:
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_RELEASE_KEYSTORE_B64}"
+          printf '%s' "${ANDROID_RELEASE_KEYSTORE_B64}" | base64 --decode > "${RUNNER_TEMP}/tetherly-release.jks"
+          test -s "${RUNNER_TEMP}/tetherly-release.jks"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -173,14 +280,48 @@ jobs:
       - name: unit tests
         working-directory: android
         run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
-      - name: assemble debug
+      - name: assemble signed release
         working-directory: android
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        env:
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_STORE_PASSWORD}"
+          test -n "${RELEASE_KEY_ALIAS}"
+          test -n "${RELEASE_KEY_PASSWORD}"
+          gradle :app:assembleRelease --no-daemon --stacktrace \
+            -PtetherlyVersion='${{ needs.prepare.outputs.version }}' \
+            -PtetherlyVersionCode='${{ needs.prepare.outputs.version_code }}' \
+            -PreleaseKeystore="${RUNNER_TEMP}/tetherly-release.jks" \
+            -PreleaseStorePassword="${RELEASE_STORE_PASSWORD}" \
+            -PreleaseKeyAlias="${RELEASE_KEY_ALIAS}" \
+            -PreleaseKeyPassword="${RELEASE_KEY_PASSWORD}"
+      - name: inspect release APK identity and signature
+        working-directory: android
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+          EXPECTED_VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/release/app-release.apk"
+          test -s "${apk}"
+          test "$(apkanalyzer manifest version-name "${apk}")" = "${EXPECTED_VERSION}"
+          test "$(apkanalyzer manifest version-code "${apk}")" = "${EXPECTED_VERSION_CODE}"
+          apkanalyzer manifest application-id "${apk}" | grep -Fx 'app.tetherly'
+          apkanalyzer manifest version-name "${apk}" | grep -Fx "${EXPECTED_VERSION}"
+          apkanalyzer manifest version-code "${apk}" | grep -Fx "${EXPECTED_VERSION_CODE}"
+          apksigner verify --verbose "${apk}"
+          if apksigner verify --print-certs "${apk}" | grep -qi 'CN=Android Debug'; then
+            echo 'debug signing certificate is not allowed' >&2
+            exit 1
+          fi
       - name: stage artifacts
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/tetherly-android-arm64-v8a.apk
+          cp android/app/build/outputs/apk/release/app-release.apk dist/tetherly-android-arm64-v8a.apk
           cp android/app/src/main/jniLibs/arm64-v8a/libtetherly_android.so dist/libtetherly_android-arm64-v8a.so
           ls -l dist
       - uses: actions/upload-artifact@v7
@@ -190,34 +331,52 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build-linux, build-desktop, bundle-desktop, build-android]
+    needs: [prepare, frontend, build-linux, build-desktop, bundle-desktop, build-android]
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+      - name: create digest manifest
+        run: |
+          set -euo pipefail
+          test -d dist
+          (
+            cd dist
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS
+            test -s SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tetherly-release-digests
+          path: dist/SHA256SUMS
+          if-no-files-found: error
       - name: publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_INPUT: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${TAG_INPUT}" ]; then
-            tag="${TAG_INPUT}"
-          fi
+          tag="${RELEASE_TAG}"
+          version="${RELEASE_VERSION}"
+          [ "${tag#v}" = "${version}" ]
+          test -s dist/SHA256SUMS
           ls -l dist
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${tag}" --repo "${GITHUB_REPOSITORY}" --clobber dist/*
-          else
-            gh release create "${tag}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "Tetherly ${tag}" \
-              --generate-notes \
-              dist/*
+            echo "release ${tag} already exists; immutable publish refuses replacement" >&2
+            exit 1
           fi
+          gh release create "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Tetherly ${tag}" \
+            --generate-notes \
+            dist/*

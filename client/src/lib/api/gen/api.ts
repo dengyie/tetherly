@@ -16,15 +16,15 @@ export type Ports = { control: number, file: number, input: number, screen: numb
 
 export type PeerCounts = { live: number, trusted: number, };
 
-export type System = { device_id: string, name: string, platform: string, version: string, api: number, pid: number, uptime_secs: number, ports: Ports, peers: PeerCounts, 
+export type System = { device_id: string, name: string, platform: string, version: string, api: number, pid: number, uptime_secs: number, ports: Ports, peers: PeerCounts,
 /**
  * Wire capabilities this node advertises to peers.
  */
-caps: Array<string>, 
+caps: Array<string>,
 /**
  * Locally enabled feature flags.
  */
-features: Array<string>, 
+features: Array<string>,
 /**
  * §145: no overlay sidecar is up — LAN-only operation. Drives the CLI
  * status line and the SPA badge.
@@ -33,16 +33,16 @@ lan_only: boolean, };
 
 export type LinkPath = "lan" | "overlay";
 
-export type Device = { id: string, 
+export type Device = { id: string,
 /**
  * Best display name: live name, else discovered name, else alias, else id.
  */
-name: string, alias: string | null, platform: string | null, device_type: string, online: boolean, trusted: boolean, blocked: boolean, path: LinkPath | null, addr: string | null, rtt_ms: number | null, last_seen_ms: number | null, caps: Array<string>, features: Array<string>, tags: Array<string>, 
+name: string, alias: string | null, platform: string | null, device_type: string, online: boolean, trusted: boolean, blocked: boolean, path: LinkPath | null, addr: string | null, rtt_ms: number | null, last_seen_ms: number | null, caps: Array<string>, features: Array<string>, tags: Array<string>,
 /**
  * PeerProfile group (§144): the CLI peers inventory and SPA group-by
  * view; `None` when the device has no profile or no group set.
  */
-group: string | null, 
+group: string | null,
 /**
  * Why the device is blocked (§151): the CLI blocked inventory and SPA
  * blocklist; `None` when the device is not blocked or was blocked
@@ -70,13 +70,13 @@ export type BlockRequest = { reason?: string, };
 
 export type PinGrant = { pin: string, expires_in_secs: number, };
 
-export type LegacyRouteHits = { method: string, route: string, 
+export type LegacyRouteHits = { method: string, route: string,
 /**
  * `cli` | `browser` | `android` | `curl` | `other`.
  */
 caller: string, count: number, };
 
-export type Diagnostics = { 
+export type Diagnostics = {
 /**
  * Current event-stream sequence number.
  */
@@ -102,13 +102,15 @@ export type TransferDirection = "inbound" | "outbound";
 
 export type TransferPhase = "transferring" | "verifying" | "completed" | "failed";
 
-export type Transfer = { transfer_id: string, 
+export type Transfer = { transfer_id: string,
 /**
  * Peer device id (contract device id string, not the raw pubkey id).
  */
 peer: string, direction: TransferDirection, filename: string, total: number, transferred: number, speed_bps: number, phase: TransferPhase, error: string | null, started_ms: number, updated_ms: number, };
 
-export type Transfers = { active_count: number, terminal_count: number, transfers: Array<Transfer>, 
+export type TransferStats = { bytes_sent: number, bytes_received: number, completed_count: number, failed_count: number, };
+
+export type Transfers = { active_count: number, terminal_count: number, transfers: Array<Transfer>,
 /**
  * §145: session aggregate that rode on the legacy /api/state — moved
  * onto the transfers resource it belongs to.
@@ -119,7 +121,7 @@ export type InboxFile = { name: string, size: number, modified_at_secs: number, 
 
 export type Inbox = { count: number, total_bytes: number, files: Array<InboxFile>, };
 
-export type LayoutEdge = { 
+export type LayoutEdge = {
 /**
  * Edge of the local display: `left | right | top | bottom`.
  */
@@ -129,19 +131,19 @@ export type Layout = { display: DisplayRect, edges: Array<LayoutEdge>, config: C
 
 export type DisplayRect = { width: number, height: number, scale_factor: number, };
 
-export type CrossingConfig = { 
+export type CrossingConfig = {
 /**
  * Push resistance in px before the seat crosses.
  */
-resistance_px: number, 
+resistance_px: number,
 /**
  * Dwell time in ms at the edge before a slow push crosses.
  */
-delay_ms: number, 
+delay_ms: number,
 /**
  * Dead-zone size in px around corners where crossing is locked.
  */
-corner_lock_size_px: number, 
+corner_lock_size_px: number,
 /**
  * Whether the seat wraps from the last edge back to the first.
  */
@@ -151,20 +153,22 @@ export type LayoutPolicy = { enabled: boolean, allow_inbound_control: boolean, a
 
 export type Settings = { general: SettingsGeneral, transfer: SettingsTransfer, };
 
-export type SettingsGeneral = { name: string, advertise: boolean, reconnect: boolean, loopback_only: boolean, overlay_enabled: boolean, 
+export type SettingsGeneral = { name: string, advertise: boolean, reconnect: boolean, loopback_only: boolean, overlay_enabled: boolean,
 /**
  * §6.3 tray takeover state; read-only on this resource (write via the
  * `tray_owner` field of `SettingsPatch`).
  */
 tray_owner: TrayOwner, };
 
-export type SettingsTransfer = { 
+export type TrayOwner = "daemon" | "client";
+
+export type SettingsTransfer = {
 /**
  * Master toggle of the granular auto-accept policy.
  */
 auto_accept: boolean, };
 
-export type SettingsPatch = { name?: string, advertise?: boolean, reconnect?: boolean, auto_accept?: boolean, 
+export type SettingsPatch = { name?: string, advertise?: boolean, reconnect?: boolean, auto_accept?: boolean,
 /**
  * §6.3 tray takeover: `client` hides the built-in tray (the shell owns
  * the tray surface and must keep SSE + keepalive alive); `daemon`
@@ -196,7 +200,7 @@ export type FileBatchItem = { transfer_id?: string, name: string, size: number, 
 
 export type FileBatchReport = { batch_id: string, peer: string, peer_alias?: string, total_files: number, successful_files: number, failed_files: number, total_bytes: number, items: Array<FileBatchItem>, };
 
-export type OutboxEntryDto = { id: string, transfer_id: string, peer: string, peer_alias?: string, filename: string, size: number, sha256: string, source_path?: string, 
+export type OutboxEntryDto = { id: string, transfer_id: string, peer: string, peer_alias?: string, filename: string, size: number, sha256: string, source_path?: string,
 /**
  * `pending | sent | failed | cancelled` (lowercase).
  */
@@ -216,13 +220,13 @@ export type Storage = { data_dir: string, inbox_dir: string, inbox_total_bytes: 
 
 export type StorageCleanReport = { freed_bytes: number, deleted_files_count: number, cleared_resume_entries: number, };
 
-export type AutoAcceptPolicyDto = { enabled: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, allowed_types: Array<string>, max_file_size?: number, 
+export type AutoAcceptPolicyDto = { enabled: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, allowed_types: Array<string>, max_file_size?: number,
 /**
  * Session count of offers accepted automatically (legacy report extra).
  */
 auto_accepted_count: number, };
 
-export type AutoAcceptPolicyPatch = { enabled?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, 
+export type AutoAcceptPolicyPatch = { enabled?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>,
 /**
  * JSON number sets the cap; JSON `null` lifts it; absent leaves it.
  */
@@ -242,14 +246,14 @@ export type PeerProfileDto = { device_id: string, device_type: string, tags: Arr
 
 export type PeerProfiles = { total: number, profiles: Array<PeerProfileDto>, };
 
-export type PeerProfilePatch = { device_type?: string, tags?: Array<string>, 
+export type PeerProfilePatch = { device_type?: string, tags?: Array<string>,
 /**
  * JSON string sets the group; JSON `null` clears it; absent leaves it
  * untouched (`Patch` distinguishes null from absent — a bare
  * `Option<Option<T>>` collapses both to "untouched" because serde's
  * outer `visit_none` fires before the inner type sees the null).
  */
-group: string | null, 
+group: string | null,
 /**
  * Same three-state semantics as `group`.
  */
@@ -263,23 +267,23 @@ export type LocalCaps = { device_id: string, caps: Array<string>, features: Arra
 
 export type PeerCaps = { device_id: string, name: string, alias: string | null, caps: Array<string>, features: Array<string>, file_port: number | null, input_port: number | null, screen_port: number | null, online: boolean, };
 
-export type TopologyEdgeNeighbor = { peer_id: string, 
+export type TopologyEdgeNeighbor = { peer_id: string,
 /**
  * Edge on the peer's display the local edge connects to: `left | right | top | bottom`.
  */
 peer_edge: string, offset: number, };
 
-export type Topology = { display: DisplayRect, 
+export type Topology = { display: DisplayRect,
 /**
  * Keyed by local edge name (`left | right | top | bottom`).
  */
-neighbors: Array<TopologyEdgeNeighbor>, 
+neighbors: Array<TopologyEdgeNeighbor>,
 /**
  * Local edge the neighbor entry sits on.
  */
 neighbor_edges: string, config: CrossingConfig, peer_count: number, };
 
-export type PeerTopologyDto = { peer_id: string, peer_alias: string | null, display: DisplayRect, config: CrossingConfig, timestamp_ms: number, 
+export type PeerTopologyDto = { peer_id: string, peer_alias: string | null, display: DisplayRect, config: CrossingConfig, timestamp_ms: number,
 /**
  * Number of edges the peer has linked (count of its neighbors).
  */
@@ -287,21 +291,21 @@ neighbors_count: number, };
 
 export type PeerTopologies = { count: number, peers: Array<PeerTopologyDto>, };
 
-export type TopologyLinkRequest = { 
+export type TopologyLinkRequest = {
 /**
  * Local edge: `left | right | top | bottom`.
  */
-edge: string, 
+edge: string,
 /**
  * Peer target (id, name, or alias).
  */
-peer: string, 
+peer: string,
 /**
  * Peer's edge that faces us; defaults to the geometric opposite.
  */
 peer_edge?: string | null, offset?: number | null, };
 
-export type TopologyLinkReport = { 
+export type TopologyLinkReport = {
 /**
  * Local edge affected.
  */
@@ -317,7 +321,7 @@ export type TopologyConfigReport = { display: DisplayRect, config: CrossingConfi
 
 export type TopologyPolicy = { enabled: boolean, allow_inbound_control: boolean, auto_link_paired_peers: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, allowed_types: Array<string>, };
 
-export type TopologyPolicyPatch = { enabled?: boolean | null, allow_inbound_control?: boolean | null, auto_link_paired_peers?: boolean | null, allowed_groups?: Array<string> | null, allowed_tags?: Array<string> | null, allowed_types?: Array<string> | null, 
+export type TopologyPolicyPatch = { enabled?: boolean | null, allow_inbound_control?: boolean | null, auto_link_paired_peers?: boolean | null, allowed_groups?: Array<string> | null, allowed_tags?: Array<string> | null, allowed_types?: Array<string> | null,
 /**
  * When true, clears the allowed_groups/tags/types filter lists.
  */
@@ -329,13 +333,13 @@ export type RouteEntryDto = { device_id: string, addr: string, alias: string | n
 
 export type Routes = { count: number, routes: Array<RouteEntryDto>, };
 
-export type RouteSetRequest = { 
+export type RouteSetRequest = {
 /**
  * Peer target (id, name, or alias).
  */
 peer: string, addr: string, };
 
-export type RouteMutateReport = { device_id: string, addr: string | null, 
+export type RouteMutateReport = { device_id: string, addr: string | null,
 /**
  * `added | removed`.
  */
@@ -407,7 +411,7 @@ export type NotifyTestReportDto = { sent: boolean, suppressed: boolean, suppress
 
 export type MessageEntry = { id: string, peer: string, direction: MessageDirection, text: string, timestamp_ms: number, read: boolean, };
 
-export type MessageSendRequest = { peer?: string | null, tag?: string | null, group?: string | null, 
+export type MessageSendRequest = { peer?: string | null, tag?: string | null, group?: string | null,
 /**
  * Device form-factor selector (`desktop`/`laptop`/`phone`/`tablet`/
  * `server`/`cloud`/`other`), matching the daemon's `DeviceType`.
@@ -442,17 +446,17 @@ export type ActivityHandoff = { id: string, sender_id: string, sender_alias: str
 
 export type Activity = { candidates: Array<ActivityCandidate>, replies: Array<ActivityReply>, messages: Array<ActivityMessage>, handoffs: Array<ActivityHandoff>, };
 
-export type ClipPolicyDto = { 
+export type ClipPolicyDto = {
 /**
  * Sync mode, as the snake_case `ClipSyncMode` string.
  */
-mode: string, sensitive_guard: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+mode: string, sensitive_guard: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * Allowed device form factors, as the `DeviceType` snake_case strings.
  */
 allowed_types: Array<string>, max_payload_bytes: number, auto_clear_timeout_secs?: number, auto_synced_out_count: number, auto_synced_in_count: number, sensitive_blocked_count: number, };
 
-export type ClipPolicyPatch = { mode?: string, sensitive_guard?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, max_payload_bytes?: number, 
+export type ClipPolicyPatch = { mode?: string, sensitive_guard?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, max_payload_bytes?: number,
 /**
  * JSON `0` also clears the countdown (legacy parity).
  */
@@ -460,13 +464,13 @@ auto_clear_timeout_secs?: number, clear_filters?: boolean, };
 
 export type ClipPollReport = { dispatched_peers: number, policy: ClipPolicyDto, };
 
-export type ClipStatus = { has_text: boolean, bytes: number, hash?: string, last_seq: number, inbound_count: number, outbound_count: number, history_count: number, 
+export type ClipStatus = { has_text: boolean, bytes: number, hash?: string, last_seq: number, inbound_count: number, outbound_count: number, history_count: number,
 /**
  * False on hosts with no display server (headless Linux).
  */
 clipboard_available: boolean, reason?: string, };
 
-export type ClipHistoryEntry = { seq: number, source: string, 
+export type ClipHistoryEntry = { seq: number, source: string,
 /**
  * `"inbound"` or `"outbound"`.
  */
@@ -476,7 +480,7 @@ export type ClipHistory = { total: number, entries: Array<ClipHistoryEntry>, };
 
 export type ClipClearReport = { cleared_history_count: number, timestamp_ms: number, clipboard_available: boolean, reason?: string, };
 
-export type ClipContent = { has_text: boolean, bytes: number, hash?: string, text?: string, clipboard_available: boolean, 
+export type ClipContent = { has_text: boolean, bytes: number, hash?: string, text?: string, clipboard_available: boolean,
 /**
  * Present only when the OS clipboard port is absent.
  */
@@ -486,11 +490,11 @@ export type ClipSyncRequest = { peer?: string, text?: string, };
 
 export type ClipSyncReport = { bytes: number, hash: string, sent_peers: number, };
 
-export type AuditEntryDto = { id: number, timestamp_ms: number, 
+export type AuditEntryDto = { id: number, timestamp_ms: number,
 /**
  * `AuditCategory` snake_case string.
  */
-category: string, 
+category: string,
 /**
  * `AuditSeverity` snake_case string.
  */
@@ -522,11 +526,11 @@ export type ActionHistoryEntry = { trigger_id: string, action_id: string, succes
 
 export type ActionHistory = { count: number, results: Array<ActionHistoryEntry>, };
 
-export type ActionPolicyDto = { 
+export type ActionPolicyDto = {
 /**
  * Access mode, as the snake_case `ActionAccessMode` string.
  */
-mode: string, max_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+mode: string, max_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * Allowed device form factors, as the `DeviceType` snake_case strings.
  */
@@ -534,17 +538,17 @@ allowed_types: Array<string>, expose_action_list: boolean, };
 
 export type ActionPolicyPatch = { mode?: string, max_timeout_secs?: number, expose_action_list?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
 
-export type ActiveBenchSessionDto = { session_id: string, peer_id: string, 
+export type ActiveBenchSessionDto = { session_id: string, peer_id: string,
 /**
  * `BenchRole` lowercase string (`initiator`/`responder`).
  */
-role: string, 
+role: string,
 /**
  * `BenchDirection` lowercase string (`push`/`pull`).
  */
 direction: string, duration_secs: number, chunk_size: number, chunks_processed: number, bytes_transferred: number, started_at_ms: number, last_activity_ms: number, };
 
-export type BenchReportDto = { session_id: string, 
+export type BenchReportDto = { session_id: string,
 /**
  * `BenchDirection` lowercase string (`push`/`pull`).
  */
@@ -552,23 +556,23 @@ direction: string, duration_ms: number, bytes_transferred: number, chunks: numbe
 
 export type BenchStatus = { active: boolean, session?: ActiveBenchSessionDto, policy: BenchPolicyDto, last_report?: BenchReportDto, timestamp_ms: number, };
 
-export type BenchDecision = { 
+export type BenchDecision = {
 /**
  * `"start"` or `"stop"`.
  */
 action: string, session_id?: string, peer_id?: string, message: string, timestamp_ms: number, };
 
-export type BenchStartRequest = { peer: string, 
+export type BenchStartRequest = { peer: string,
 /**
  * `push` (default) or `pull`.
  */
 direction: string, duration_secs?: number, chunk_size?: number, };
 
-export type BenchPolicyDto = { enabled: boolean, allow_inbound_bench: boolean, max_duration_secs: number, 
+export type BenchPolicyDto = { enabled: boolean, allow_inbound_bench: boolean, max_duration_secs: number,
 /**
  * Soft outbound pacing ceiling (Mbps).
  */
-max_bandwidth_mbps: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+max_bandwidth_mbps: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * Allowed device form factors, as the `DeviceType` snake_case strings.
  */
@@ -576,11 +580,11 @@ allowed_types: Array<string>, };
 
 export type BenchPolicyPatch = { enabled?: boolean, allow_inbound_bench?: boolean, max_duration_secs?: number, max_bandwidth_mbps?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
 
-export type StreamingRecommendationDto = { 
+export type StreamingRecommendationDto = {
 /**
  * Receiver-side measured throughput the tiers were derived from (Mbps).
  */
-measured_mbps: number, 
+measured_mbps: number,
 /**
  * Human-readable tier band (flagship / high / standard / basic / minimal).
  */
@@ -588,35 +592,35 @@ tier: string, display: DisplayTierDto, camera: CameraTierDto, audio: AudioTierDt
 
 export type DisplayTierDto = { width: number, height: number, fps: number, };
 
-export type CameraTierDto = { width: number, height: number, fps: number, 
+export type CameraTierDto = { width: number, height: number, fps: number,
 /**
  * `CameraCodec` string.
  */
 codec: string, };
 
-export type AudioTierDto = { sample_rate: number, channels: number, 
+export type AudioTierDto = { sample_rate: number, channels: number,
 /**
  * `AudioStreamCodec` string.
  */
 codec: string, };
 
-export type MicTierDto = { sample_rate: number, channels: number, 
+export type MicTierDto = { sample_rate: number, channels: number,
 /**
  * `MicCodec` string.
  */
 codec: string, };
 
-export type RecommendationDto = { peer_id: string, peer_alias: string, 
+export type RecommendationDto = { peer_id: string, peer_alias: string,
 /**
  * False when no measurement exists yet (conservative fallback tiers).
  */
-has_profile: boolean, measured_mbps: number, 
+has_profile: boolean, measured_mbps: number,
 /**
  * `BenchDirection` lowercase string (`push`/`pull`).
  */
 direction: string, measured_at_ms: number, recommendation: StreamingRecommendationDto, timestamp_ms: number, };
 
-export type RecommendationSummaryDto = { peer_id: string, peer_alias: string, measured_mbps: number, 
+export type RecommendationSummaryDto = { peer_id: string, peer_alias: string, measured_mbps: number,
 /**
  * `BenchDirection` lowercase string (`push`/`pull`).
  */
@@ -624,17 +628,17 @@ direction: string, measured_at_ms: number, tier: string, };
 
 export type RecommendationStatus = { peers: Array<RecommendationSummaryDto>, timestamp_ms: number, };
 
-export type BatteryStateDto = { 
+export type BatteryStateDto = {
 /**
  * Battery level percentage: 0..=100.
  */
-battery_level: number, is_charging: boolean, 
+battery_level: number, is_charging: boolean,
 /**
  * `PowerSource` lowercase string (`battery`/`ac`/`wireless`/`unknown`).
  */
 power_source: string, battery_saver: boolean, health_percent?: number, timestamp_ms: number, };
 
-export type BatteryState = { peer?: string, 
+export type BatteryState = { peer?: string,
 /**
  * Absent when the target has never broadcast a measurement.
  */
@@ -642,7 +646,7 @@ state?: BatteryStateDto, };
 
 export type BatteryStatePatch = { battery_level?: number, is_charging?: boolean, power_source?: string, battery_saver?: boolean, health_percent?: number, };
 
-export type BatteryPolicyDto = { low_battery_threshold: number, critical_battery_threshold: number, alert_on_low_battery: boolean, auto_throttle_on_battery_saver: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+export type BatteryPolicyDto = { low_battery_threshold: number, critical_battery_threshold: number, alert_on_low_battery: boolean, auto_throttle_on_battery_saver: boolean, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * Allowed device form factors, as the `DeviceType` snake_case strings.
  */
@@ -650,17 +654,17 @@ allowed_types: Array<string>, };
 
 export type BatteryPolicyPatch = { low_battery_threshold?: number, critical_battery_threshold?: number, alert_on_low_battery?: boolean, auto_throttle_on_battery_saver?: boolean, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
 
-export type MediaCommandRequest = { peer?: string, 
+export type MediaCommandRequest = { peer?: string,
 /**
  * `play`/`pause`/`play_pause`/`stop`/`next`/`prev`/`seek`/`volume`/`toggle_mute`.
  */
-command?: string, volume?: number, 
+command?: string, volume?: number,
 /**
  * Seek offset for `seek` (ms; negative rewinds).
  */
 offset_ms?: number, target_player?: string, tag?: string, group?: string, device_type?: string, all?: boolean, };
 
-export type MediaCommandReport = { id: string, peer: string, peer_alias?: string, 
+export type MediaCommandReport = { id: string, peer: string, peer_alias?: string,
 /**
  * Normalized `MediaCommand` wire string (e.g. `play`, `seek:-30000`).
  */
@@ -668,25 +672,25 @@ command: string, target_player?: string, timestamp_ms: number, };
 
 export type MediaDispatchItem = { peer: string, peer_alias?: string, command_id?: string, success: boolean, error?: string, };
 
-export type MediaCommandMultiReport = { 
+export type MediaCommandMultiReport = {
 /**
  * Selector wire string (e.g. `all`, `tag:kiosk`, `type:phone`).
  */
 selector: string, command: string, target_count: number, success_count: number, skipped_offline_count: number, failed_count: number, dispatches: Array<MediaDispatchItem>, };
 
-export type MediaStateDto = { player_id: string, 
+export type MediaStateDto = { player_id: string,
 /**
  * `PlaybackState` lowercase string (`stopped`/`playing`/`paused`).
  */
 state: string, title: string, artist: string, album: string, position_ms: number, duration_ms: number, volume_percent: number, muted: boolean, can_play: boolean, can_pause: boolean, can_go_next: boolean, can_go_previous: boolean, can_seek: boolean, timestamp_ms: number, };
 
-export type MediaState = { peer?: string, 
+export type MediaState = { peer?: string,
 /**
  * Absent when nothing has been broadcast yet.
  */
 state?: MediaStateDto, };
 
-export type MediaStatePatch = { player_id?: string, 
+export type MediaStatePatch = { player_id?: string,
 /**
  * `PlaybackState` lowercase string.
  */
@@ -694,11 +698,11 @@ state?: string, title?: string, artist?: string, album?: string, position_ms?: n
 
 export type MediaStateUpdateReport = { state: MediaStateDto, };
 
-export type MediaPolicyDto = { 
+export type MediaPolicyDto = {
 /**
  * `MediaControlMode` snake_case string (`allow`/`prompt_only`/`disabled`).
  */
-mode: string, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+mode: string, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * Allowed device form factors, as the `DeviceType` snake_case strings.
  */
@@ -708,7 +712,7 @@ export type MediaPolicyPatch = { mode?: string, allowed_groups?: Array<string>, 
 
 export type AncsRule = { app_id: string, url: string, };
 
-export type AncsStatus = { attached: boolean, state: string, peripheral?: string, 
+export type AncsStatus = { attached: boolean, state: string, peripheral?: string,
 /**
  * Next reconnect attempt (absent when not scheduled).
  */
@@ -720,7 +724,7 @@ export type AncsDisconnectReport = { state: string, retry_at_ms?: number, messag
 
 export type AncsAllowRequest = { app_id: string, url: string, };
 
-export type AncsRuleReport = { 
+export type AncsRuleReport = {
 /**
  * `"add"` or `"remove"`.
  */
@@ -730,13 +734,13 @@ export type AncsClearRulesReport = { cleared_count: number, total_rules: number,
 
 export type AncsRemoveRequest = { app_id?: string, };
 
-export type ActiveInputSessionDto = { session_id: string, peer_id: string, 
+export type ActiveInputSessionDto = { session_id: string, peer_id: string,
 /**
  * `InputTunnelRole` snake_case string (`controller`/`target`).
  */
 role: string, requested_edge?: string, entry_x?: number, entry_y?: number, capture_width?: number, capture_height?: number, pre_arm_epoch: number, };
 
-export type InputStatus = { channel_open: boolean, 
+export type InputStatus = { channel_open: boolean,
 /**
  * `CursorSeat` snake_case string (`local`/`remote`).
  */
@@ -750,13 +754,13 @@ export type InputControl = { action: string, seat: string, channel_open: boolean
 
 export type InputTunnelStatus = { active: boolean, session?: ActiveInputSessionDto, policy: InputPolicyDto, accessibility_trusted: boolean, capture_active: boolean, timestamp_ms: number, };
 
-export type InputTunnelDecision = { action: string, session_id?: string, peer_id?: string, 
+export type InputTunnelDecision = { action: string, session_id?: string, peer_id?: string,
 /**
  * `InputTunnelRole` snake_case string.
  */
 role?: string, message: string, timestamp_ms: number, };
 
-export type InputPolicyDto = { enabled: boolean, allow_inbound_control: boolean, allow_keyboard: boolean, allow_mouse: boolean, hotkey_release_enabled: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+export type InputPolicyDto = { enabled: boolean, allow_inbound_control: boolean, allow_keyboard: boolean, allow_mouse: boolean, hotkey_release_enabled: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * `DeviceType` snake_case strings.
  */
@@ -778,13 +782,13 @@ export type HandoffSendReport = { id: string, peer: string, peer_alias?: string,
 
 export type HandoffDispatchItem = { peer: string, peer_alias?: string, id?: string, success: boolean, error?: string, };
 
-export type HandoffSendMultiReport = { 
+export type HandoffSendMultiReport = {
 /**
  * Selector wire string (e.g. `all`, `tag:kiosk`, `type:phone`).
  */
 selector: string, url: string, title: string, target_count: number, success_count: number, skipped_offline_count: number, failed_count: number, dispatches: Array<HandoffDispatchItem>, };
 
-export type HandoffInboxActionReport = { 
+export type HandoffInboxActionReport = {
 /**
  * `"open"` or `"dismiss"`.
  */
@@ -792,11 +796,11 @@ action: string, id: string, remaining: number, timestamp_ms: number, };
 
 export type HandoffInboxClearReport = { cleared_count: number, timestamp_ms: number, };
 
-export type HandoffPolicyDto = { 
+export type HandoffPolicyDto = {
 /**
  * Handoff admission action (`HandoffPolicyAction` snake_case string).
  */
-action: string, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+action: string, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * `DeviceType` snake_case strings.
  */
@@ -808,7 +812,7 @@ export type HandoffSendRequest = { peer?: string, url: string, title?: string, a
 
 export type HandoffInboxActionRequest = { id?: string, };
 
-export type FocusStateDto = { enabled: boolean, 
+export type FocusStateDto = { enabled: boolean,
 /**
  * `FocusMode` snake_case string (`dnd`/`work`/`meeting`/`sleep`).
  */
@@ -820,7 +824,7 @@ export type FocusPeers = { count: number, peers: Array<PeerFocusDto>, };
 
 export type FocusState = { state: FocusStateDto, active: boolean, remaining_secs?: number, };
 
-export type FocusSetReport = { enabled: boolean, 
+export type FocusSetReport = { enabled: boolean,
 /**
  * `FocusMode` snake_case string.
  */
@@ -828,37 +832,37 @@ mode: string, active: boolean, expires_ms?: number, reason?: string, broadcast_c
 
 export type FocusSyncReport = { requested: number, responded: number, peers: Array<PeerFocusDto>, timestamp_ms: number, };
 
-export type FocusPolicyDto = { enabled: boolean, 
+export type FocusPolicyDto = { enabled: boolean,
 /**
  * `FocusMode` snake_case string.
  */
-default_mode: string, mirror_inbound_focus: boolean, allow_emergency_breakthrough: boolean, quiet_hours_enabled: boolean, quiet_hours_start_minute: number, quiet_hours_end_minute: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+default_mode: string, mirror_inbound_focus: boolean, allow_emergency_breakthrough: boolean, quiet_hours_enabled: boolean, quiet_hours_start_minute: number, quiet_hours_end_minute: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * `DeviceType` snake_case strings.
  */
 allowed_types: Array<string>, };
 
-export type FocusPolicyPatch = { enabled?: boolean, default_mode?: string, mirror_inbound_focus?: boolean, allow_emergency_breakthrough?: boolean, quiet_hours_enabled?: boolean, 
+export type FocusPolicyPatch = { enabled?: boolean, default_mode?: string, mirror_inbound_focus?: boolean, allow_emergency_breakthrough?: boolean, quiet_hours_enabled?: boolean,
 /**
  * `HH:MM` shorthand folded into minutes on apply.
  */
-quiet_hours_start?: string, 
+quiet_hours_start?: string,
 /**
  * `HH:MM` shorthand folded into minutes on apply.
  */
 quiet_hours_end?: string, quiet_hours_start_minute?: number, quiet_hours_end_minute?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
 
-export type FocusSetRequest = { enabled?: boolean, mode?: string, 
+export type FocusSetRequest = { enabled?: boolean, mode?: string,
 /**
  * Duration in minutes (`duration`/`duration_minutes` aliases folded).
  */
 duration_mins?: number, reason?: string, broadcast?: boolean, };
 
-export type ActiveCameraSessionDto = { session_id: string, peer_id: string, 
+export type ActiveCameraSessionDto = { session_id: string, peer_id: string,
 /**
  * `CameraRole` snake_case string (`viewer`/`lens`).
  */
-role: string, lens_id: string, width: number, height: number, target_fps: number, current_fps: number, 
+role: string, lens_id: string, width: number, height: number, target_fps: number, current_fps: number,
 /**
  * `CameraCodec` snake_case string.
  */
@@ -866,13 +870,13 @@ codec: string, flashlight_on: boolean, zoom_ratio: number, frames_sent: number, 
 
 export type CameraStatus = { active: boolean, session?: ActiveCameraSessionDto, policy: CameraPolicyDto, timestamp_ms: number, };
 
-export type CameraDecision = { action: string, session_id?: string, peer_id?: string, 
+export type CameraDecision = { action: string, session_id?: string, peer_id?: string,
 /**
  * `CameraRole` snake_case string.
  */
 role?: string, message: string, timestamp_ms: number, };
 
-export type CameraPolicyDto = { enabled: boolean, allow_inbound_stream: boolean, allow_remote_capture: boolean, max_resolution_width: number, max_resolution_height: number, max_fps: number, enforce_privacy_shutter_indicator: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+export type CameraPolicyDto = { enabled: boolean, allow_inbound_stream: boolean, allow_remote_capture: boolean, max_resolution_width: number, max_resolution_height: number, max_fps: number, enforce_privacy_shutter_indicator: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * `DeviceType` snake_case strings.
  */
@@ -884,15 +888,15 @@ export type CameraAttachRequest = { peer?: string, lens_id?: string, width?: num
 
 export type CameraDetachRequest = { reason?: string, };
 
-export type ActiveMicSessionDto = { session_id: string, peer_id: string, 
+export type ActiveMicSessionDto = { session_id: string, peer_id: string,
 /**
  * `MicRole` snake_case string (`listener`/`source`).
  */
-role: string, 
+role: string,
 /**
  * `MicMode` snake_case string (`stream`/`intercom`).
  */
-mode: string, mic_id: string, 
+mode: string, mic_id: string,
 /**
  * `MicCodec` snake_case string.
  */
@@ -900,13 +904,13 @@ codec: string, sample_rate: number, channels: number, gain: number, muted: boole
 
 export type MicStatus = { active: boolean, session?: ActiveMicSessionDto, policy: MicPolicyDto, timestamp_ms: number, };
 
-export type MicDecision = { action: string, session_id?: string, peer_id?: string, 
+export type MicDecision = { action: string, session_id?: string, peer_id?: string,
 /**
  * `MicRole` snake_case string.
  */
 role?: string, message: string, timestamp_ms: number, };
 
-export type MicPolicyDto = { enabled: boolean, allow_inbound_stream: boolean, allow_remote_capture: boolean, allow_intercom: boolean, max_sample_rate: number, max_session_duration_secs: number, enforce_privacy_indicator: boolean, default_muted: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+export type MicPolicyDto = { enabled: boolean, allow_inbound_stream: boolean, allow_remote_capture: boolean, allow_intercom: boolean, max_sample_rate: number, max_session_duration_secs: number, enforce_privacy_indicator: boolean, default_muted: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * `DeviceType` snake_case strings.
  */
@@ -1052,6 +1056,10 @@ export type ScreenPlaybackStartRequest = { path?: string, speed?: number, loop?:
 
 export type ScreenRecordingSnapshotRequest = { path?: string, frame?: number, pts?: number, out?: string, format?: string, };
 
+export type ScreenSnapshotRequest = { format?: string, out?: string, };
+
+export type ScreenWhiteboardExportRequest = { out?: string, };
+
 export type ScreenCursorPatch = { mode?: string, };
 
 export type ScreenTrendlinePatch = { mode?: string, };
@@ -1112,11 +1120,11 @@ export type ScreenWatermarkEnableRequest = { host_enforced?: boolean, };
 
 export type ScreenLaserPatch = { x?: number, y?: number, active?: boolean, color?: string, color_rgb?: [number, number, number], radius?: number, };
 
-export type ScreenAnnotationCreateRequest = { author?: string, kind?: string, points?: Array<[number, number]>, points_str?: string, x?: number, y?: number, w?: number, h?: number, from?: [number, number], to?: [number, number], 
+export type ScreenAnnotationCreateRequest = { author?: string, kind?: string, points?: Array<[number, number]>, points_str?: string, x?: number, y?: number, w?: number, h?: number, from?: [number, number], to?: [number, number],
 /**
  * `"x,y"` string form (legacy alias).
  */
-from_str?: string, 
+from_str?: string,
 /**
  * `"x,y"` string form (legacy alias).
  */
@@ -1156,19 +1164,19 @@ export type AnnotationKindDto = { "type": "stroke", points: Array<[number, numbe
 
 export type SpatialPositionDto = { x: number, y: number, z: number, };
 
-export type ActiveAudioSessionDto = { session_id: string, peer_id: string, 
+export type ActiveAudioSessionDto = { session_id: string, peer_id: string,
 /**
  * `AudioRoutingRole` snake_case string (`speaker`/`source`).
  */
-role: string, 
+role: string,
 /**
  * `AudioChannelLayout` snake_case string (`mono`/`stereo`).
  */
-layout: string, sample_rate: number, channels: number, 
+layout: string, sample_rate: number, channels: number,
 /**
  * `AudioSampleFormat` snake_case string.
  */
-format: string, 
+format: string,
 /**
  * `AudioStreamCodec` snake_case string.
  */
@@ -1176,13 +1184,13 @@ codec: string, spatial_pos?: SpatialPositionDto, volume_gain: number, chunks_sen
 
 export type AudioStatus = { active: boolean, session?: ActiveAudioSessionDto, policy: AudioPolicyDto, timestamp_ms: number, };
 
-export type AudioDecision = { action: string, session_id?: string, peer_id?: string, 
+export type AudioDecision = { action: string, session_id?: string, peer_id?: string,
 /**
  * `AudioRoutingRole` snake_case string.
  */
 role?: string, message: string, timestamp_ms: number, };
 
-export type AudioPolicyDto = { enabled: boolean, allow_inbound_sink: boolean, allow_outbound_routing: boolean, max_volume_limit: number, allow_spatial_rendering: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+export type AudioPolicyDto = { enabled: boolean, allow_inbound_sink: boolean, allow_outbound_routing: boolean, max_volume_limit: number, allow_spatial_rendering: boolean, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * `DeviceType` snake_case strings.
  */
@@ -1194,7 +1202,7 @@ export type AudioAttachRequest = { peer?: string, layout?: string, sample_rate?:
 
 export type AudioDetachRequest = { reason?: string, };
 
-export type ActiveLocateRingDto = { request_id: string, initiator_peer: string, initiator_alias: string, duration_secs: number, 
+export type ActiveLocateRingDto = { request_id: string, initiator_peer: string, initiator_alias: string, duration_secs: number,
 /**
  * `LocatePattern` snake_case string (`pulse`/`sos`/`chime`).
  */
@@ -1202,7 +1210,7 @@ pattern: string, override_silent: boolean, message?: string, started_at_ms: numb
 
 export type LocateStatus = { is_ringing: boolean, active_ring?: ActiveLocateRingDto, policy: LocatePolicyDto, message: string, };
 
-export type LocateRingReport = { request_id: string, target_peer: string, duration_secs: number, 
+export type LocateRingReport = { request_id: string, target_peer: string, duration_secs: number,
 /**
  * `LocatePattern` snake_case string.
  */
@@ -1210,7 +1218,7 @@ pattern: string, override_silent: boolean, message: string, };
 
 export type LocateStopReport = { request_id?: string, target_peer?: string, reason: string, message: string, };
 
-export type LocatePolicyDto = { enabled: boolean, allow_override_silent: boolean, max_duration_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+export type LocatePolicyDto = { enabled: boolean, allow_override_silent: boolean, max_duration_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * `DeviceType` snake_case strings.
  */
@@ -1222,19 +1230,19 @@ export type LocateRingRequest = { peer?: string, duration_secs?: number, pattern
 
 export type LocateStopRequest = { peer?: string, request_id?: string, reason?: string, };
 
-export type ActiveDisplaySessionDto = { session_id: string, peer_id: string, 
+export type ActiveDisplaySessionDto = { session_id: string, peer_id: string,
 /**
  * `VirtualDisplayRole` snake_case string (`viewer`/`host`).
  */
-role: string, 
+role: string,
 /**
  * `DisplayEdge` snake_case string.
  */
-assigned_edge: string, 
+assigned_edge: string,
 /**
  * Display geometry as advertised by the host peer.
  */
-mode: DisplayModeDto, 
+mode: DisplayModeDto,
 /**
  * `VirtualDisplayCodec` snake_case string.
  */
@@ -1242,19 +1250,25 @@ codec: string, target_fps: number, current_fps: number, rtt_us: number, dropped_
 
 export type DisplayVirtualStatus = { active: boolean, session?: ActiveDisplaySessionDto, policy: DisplayPolicyDto, timestamp_ms: number, };
 
-export type DisplayDecision = { action: string, session_id?: string, peer_id?: string, 
+export type DisplayDecision = { action: string, session_id?: string, peer_id?: string,
 /**
  * `VirtualDisplayRole` snake_case string.
  */
 role?: string, message: string, timestamp_ms: number, };
 
-export type DisplayPolicyDto = { enabled: boolean, allow_hosting: boolean, allow_remote_extend: boolean, max_resolution_width: number, max_resolution_height: number, max_fps: number, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>, 
+export type DisplayPolicyDto = { enabled: boolean, allow_hosting: boolean, allow_remote_extend: boolean, max_resolution_width: number, max_resolution_height: number, max_fps: number, idle_timeout_secs: number, allowed_groups: Array<string>, allowed_tags: Array<string>,
 /**
  * `DeviceType` snake_case strings.
  */
 allowed_types: Array<string>, };
 
 export type DisplayPolicyPatch = { enabled?: boolean, allow_hosting?: boolean, allow_remote_extend?: boolean, max_resolution_width?: number, max_resolution_height?: number, max_fps?: number, idle_timeout_secs?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, clear_filters?: boolean, };
+
+export type DisplayModeDto = { width: number, height: number, refresh_rate: number, scale_factor: number,
+/**
+ * `VirtualDisplayPixelFormat` lowercase string (`bgra8`/`rgba8`).
+ */
+pixel_format: string, };
 
 export type DisplayAttachRequest = { peer?: string, edge?: string, width?: number, height?: number, fps?: number, };
 

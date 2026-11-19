@@ -18,6 +18,7 @@ const dev = (id: string, online = true): Device => ({
   caps: [],
   features: [],
   tags: [],
+  group: null,
 });
 
 const snap = (devices: Device[]): Snapshot => ({
@@ -33,6 +34,7 @@ const snap = (devices: Device[]): Snapshot => ({
     peers: { live: 0, trusted: 0 },
     caps: [],
     features: [],
+    lan_only: false,
   },
   devices,
   pairing: { pin_active: false, pin_expires_in_secs: 0 },

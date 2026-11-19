@@ -10,6 +10,7 @@
 //! `{seq, type, data}` and are re-emitted verbatim as JSON.
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -61,15 +62,20 @@ pub fn parse_frame(lines: &[&str]) -> Option<WireEvent> {
     if data.is_empty() {
         return None;
     }
-    let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or(serde_json::Value::Null);
-    // Envelope unwrap: `{seq, type, data: …}` → bare payload.
-    let bare = if parsed.is_object()
-        && parsed.get("seq").is_some()
-        && parsed.get("type").is_some()
-        && parsed.get("data").is_some()
-    {
+    let parsed: serde_json::Value = serde_json::from_str(&data).ok()?;
+    // v1 envelopes repeat the SSE id in `seq`; reject mismatches so the
+    // reconnect cursor can never advance past an event that was not delivered.
+    let is_v1_envelope = parsed.is_object() && parsed.get("seq").is_some();
+    let bare = if is_v1_envelope {
+        if parsed.get("seq").and_then(serde_json::Value::as_u64) != Some(seq)
+            || parsed.get("type").is_none()
+            || parsed.get("data").is_none()
+        {
+            return None;
+        }
         parsed["data"].clone()
     } else {
+        // Legacy event streams carry bare JSON payloads; retain that shape.
         parsed
     };
     Some(WireEvent {
@@ -80,6 +86,8 @@ pub fn parse_frame(lines: &[&str]) -> Option<WireEvent> {
 }
 
 const BACKOFF_MS: [u64; 4] = [1000, 2000, 5000, 10000];
+const SSE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Run the single connection for the life of the app. `mutate` events drive
 /// `tetherly://event`; connection transitions drive `tetherly://link`.
@@ -94,8 +102,8 @@ pub async fn run(app: AppHandle, port: u16, token: String) {
             LinkState::Connecting
         };
         let _ = app.emit(LINK_CHANNEL, state);
-        match connect(&app, port, &token, &mut last_seq).await {
-            // Ok is Infallible: connect only returns via StreamEnd.
+        match connect(&app, port, &token, &mut last_seq, &mut attempt).await {
+            // Ok is Infallible: connect only returns via StreamEnd::Refused.
             Err(StreamEnd::Refused) => {
                 let _ = app.emit(LINK_CHANNEL, LinkState::Offline);
                 let delay = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
@@ -123,10 +131,98 @@ enum SinkEvent {
     Frame(WireEvent),
 }
 
+async fn read_sse_headers<R>(reader: &mut BufReader<R>) -> Result<(), StreamEnd>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .await
+        .map_err(|_| StreamEnd::Refused)?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or(StreamEnd::Refused)?;
+    if status != 200 {
+        return Err(StreamEnd::Refused);
+    }
+
+    let mut content_type_ok = false;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader
+            .read_line(&mut line)
+            .await
+            .map_err(|_| StreamEnd::Refused)?;
+        if line.is_empty() {
+            return Err(StreamEnd::Refused);
+        }
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = trimmed.split_once(':') {
+            if name.eq_ignore_ascii_case("content-type") {
+                content_type_ok = value
+                    .trim()
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.eq_ignore_ascii_case("text/event-stream"));
+            }
+        }
+    }
+    if content_type_ok {
+        Ok(())
+    } else {
+        Err(StreamEnd::Refused)
+    }
+}
+
+async fn read_sse_line<R>(reader: &mut BufReader<R>, idle: Duration) -> Result<String, StreamEnd>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    tokio::time::timeout(idle, async {
+        let mut line = String::new();
+        match reader.read_line(&mut line).await {
+            Ok(0) => Err(StreamEnd::Refused),
+            Ok(_) => Ok(line),
+            Err(_) => Err(StreamEnd::Refused),
+        }
+    })
+    .await
+    .unwrap_or(Err(StreamEnd::Refused))
+}
+
 async fn connect_with<S>(
     port: u16,
     token: &str,
     last_seq: &mut Option<u64>,
+    frame_sink: S,
+) -> Result<std::convert::Infallible, StreamEnd>
+where
+    S: FnMut(SinkEvent),
+{
+    connect_with_deadlines(
+        port,
+        token,
+        last_seq,
+        SSE_HANDSHAKE_TIMEOUT,
+        SSE_IDLE_TIMEOUT,
+        frame_sink,
+    )
+    .await
+}
+
+async fn connect_with_deadlines<S>(
+    port: u16,
+    token: &str,
+    last_seq: &mut Option<u64>,
+    handshake_timeout: Duration,
+    idle_timeout: Duration,
     mut frame_sink: S,
 ) -> Result<std::convert::Infallible, StreamEnd>
 where
@@ -145,44 +241,53 @@ where
          Connection: close\r\n\
          \r\n"
     );
-    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)).await else {
-        return Err(StreamEnd::Refused);
+    let handshake = async {
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .map_err(|_| StreamEnd::Refused)?;
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|_| StreamEnd::Refused)?;
+        let mut reader = BufReader::new(stream);
+        read_sse_headers(&mut reader).await?;
+        Ok::<_, StreamEnd>(reader)
     };
-    if stream.write_all(req.as_bytes()).await.is_err() {
-        return Err(StreamEnd::Refused);
-    }
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
+    let mut reader = match tokio::time::timeout(handshake_timeout, handshake).await {
+        Ok(Ok(reader)) => reader,
+        Ok(Err(_)) | Err(_) => return Err(StreamEnd::Refused),
+    };
+    // The handshake is complete only after status and Content-Type have been
+    // validated. A legal stream may be idle before its first application frame.
+    frame_sink(SinkEvent::Established);
     let mut frame_lines: Vec<String> = Vec::new();
-    let mut established = false;
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => return Err(StreamEnd::Refused),
-            Ok(_) => {
-                if !established {
-                    // First response bytes = the daemon accepted the SSE
-                    // request. Announce once, before any frame.
-                    established = true;
-                    frame_sink(SinkEvent::Established);
-                }
-                let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
-                if trimmed.is_empty() {
-                    if frame_lines.is_empty() {
-                        continue;
-                    }
-                    let refs: Vec<&str> = frame_lines.iter().map(String::as_str).collect();
-                    if let Some(ev) = parse_frame(&refs) {
-                        *last_seq = Some(ev.seq);
-                        frame_sink(SinkEvent::Frame(ev));
-                    }
-                    frame_lines.clear();
-                } else {
-                    frame_lines.push(trimmed);
-                }
+        let line = read_sse_line(&mut reader, idle_timeout).await?;
+        let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+        if trimmed.is_empty() {
+            if frame_lines.is_empty() {
+                continue;
             }
+            let refs: Vec<&str> = frame_lines.iter().map(String::as_str).collect();
+            if let Some(ev) = parse_frame(&refs) {
+                if last_seq.is_some_and(|previous| ev.seq <= previous) {
+                    frame_lines.clear();
+                    continue;
+                }
+                *last_seq = Some(ev.seq);
+                frame_sink(SinkEvent::Frame(ev));
+            }
+            frame_lines.clear();
+        } else {
+            frame_lines.push(trimmed);
         }
     }
+}
+
+fn sse_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n{body}"
+    )
 }
 
 async fn connect(
@@ -190,9 +295,11 @@ async fn connect(
     port: u16,
     token: &str,
     last_seq: &mut Option<u64>,
+    attempt: &mut usize,
 ) -> Result<std::convert::Infallible, StreamEnd> {
     connect_with(port, token, last_seq, |ev| match ev {
         SinkEvent::Established => {
+            *attempt = 0;
             let _ = app.emit(LINK_CHANNEL, LinkState::Live);
         }
         SinkEvent::Frame(ev) => {
@@ -229,6 +336,17 @@ mod tests {
             "data: {\"seq\":3,\"type\":\"x.changed\",\"data\":null}"
         ])
         .is_some());
+    }
+
+    #[test]
+    fn parse_frame_rejects_malformed_or_mismatched_v1_envelopes() {
+        assert!(parse_frame(&["id: 3", "data: {not-json}"]).is_none());
+        assert!(parse_frame(&[
+            "id: 3",
+            "event: x.changed",
+            "data: {\"seq\":4,\"type\":\"x.changed\",\"data\":null}"
+        ])
+        .is_none());
     }
 
     #[test]
@@ -280,7 +398,7 @@ mod tests {
             let (mut s, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 2048];
             let _n = s.read(&mut buf).await.unwrap();
-            let body = sse_frame(7, "snapshot", &serde_json::json!({"gen": 1}));
+            let body = sse_response(&sse_frame(7, "snapshot", &serde_json::json!({"gen": 1})));
             let _ = s.write_all(body.as_bytes()).await;
             // Drop = daemon dies mid-stream.
         });
@@ -303,7 +421,7 @@ mod tests {
                 "v2 must receive the resume request, got: {req}"
             );
             assert!(req.contains("Accept: text/event-stream\r\n"), "{req}");
-            let body = sse_frame(8, "snapshot", &serde_json::json!({"gen": 2}));
+            let body = sse_response(&sse_frame(8, "snapshot", &serde_json::json!({"gen": 2})));
             let _ = s.write_all(body.as_bytes()).await;
             // Hold v2's connection open until the test observed the frame.
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -347,6 +465,13 @@ mod established_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn sse_frame(seq: u64, ty: &str, data: &serde_json::Value) -> String {
+        format!(
+            "id: {seq}\nevent: {ty}\ndata: {}\r\n\r\n",
+            serde_json::json!({"seq": seq, "type": ty, "data": data})
+        )
+    }
+
     /// §147: the connection loop must report `Established` — once, before
     /// any frame — when the daemon accepts the SSE request. The §6.3 tray
     /// claim waits for exactly this transition; without it the shell never
@@ -362,10 +487,10 @@ mod established_tests {
             let (mut s, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 2048];
             let _n = s.read(&mut buf).await.unwrap();
-            let body = format!(
+            let body = sse_response(&format!(
                 "id: 1\nevent: snapshot\ndata: {}\r\n\r\n",
                 serde_json::json!({"seq": 1, "type": "snapshot", "data": {"gen": 1}})
-            );
+            ));
             let _ = s.write_all(body.as_bytes()).await;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         });
@@ -382,5 +507,106 @@ mod established_tests {
         );
         assert_eq!(events.len(), 2, "Established + one frame");
         assert!(matches!(events[1], SinkEvent::Frame(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_non_success_or_non_sse_handshakes() {
+        let cases = [
+            ("401 Unauthorized", "text/event-stream"),
+            ("500 Internal Server Error", "text/event-stream"),
+            ("200 OK", "application/json"),
+        ];
+        for (status, content_type) in cases {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let status = status.to_string();
+            let content_type = content_type.to_string();
+            let server = tokio::spawn(async move {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: 0\r\n\r\n"
+                );
+                s.write_all(response.as_bytes()).await.unwrap();
+            });
+            let mut last_seq = None;
+            let mut events = Vec::new();
+            let result = connect_with(port, "tok", &mut last_seq, |ev| events.push(ev)).await;
+            assert!(matches!(result, Err(StreamEnd::Refused)));
+            assert!(events.is_empty(), "invalid handshake emitted: {events:?}");
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn half_open_stream_times_out_after_a_valid_handshake() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf).await.unwrap();
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let mut last_seq = None;
+        let mut events = Vec::new();
+        let result = connect_with_deadlines(
+            port,
+            "tok",
+            &mut last_seq,
+            Duration::from_secs(1),
+            Duration::from_millis(25),
+            |ev| events.push(ev),
+        )
+        .await;
+        assert!(matches!(result, Err(StreamEnd::Refused)));
+        assert_eq!(events, vec![SinkEvent::Established]);
+        assert_eq!(last_seq, None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn duplicate_and_rewound_sequences_do_not_reach_the_sink() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf).await.unwrap();
+            let body = format!(
+                "{}{}{}{}",
+                sse_response(&sse_frame(7, "snapshot", &serde_json::json!({"n": 7}))),
+                sse_frame(7, "snapshot", &serde_json::json!({"n": 7})),
+                sse_frame(6, "snapshot", &serde_json::json!({"n": 6})),
+                sse_frame(8, "snapshot", &serde_json::json!({"n": 8})),
+            );
+            s.write_all(body.as_bytes()).await.unwrap();
+        });
+
+        let mut last_seq = None;
+        let mut frames = Vec::new();
+        let _ = connect_with(port, "tok", &mut last_seq, |ev| {
+            if let SinkEvent::Frame(frame) = ev {
+                frames.push(frame);
+            }
+        })
+        .await;
+        assert_eq!(
+            frames.iter().map(|frame| frame.seq).collect::<Vec<_>>(),
+            [7, 8]
+        );
+        assert_eq!(last_seq, Some(8));
+        server.await.unwrap();
     }
 }

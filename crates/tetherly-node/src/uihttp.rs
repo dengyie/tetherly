@@ -24,6 +24,13 @@ pub use tetherly_loopback::{
 
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_BODY: usize = 2 * 1024 * 1024;
+const RESPONSE_CHUNK: usize = 64 * 1024;
+/// Bound each response write so a client that stops reading cannot retain a
+/// file handle and request task indefinitely.
+#[cfg(not(test))]
+const RESPONSE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const RESPONSE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
 /// Whole-request read budget (headers + body). A loopback client that stalls
 /// mid-request gets 408 instead of holding a task and socket open forever.
 #[cfg(not(test))]
@@ -345,6 +352,18 @@ async fn handle(
             || path.starts_with("/api/events?")
             || path.starts_with("/api/events/stream?"))
     {
+        // Keep the legacy stream temporarily for older local clients, but do
+        // not let it bypass the v1 Read boundary while callers migrate.
+        let granted =
+            crate::apitoken::granted_tier(token, client_token, presented.as_deref().unwrap_or(""));
+        if granted < Some(crate::apitoken::Tier::Read) {
+            let resp = if granted.is_none() {
+                v1::error(tetherly_api::ErrorCode::Unauthorized, "api token required")
+            } else {
+                v1::error(tetherly_api::ErrorCode::Forbidden, "token tier too low")
+            };
+            return write_http_response(&mut stream, &resp).await;
+        }
         return handle_sse(&mut stream, &node).await;
     }
     if content_len > MAX_BODY {
@@ -365,7 +384,9 @@ async fn handle(
         body.extend_from_slice(&more[..k]);
     }
     body.truncate(content_len);
-    let resp = route(method, path, &body, &node, hub).await;
+    let granted =
+        crate::apitoken::granted_tier(token, client_token, presented.as_deref().unwrap_or(""));
+    let resp = route(method, path, &body, &node, hub, granted).await;
     write_http_response(&mut stream, &resp).await
 }
 
@@ -395,13 +416,32 @@ async fn drain_request_body(stream: &mut TcpStream, remaining: usize) {
 }
 
 /// Structured HTTP response for the loopback UI server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct UiResponse {
     pub code: u16,
     pub ctype: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    file: Option<Arc<ResponseFile>>,
 }
+
+#[derive(Debug)]
+struct ResponseFile {
+    file: std::fs::File,
+    len: u64,
+}
+
+impl PartialEq for UiResponse {
+    fn eq(&self, other: &Self) -> bool {
+        self.code == other.code
+            && self.ctype == other.ctype
+            && self.headers == other.headers
+            && self.body == other.body
+            && self.file.as_ref().map(|file| file.len) == other.file.as_ref().map(|file| file.len)
+    }
+}
+
+impl Eq for UiResponse {}
 
 impl UiResponse {
     pub fn new(code: u16, ctype: impl Into<String>, body: Vec<u8>) -> Self {
@@ -410,6 +450,17 @@ impl UiResponse {
             ctype: ctype.into(),
             headers: Vec::new(),
             body,
+            file: None,
+        }
+    }
+
+    pub fn from_file(code: u16, ctype: impl Into<String>, file: std::fs::File, len: u64) -> Self {
+        Self {
+            code,
+            ctype: ctype.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            file: Some(Arc::new(ResponseFile { file, len })),
         }
     }
 
@@ -450,6 +501,10 @@ async fn write_http_response(stream: &mut TcpStream, resp: &UiResponse) -> std::
         _ => "Error",
     };
     // RFC 9110 §8.6: no Content-Length (or body) on a 204.
+    let content_len = resp
+        .file
+        .as_ref()
+        .map_or(resp.body.len() as u64, |file| file.len);
     let mut head = if resp.code == 204 {
         format!("HTTP/1.1 204 {reason}\r\nConnection: close\r\nCache-Control: no-store\r\n")
     } else {
@@ -458,18 +513,45 @@ async fn write_http_response(stream: &mut TcpStream, resp: &UiResponse) -> std::
             resp.code,
             reason,
             resp.ctype,
-            resp.body.len()
+            content_len
         )
     };
     for (k, v) in &resp.headers {
         head.push_str(&format!("{k}: {v}\r\n"));
     }
     head.push_str("\r\n");
-    stream.write_all(head.as_bytes()).await?;
+    write_response_bytes(stream, head.as_bytes()).await?;
     if resp.code != 204 {
-        stream.write_all(&resp.body).await?;
+        if let Some(response_file) = &resp.file {
+            let file = response_file.file.try_clone()?;
+            let mut file = tokio::fs::File::from_std(file).take(response_file.len);
+            let mut chunk = vec![0u8; RESPONSE_CHUNK];
+            loop {
+                let read = file.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                write_response_bytes(stream, &chunk[..read]).await?;
+            }
+        } else {
+            write_response_bytes(stream, &resp.body).await?;
+        }
     }
-    stream.flush().await
+    tokio::time::timeout(RESPONSE_WRITE_TIMEOUT, stream.flush())
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "response flush timed out")
+        })??;
+    Ok(())
+}
+
+async fn write_response_bytes(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+    tokio::time::timeout(RESPONSE_WRITE_TIMEOUT, stream.write_all(bytes))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "response write timed out")
+        })??;
+    Ok(())
 }
 
 async fn write_http(
@@ -496,6 +578,35 @@ async fn write_http(
 /// [`UiEvent`](crate::events::UiEvent) has to stay here because that type does.
 pub struct SseStream(tetherly_loopback::SseStream);
 
+/// Typed facade for the authenticated v1 resource stream. It keeps the
+/// legacy `SseStream` unchanged for watchers that consume `UiEvent` directly.
+pub struct V1SseStream(tetherly_loopback::SseStream);
+
+impl V1SseStream {
+    pub async fn next_event(&mut self) -> std::io::Result<Option<String>> {
+        self.0.next_event().await
+    }
+
+    /// Unpack the shared v1 `{seq,type,data}` envelope without pretending that
+    /// resource events are legacy peer/file notifications.
+    pub async fn next_ui_event(&mut self) -> std::io::Result<Option<crate::events::UiEvent>> {
+        while let Some(raw) = self.next_event().await? {
+            if let Some(event) = decode_v1_ui_event(&raw) {
+                return Ok(Some(event));
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn decode_v1_ui_event(raw: &str) -> Option<crate::events::UiEvent> {
+    let envelope = serde_json::from_str::<tetherly_api::EventEnvelope>(raw).ok()?;
+    Some(crate::events::UiEvent::V1 {
+        seq: envelope.seq,
+        event: envelope.event,
+    })
+}
+
 impl SseStream {
     /// Read the next event data string from the stream.
     /// Comments (lines starting with ':') and blank separator lines are skipped.
@@ -506,8 +617,8 @@ impl SseStream {
         self.0.next_event().await
     }
 
-    /// Read the next typed `UiEvent` from the stream, skipping frames that do
-    /// not decode.
+    /// Read the next typed `UiEvent` from the legacy stream, skipping frames
+    /// that do not decode.
     pub async fn next_ui_event(&mut self) -> std::io::Result<Option<crate::events::UiEvent>> {
         while let Some(raw) = self.next_event().await? {
             if let Ok(ev) = serde_json::from_str::<crate::events::UiEvent>(&raw) {
@@ -516,13 +627,31 @@ impl SseStream {
         }
         Ok(None)
     }
+
+    /// Read the next v1 resource event envelope. Invalid frames are skipped,
+    /// matching the legacy typed facade's behavior.
+    pub async fn next_v1_event(&mut self) -> std::io::Result<Option<tetherly_api::EventEnvelope>> {
+        while let Some(raw) = self.next_event().await? {
+            if let Ok(ev) = serde_json::from_str::<tetherly_api::EventEnvelope>(&raw) {
+                return Ok(Some(ev));
+            }
+        }
+        Ok(None)
+    }
 }
 
-/// Connect to a node's loopback UI API and initiate an SSE stream on `/api/events`.
+/// Connect to the authenticated legacy event stream used by existing CLI watchers.
 pub async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
     tetherly_loopback::loopback_events_connect(port)
         .await
         .map(SseStream)
+}
+
+/// A v1 resource-event stream with explicit envelope-to-`UiEvent` decoding.
+pub async fn loopback_v1_events_connect(port: u16) -> std::io::Result<V1SseStream> {
+    tetherly_loopback::loopback_v1_events_connect(port)
+        .await
+        .map(V1SseStream)
 }
 
 async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> {
@@ -530,8 +659,7 @@ async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> 
     let header = "HTTP/1.1 200 OK\r\n\
                   Content-Type: text/event-stream; charset=utf-8\r\n\
                   Cache-Control: no-cache, no-transform\r\n\
-                  Connection: keep-alive\r\n\
-                  Access-Control-Allow-Origin: *\r\n\r\n";
+                  Connection: keep-alive\r\n\r\n";
     stream.write_all(header.as_bytes()).await?;
     stream.flush().await?;
 
@@ -600,13 +728,14 @@ async fn route(
     body: &[u8],
     node: &Node,
     hub: &Arc<EventHub>,
+    granted: Option<crate::apitoken::Tier>,
 ) -> UiResponse {
     let (path_only, query_str) = match path.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (path, None),
     };
     if path_only == tetherly_api::PREFIX || path_only.starts_with("/api/v1/") {
-        return v1::route(method, path_only, query_str, body, node, hub).await;
+        return v1::route(method, path_only, query_str, body, node, hub, granted).await;
     }
     match (method, path_only) {
         ("GET", "/") | ("GET", "/index.html") => next::get_entry(),
@@ -622,6 +751,22 @@ mod tests {
     use crate::sidecar::OverlayConfig;
     use std::sync::Arc;
     use tetherly_core::ports::ManualClock;
+
+    #[test]
+    fn v1_event_envelope_decodes_to_explicit_internal_variant() {
+        let raw = r#"{"seq":7,"type":"invalidated","data":{"topic":"settings"}}"#;
+        let Some(crate::events::UiEvent::V1 { seq, event }) = decode_v1_ui_event(raw) else {
+            panic!("v1 envelope must decode to UiEvent::V1");
+        };
+        assert_eq!(seq, 7);
+        assert_eq!(
+            event,
+            tetherly_api::Event::Invalidated {
+                topic: tetherly_api::Topic::Settings,
+            }
+        );
+        assert!(decode_v1_ui_event(r#"{"kind":"status","message":"old"}"#).is_none());
+    }
 
     #[test]
     fn host_name_parses_and_fails_closed() {
@@ -849,14 +994,22 @@ mod tests {
         let client = crate::apitoken::read_client(&dir).expect("client token minted");
         let client_auth = format!("Authorization: Bearer {client}");
 
-        // Write tier: reads and settings writes pass.
+        // Ordinary reads still pass, but privileged file-transfer side effects
+        // must not be driven by the lower-tier client credential.
         let (_, code, body) =
             raw_with_head(port, "GET", "/api/v1/system", Some(&client_auth)).await;
         assert_eq!(code, 200, "{body}");
         let (_, code, body) =
             raw_with_head(port, "POST", "/api/v1/transfers", Some(&client_auth)).await;
-        assert_ne!(code, 401, "{body}");
-        assert_ne!(code, 403, "{body}");
+        assert_eq!(code, 403, "{body}");
+        let (_, code, body) = raw_with_head(
+            port,
+            "GET",
+            "/api/v1/screen/snapshot?out=escape.bmp",
+            Some(&client_auth),
+        )
+        .await;
+        assert_eq!(code, 403, "{body}");
 
         // Admin tier: process lifecycle refuses with the typed envelope.
         let (_, code, body) =
@@ -1075,6 +1228,19 @@ mod tests {
         assert_eq!(code, 200, "{body}");
         assert_eq!(body["count"], 0, "{body}");
 
+        // P3: absolute filesystem layout is Admin-only. The client token gets
+        // stable placeholders; the daemon token keeps the real paths.
+        let client = crate::apitoken::read_client(&dir).expect("client token");
+        let client_auth = format!("Authorization: Bearer {client}");
+        let (_, code, body) =
+            raw_with_head(port, "GET", "/api/v1/storage", Some(&client_auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["data_dir"], "<data-dir>", "{body}");
+        assert_eq!(body["inbox_dir"], "<data-dir>/inbox", "{body}");
+        let (_, code, body) = raw_with_head(port, "GET", "/api/v1/storage", Some(&auth)).await;
+        assert_eq!(code, 200, "{body}");
+        assert_ne!(body["data_dir"], "<data-dir>", "{body}");
+
         // Storage clean: default body (absent) means orphaned-only.
         let (code, resp) =
             raw_request(port, "POST", "/api/v1/storage/clean", Some(&auth), b"").await;
@@ -1141,7 +1307,8 @@ mod tests {
         // traversal is rejected.
         let inbox_dir = dir.join("inbox");
         std::fs::create_dir_all(&inbox_dir).unwrap();
-        std::fs::write(inbox_dir.join("doc.txt"), b"hello bytes").unwrap();
+        let large_body: Vec<u8> = (0..128 * 1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(inbox_dir.join("doc.txt"), &large_body).unwrap();
         let (code, body) = raw_request(
             port,
             "GET",
@@ -1151,7 +1318,12 @@ mod tests {
         )
         .await;
         assert_eq!(code, 200);
-        assert_eq!(body, b"hello bytes");
+        assert_eq!(body, large_body);
+        let (head, code, body) =
+            raw_with_head(port, "GET", "/api/v1/inbox/doc.txt/content", Some(&auth)).await;
+        assert_eq!(code, 200);
+        assert!(head.contains("Content-Length: 131072"), "{head}");
+        assert!(body.is_null(), "raw bytes must not be parsed as JSON");
         let (code, _) = raw_request(
             port,
             "GET",

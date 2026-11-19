@@ -6,7 +6,8 @@ import { API_PREFIX } from "../api/gen/api";
 import { ApiError, type LinkState, type Method, type ServerEvent, type Transport } from "./transport";
 
 const BACKOFF_MS = [1000, 2000, 5000, 10000];
-const SSE_IDLE_TIMEOUT_MS = 45_000; // §4.3 rule 5: 15s ping, 45s = dead
+export const SSE_HANDSHAKE_TIMEOUT_MS = 10_000;
+export const SSE_IDLE_TIMEOUT_MS = 45_000; // §4.3 rule 5: 15s ping, 45s = dead
 
 let token: string | null = null;
 export function setApiToken(t: string | null) {
@@ -37,9 +38,10 @@ export class HttpTransport implements Transport {
     on: (e: ServerEvent) => void,
     onState: (s: LinkState) => void,
   ): () => void {
-    const controller = new AbortController();
     let closed = false;
     let attempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let activeController: AbortController | undefined;
 
     const connect = () => {
       if (closed) return;
@@ -48,51 +50,89 @@ export class HttpTransport implements Transport {
       if (lastSeq !== null) url.searchParams.set("last_event_id", String(lastSeq));
       const headers: Record<string, string> = { "Tetherly-Client": "web/1.0.0" };
       if (token) headers.Authorization = `Bearer ${token}`;
+      const controller = new AbortController();
+      activeController = controller;
+      const handshakeTimer = setTimeout(() => controller.abort(), SSE_HANDSHAKE_TIMEOUT_MS);
 
       fetch(url, { signal: controller.signal, headers })
         .then(async (resp) => {
-          if (!resp.ok || !resp.body) throw new Error(`events ${resp.status}`);
+          clearTimeout(handshakeTimer);
+          const contentType = resp.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+          if (!resp.ok || !resp.body || contentType !== "text/event-stream") {
+            throw new Error(`events ${resp.status} (${contentType ?? "missing content-type"})`);
+          }
           onState("live");
           attempt = 0;
           const reader = resp.body.getReader();
           const decoder = new TextDecoder();
           let buf = "";
-          // SSE frames are id/event/data lines; parse incrementally.
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) throw new Error("stream closed");
-            buf += decoder.decode(value, { stream: true });
-            let idx: number;
-            while ((idx = buf.indexOf("\n\n")) >= 0) {
-              const frame = buf.slice(0, idx);
-              buf = buf.slice(idx + 2);
-              const ev = parseFrame(frame);
-              if (ev) {
-                lastSeq = ev.id;
-                on(ev);
+          let idleTimer: ReturnType<typeof setTimeout> | undefined;
+          const armIdleWatchdog = () => {
+            if (idleTimer !== undefined) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+              // Cancelling the reader makes the pending read finish with done;
+              // the common stream-closed path then schedules a reconnect.
+              void reader.cancel();
+            }, SSE_IDLE_TIMEOUT_MS);
+          };
+          try {
+            armIdleWatchdog();
+            // SSE frames are id/event/data lines; parse incrementally.
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) throw new Error("stream closed");
+              // A comment/keepalive is still liveness data, so reset on every
+              // received chunk rather than only on parsed application events.
+              armIdleWatchdog();
+              buf += decoder.decode(value, { stream: true });
+              let boundary: { index: number; length: number } | null;
+              while ((boundary = findSseBoundary(buf)) !== null) {
+                const frame = buf.slice(0, boundary.index);
+                buf = buf.slice(boundary.index + boundary.length);
+                const ev = parseFrame(frame);
+                if (ev) {
+                  if (lastSeq !== null && ev.id <= lastSeq) continue;
+                  lastSeq = ev.id;
+                  on(ev);
+                }
               }
             }
+          } finally {
+            if (idleTimer !== undefined) clearTimeout(idleTimer);
           }
         })
         .catch((err) => {
-          if (closed || controller.signal.aborted) return;
+          clearTimeout(handshakeTimer);
+          if (closed) return;
           onState("offline");
           const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
           attempt += 1;
           // lastSeq survives the reconnect: the server replays or re-snapshots.
-          setTimeout(connect, delay);
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            connect();
+          }, delay);
           console.error("[events]", err);
         });
     };
     connect();
     return () => {
       closed = true;
-      controller.abort();
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      if (activeController !== undefined) activeController.abort();
     };
   }
 }
 
-function parseFrame(frame: string): ServerEvent | null {
+function findSseBoundary(buffer: string): { index: number; length: number } | null {
+  const lf = buffer.indexOf("\n\n");
+  const crlf = buffer.indexOf("\r\n\r\n");
+  if (lf < 0 && crlf < 0) return null;
+  if (lf < 0 || (crlf >= 0 && crlf < lf)) return { index: crlf, length: 4 };
+  return { index: lf, length: 2 };
+}
+
+export function parseFrame(frame: string): ServerEvent | null {
   let id = 0;
   let type = "message";
   let data = "";
@@ -108,7 +148,8 @@ function parseFrame(frame: string): ServerEvent | null {
     // stores and MockTransport speak in bare payloads, so unwrap the inner
     // `data` field and hand it over with the envelope's type.
     const parsed = JSON.parse(data);
-    if (parsed && typeof parsed === "object" && "seq" in parsed && "type" in parsed) {
+    if (parsed && typeof parsed === "object" && "seq" in parsed) {
+      if (parsed.seq !== id || !("type" in parsed) || !("data" in parsed)) return null;
       return { id, type, data: parsed.data };
     }
     return { id, type, data: parsed };

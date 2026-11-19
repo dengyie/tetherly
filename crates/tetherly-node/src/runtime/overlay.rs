@@ -40,7 +40,7 @@ impl Node {
                     );
                 }
                 for l in bind_overlay(&overlay_file).await {
-                    node_accept_loop(
+                    node_file_accept_loop(
                         node.clone_handle(),
                         l,
                         "overlay file",

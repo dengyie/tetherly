@@ -137,9 +137,6 @@ impl FileHub {
             return Err(CoreError::UnknownTransfer);
         }
         self.prune(now_ms);
-        if self.incoming.len() >= INCOMING_MAX {
-            return Err(CoreError::UnknownTransfer);
-        }
         let mut files = Vec::with_capacity(offer.files.len());
         for f in offer.files {
             let name = sanitize_file_name(&f.name)?;
@@ -154,6 +151,18 @@ impl FileHub {
                 size: f.size,
                 sha256: f.sha256.to_ascii_lowercase(),
             });
+        }
+        // Repeated control frames are normal around reconnects. Admit an exact
+        // duplicate idempotently, but never let another peer or another payload
+        // take ownership of an existing transfer id.
+        if let Some(existing) = self.incoming.get(&offer.transfer_id) {
+            if existing.source != source || existing.files != files {
+                return Err(CoreError::UnknownTransfer);
+            }
+            return Ok(existing.clone());
+        }
+        if self.incoming.len() >= INCOMING_MAX {
+            return Err(CoreError::UnknownTransfer);
         }
         let total = files.first().map(|f| f.size).unwrap_or(0);
         let resume_from =
@@ -238,6 +247,21 @@ impl FileHub {
             transfer_id: transfer_id.to_string(),
             resume_from: None,
         })
+    }
+
+    /// Undo a local accept when the control frame could not be queued. This is
+    /// intentionally narrow: only an Accepted offer can be rolled back, and it
+    /// returns to Offered so a later user action may retry the same decision.
+    pub fn rollback_accept(&mut self, transfer_id: &str) -> Result<(), CoreError> {
+        let t = self
+            .incoming
+            .get_mut(transfer_id)
+            .ok_or(CoreError::UnknownTransfer)?;
+        if t.status != TransferStatus::Accepted {
+            return Err(CoreError::FileAlreadyDecided);
+        }
+        t.status = TransferStatus::Offered;
+        Ok(())
     }
 
     pub fn is_accepted(&self, transfer_id: &str) -> bool {
@@ -376,6 +400,35 @@ mod tests {
             hub.accept("tr_1", 3).unwrap_err(),
             CoreError::FileAlreadyDecided
         );
+    }
+
+    #[test]
+    fn duplicate_offer_is_idempotent_but_cannot_change_ownership() {
+        let mut hub = FileHub::default();
+        let src = DeviceId::from_id_pk(&[4u8; 32]);
+        let same = offer("a.txt");
+        let first = hub.offer(src.clone(), same.clone(), 1).unwrap();
+        let duplicate = hub.offer(src.clone(), same, 2).unwrap();
+        assert_eq!(duplicate.transfer_id, first.transfer_id);
+        assert_eq!(duplicate.offered_ms, first.offered_ms);
+
+        let other = DeviceId::from_id_pk(&[5u8; 32]);
+        assert_eq!(
+            hub.offer(other, offer("a.txt"), 3).unwrap_err(),
+            CoreError::UnknownTransfer
+        );
+    }
+
+    #[test]
+    fn accepted_offer_can_roll_back_when_accept_frame_is_not_sent() {
+        let mut hub = FileHub::default();
+        let src = DeviceId::from_id_pk(&[4u8; 32]);
+        hub.offer(src, offer("a.txt"), 1).unwrap();
+        hub.accept("tr_1", 2).unwrap();
+        hub.rollback_accept("tr_1").unwrap();
+        assert!(!hub.is_accepted("tr_1"));
+        hub.accept("tr_1", 3).unwrap();
+        assert!(hub.is_accepted("tr_1"));
     }
 
     #[test]

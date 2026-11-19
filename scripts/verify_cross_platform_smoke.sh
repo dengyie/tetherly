@@ -21,6 +21,19 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCAL_PORT=45716
 REMOTE_HOST="${REMOTE_HOST:-home-win}"
 REMOTE_PORT=45716
+TOKEN_FILE="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}/api.token"
+if [ ! -r "$TOKEN_FILE" ]; then
+    echo "[FAIL] API token file is required for v1 smoke checks: $TOKEN_FILE" >&2
+    exit 2
+fi
+API_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+AUTH_HEADER="X-Tetherly-Token: ${API_TOKEN}"
+
+remote_v1() {
+    local path="$1"
+    ssh -o ConnectTimeout=5 "${REMOTE_HOST}" \
+        "powershell -NoProfile -Command \"\$token=(Get-Content -Raw 'C:\\Users\\mango\\AppData\\Local\\tetherly\\api.token').Trim(); \$h=@{'X-Tetherly-Token'=\$token}; Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}${path} -Headers \$h | ConvertTo-Json -Compress\""
+}
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -68,8 +81,8 @@ echo ""
 echo -e "${BOLD}--- [1/7] Core Health & Daemon Process Integrity ---${NC}"
 
 # 1.1 Local Mac Health
-LOCAL_HEALTH=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/v1/health" 2>/dev/null || true)
-if echo "$LOCAL_HEALTH" | grep -q '"ok":true'; then
+LOCAL_HEALTH=$(curl -fsS "http://127.0.0.1:${LOCAL_PORT}/api/v1/health" 2>/dev/null || true)
+if echo "$LOCAL_HEALTH" | jq -e '.ok == true and .api == 1 and .version' >/dev/null 2>&1; then
     LOCAL_DEVICE_ID=$(echo "$LOCAL_HEALTH" | jq -r '.device_id // .id // "unknown"')
     log_pass "Local macOS node healthy (device_id=${LOCAL_DEVICE_ID})"
 else
@@ -79,17 +92,16 @@ fi
 # 1.2 Local macOS Accessibility & Capture Hooks
 # §169: legacy /api/input/ensure is gone; GET /api/v1/input is the v1
 # engine report (Read tier via per-start api.token).
-TOKEN_FILE="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}/api.token"
-LOCAL_CAPTURE=$(curl -s -H "X-Tetherly-Token: $(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null)" "http://127.0.0.1:${LOCAL_PORT}/api/v1/input" 2>/dev/null || true)
-if echo "$LOCAL_CAPTURE" | grep -q '"accessibility_trusted":true'; then
+LOCAL_CAPTURE=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/input/tunnel" 2>/dev/null || true)
+if echo "$LOCAL_CAPTURE" | jq -e '.accessibility_trusted == true and .capture_active == true' >/dev/null 2>&1; then
     log_pass "macOS Accessibility TCC permissions verified (Trusted & Capture Active)"
 else
     log_fail "macOS Accessibility permission check failed: $LOCAL_CAPTURE"
 fi
 
 # 1.3 Remote Windows Health
-REMOTE_HEALTH=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health | ConvertTo-Json -Compress\"" 2>/dev/null || true)
-if echo "$REMOTE_HEALTH" | grep -q '"ok":true'; then
+REMOTE_HEALTH=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health -ErrorAction Stop | ConvertTo-Json -Compress\"")
+if echo "$REMOTE_HEALTH" | jq -e '.ok == true and .version' >/dev/null 2>&1; then
     REMOTE_DEVICE_ID=$(echo "$REMOTE_HEALTH" | jq -r '.device_id // .id // "unknown"')
     log_pass "Remote Windows node healthy (device_id=${REMOTE_DEVICE_ID})"
 else
@@ -99,7 +111,7 @@ fi
 # 1.4 Remote Windows Session Integrity (Must be in Session 2 under SYSTEM for UAC)
 # Exact `SessionId == 2` via jq: a substring match would also accept 20-29,
 # and a multi-process ConvertTo-Json array would break `.Id` extraction.
-REMOTE_PROC=$(ssh "${REMOTE_HOST}" "powershell -Command \"Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, SessionId | ConvertTo-Json -Compress\"" 2>/dev/null || true)
+REMOTE_PROC=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -NoProfile -Command \"Get-Process tetherly -ErrorAction Stop | Select-Object Id, ProcessName, SessionId | ConvertTo-Json -Compress\"")
 SESSION_OK=0
 WIN_PID="unknown"
 if echo "$REMOTE_PROC" | jq -e 'if type == "array" then (length > 0 and any(.[]; .SessionId == 2)) else (.SessionId == 2) end' >/dev/null 2>&1; then
@@ -120,29 +132,29 @@ echo ""
 echo -e "${BOLD}--- [2/7] Input Tunnelling & Governance Policy ---${NC}"
 
 # 2.1 Wheel Speed & Policy Query
-POLICY_RESP=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/input/policy" 2>/dev/null || true)
-WHEEL_SPEED=$(echo "$POLICY_RESP" | jq -r '.policy.wheel_speed // empty')
+POLICY_RESP=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/input/policy")
+WHEEL_SPEED=$(echo "$POLICY_RESP" | jq -r '.wheel_speed // empty')
 if [ -n "$WHEEL_SPEED" ]; then
-    log_pass "Local input policy verified: wheel_speed=${WHEEL_SPEED}x, keymap=$(echo "$POLICY_RESP" | jq -r '.policy.keymap // "default"')"
+    log_pass "Local input policy verified: wheel_speed=${WHEEL_SPEED}x, keymap=$(echo "$POLICY_RESP" | jq -r '.keymap // "default"')"
 else
     log_fail "Failed to query local wheel_speed from policy: $POLICY_RESP"
 fi
 
 # 2.2 Wheel Speed Dynamic Mutation and Restoral (to the ORIGINAL value, not
 # a hardcoded one: the operator's real policy must survive the smoke run)
-MUTATE_RESP=$(curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/api/input/policy" -H "Content-Type: application/json" -d '{"wheel_speed": 1.75}' 2>/dev/null || true)
-MUTATED_SPEED=$(echo "$MUTATE_RESP" | jq -r '.policy.wheel_speed // empty')
+MUTATE_RESP=$(curl -fsS -X PATCH -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/input/policy" -H "Content-Type: application/json" -d '{"wheel_speed": 1.75}')
+MUTATED_SPEED=$(echo "$MUTATE_RESP" | jq -r '.wheel_speed // empty')
 if [ "$MUTATED_SPEED" = "1.75" ]; then
     ORIGINAL_SPEED="${WHEEL_SPEED:-1.0}"
-    curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/api/input/policy" -H "Content-Type: application/json" -d "{\"wheel_speed\": ${ORIGINAL_SPEED}}" >/dev/null 2>&1
+    curl -fsS -X PATCH -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/input/policy" -H "Content-Type: application/json" -d "{\"wheel_speed\": ${ORIGINAL_SPEED}}" >/dev/null
     log_pass "Dynamic wheel speed mutation (1.75x) & restoral (${ORIGINAL_SPEED}x) verified"
 else
     log_fail "Wheel speed dynamic mutation failed: $MUTATE_RESP"
 fi
 
 # 2.3 Windows Inbound Control Verification
-WIN_POLICY=$(ssh "${REMOTE_HOST}" "powershell -Command \"(Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/input/policy).policy | ConvertTo-Json -Compress\"" 2>/dev/null || true)
-if echo "$WIN_POLICY" | grep -q '"allow_inbound_control":true' && echo "$WIN_POLICY" | grep -q '"wheel_speed"'; then
+WIN_POLICY=$(remote_v1 "/api/v1/input/policy")
+if echo "$WIN_POLICY" | jq -e '.allow_inbound_control == true and (.wheel_speed | type == "number")' >/dev/null 2>&1; then
     log_pass "Windows remote input tunnel governance policy active (allow_inbound=true, wheel_speed=$(echo "$WIN_POLICY" | jq -r '.wheel_speed')x)"
 else
     log_fail "Windows input policy mismatch: $WIN_POLICY"
@@ -157,8 +169,7 @@ echo -e "${BOLD}--- [3/7] Peer Discovery, Noise Handshake & RTT Latency ---${NC}
 
 # §169: legacy /api/peers is gone; GET /api/v1/devices returns the typed
 # device array (Read tier via per-start api.token).
-TOKEN_FILE="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}/api.token"
-DEVICES_RESP=$(curl -s -H "X-Tetherly-Token: $(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null)" "http://127.0.0.1:${LOCAL_PORT}/api/v1/devices" 2>/dev/null || true)
+DEVICES_RESP=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/devices")
 ONLINE_COUNT=$(echo "$DEVICES_RESP" | jq '[.[] | select(.online == true)] | length' 2>/dev/null || echo 0)
 if [ "${ONLINE_COUNT:-0}" -ge 1 ]; then
     PEER_NAME=$(echo "$DEVICES_RESP" | jq -r '[.[] | select(.online == true)][0].name // "unknown"')
@@ -179,15 +190,15 @@ TEST_TOKEN_M2W="SmokeSync_MacToWin_${RANDOM}_$(date +%s)_🚀"
 TEST_TOKEN_W2M="SmokeSync_WinToMac_${RANDOM}_$(date +%s)_VERIFIED"
 
 # 4.1 Mac -> Windows Sync
-SYNC_M2W=$(curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/api/clip/sync" \
+SYNC_M2W=$(curl -fsS -X POST -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/clip/sync" \
   -H "Content-Type: application/json" \
-  -d "{\"text\": \"${TEST_TOKEN_M2W}\"}" 2>/dev/null || true)
+  -d "{\"text\": \"${TEST_TOKEN_M2W}\"}")
 SENT_HASH=$(echo "$SYNC_M2W" | jq -r '.hash // empty')
 
 # Wait brief propagation window (100ms)
 sleep 0.2
 
-WIN_CLIP=$(ssh "${REMOTE_HOST}" "powershell -Command \"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; (Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/clip) | ConvertTo-Json -Compress\"" 2>/dev/null || true)
+WIN_CLIP=$(remote_v1 "/api/v1/clip")
 WIN_TEXT=$(echo "$WIN_CLIP" | jq -r '.text // empty')
 WIN_HASH=$(echo "$WIN_CLIP" | jq -r '.hash // empty')
 
@@ -199,12 +210,12 @@ fi
 
 # 4.2 Windows -> Mac Sync (base64 transport to prevent Windows console CP936 transcoding)
 W2M_B64=$(echo -n "${TEST_TOKEN_W2M}" | base64)
-SYNC_W2M=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$bytes = [System.Convert]::FromBase64String('${W2M_B64}'); \$txt = [System.Text.Encoding]::UTF8.GetString(\$bytes); (Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/clip/sync -Method Post -Body (ConvertTo-Json @{text=\$txt}) -ContentType 'application/json') | ConvertTo-Json -Compress\"" 2>/dev/null || true)
+SYNC_W2M=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$bytes = [System.Convert]::FromBase64String('${W2M_B64}'); \$txt = [System.Text.Encoding]::UTF8.GetString(\$bytes); \$token=(Get-Content -Raw 'C:\\Users\\mango\\AppData\\Local\\tetherly\\api.token').Trim(); \$h=@{'X-Tetherly-Token'=\$token}; (Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/clip/sync -Method Post -Headers \$h -Body (ConvertTo-Json @{text=\$txt}) -ContentType 'application/json') | ConvertTo-Json -Compress\"")
 WIN_SENT_HASH=$(echo "$SYNC_W2M" | jq -r '.hash // empty')
 
 sleep 0.2
 
-MAC_CLIP=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/clip" 2>/dev/null || true)
+MAC_CLIP=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/clip")
 MAC_TEXT=$(echo "$MAC_CLIP" | jq -r '.text // empty')
 MAC_HASH=$(echo "$MAC_CLIP" | jq -r '.hash // empty')
 
@@ -214,15 +225,15 @@ else
     log_fail "Windows -> Mac reverse clipboard sync mismatch (sent: $TEST_TOKEN_W2M, received: $MAC_TEXT)"
 fi
 
-# 4.3 Passive sync mode guard: forced /api/clip/sync works even when the
+# 4.3 Passive sync mode guard: forced /api/v1/clip/sync works even when the
 # passive clipboard watcher is dead (mode=manual). That masking is exactly
 # how the "one side copied, other side no effect" bug shipped unnoticed.
 # Each end is checked for the direction it must support: the local end must
 # be able to SEND, the remote end must be able to RECEIVE. A one-way mode
 # (send_only / receive_only) is valid only on the side it serves, so the
 # failure text names both the live mode and the missing capability.
-LOCAL_CLIP_MODE=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/clip/policy" | jq -r '.policy.mode // empty')
-REMOTE_CLIP_MODE=$(ssh "${REMOTE_HOST}" "powershell -Command \"(Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/clip/policy) | ConvertTo-Json -Compress\"" 2>/dev/null | jq -r '.policy.mode // empty' || true)
+LOCAL_CLIP_MODE=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/clip/policy" | jq -r '.mode // empty')
+REMOTE_CLIP_MODE=$(remote_v1 "/api/v1/clip/policy" | jq -r '.mode // empty')
 if [ "$LOCAL_CLIP_MODE" = "bidirectional_auto" ] || [ "$LOCAL_CLIP_MODE" = "send_only" ]; then
     log_pass "Local clipboard passive auto-sync active (mode=${LOCAL_CLIP_MODE}, can send)"
 else
@@ -242,8 +253,8 @@ echo ""
 echo -e "${BOLD}--- [5/7] File Transfer & Storage Subsystem ---${NC}"
 
 # 5.1 Storage metadata & directories
-LOCAL_STORAGE=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/storage" 2>/dev/null || true)
-if echo "$LOCAL_STORAGE" | grep -q '"ok":true'; then
+LOCAL_STORAGE=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/storage")
+if echo "$LOCAL_STORAGE" | jq -e '(.inbox_dir | type == "string") and (.inbox_file_count | type == "number")' >/dev/null 2>&1; then
     INBOX_DIR=$(echo "$LOCAL_STORAGE" | jq -r '.inbox_dir // "unknown"')
     log_pass "Storage engine online (inbox=${INBOX_DIR})"
 else
@@ -251,8 +262,8 @@ else
 fi
 
 # 5.2 Auto-Accept Policy
-AUTO_ACCEPT=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/file/auto-accept/policy" 2>/dev/null || true)
-if echo "$AUTO_ACCEPT" | grep -q '"ok":true'; then
+AUTO_ACCEPT=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/policy/auto-accept")
+if echo "$AUTO_ACCEPT" | jq -e '(.enabled | type == "boolean") and (.max_file_size | type == "number")' >/dev/null 2>&1; then
     log_pass "File transfer auto-accept policy verified"
 else
     log_fail "Failed to query auto-accept policy: $AUTO_ACCEPT"
@@ -265,8 +276,8 @@ echo ""
 # ------------------------------------------------------------------------------
 echo -e "${BOLD}--- [6/7] Virtual Display & Screen Streaming Codec Readiness ---${NC}"
 
-VIRTUAL_DISPLAY=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/display/virtual" 2>/dev/null || true)
-if echo "$VIRTUAL_DISPLAY" | grep -q '"ok":true'; then
+VIRTUAL_DISPLAY=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/display/virtual")
+if echo "$VIRTUAL_DISPLAY" | jq -e '.policy' >/dev/null 2>&1; then
     MAX_FPS=$(echo "$VIRTUAL_DISPLAY" | jq -r '.policy.max_fps // 60')
     MAX_RES="$(echo "$VIRTUAL_DISPLAY" | jq -r '.policy.max_resolution_width // 0')x$(echo "$VIRTUAL_DISPLAY" | jq -r '.policy.max_resolution_height // 0')"
     log_pass "Virtual secondary display policy active (max_fps=${MAX_FPS}, max_res=${MAX_RES})"
@@ -275,7 +286,7 @@ else
 fi
 
 # Verify Screen Port (45720) listening on Windows
-WIN_SCREEN_PORT=$(ssh "${REMOTE_HOST}" "netstat -ano | findstr :45720 | findstr LISTENING" 2>/dev/null || true)
+WIN_SCREEN_PORT=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$c=Get-NetTCPConnection -State Listen -LocalPort 45720 -ErrorAction SilentlyContinue; if (\$c) { \$c | Select-Object -First 1 -ExpandProperty LocalPort }\"")
 if [ -n "$WIN_SCREEN_PORT" ]; then
     log_pass "Windows screen streaming & virtual display port 45720 is LISTENING"
 else
@@ -339,7 +350,7 @@ if [ -n "${SMOKE_PROTECT_PROCS:-}" ]; then
         PROCS_JS+="\$ok${IDX} = if (Get-Process -Name '${pn}' -ErrorAction SilentlyContinue) { 'true' } else { 'false' }; "
         IDX=$((IDX + 1))
     done
-    WIN_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$t = Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object -First 1 Id, WorkingSet64; \$ws = if (\$t) { [math]::Round(\$t.WorkingSet64 / 1MB, 1) } else { 0 }; ${PROCS_JS}Write-Output ('ws:' + \$ws + '|' + (${KEYS_JS}))\"" 2>/dev/null || true)
+    WIN_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$t = Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object -First 1 Id, WorkingSet64; \$ws = if (\$t) { [math]::Round(\$t.WorkingSet64 / 1MB, 1) } else { 0 }; ${PROCS_JS}Write-Output ('ws:' + \$ws + '|' + (${KEYS_JS}))\"")
 
     WIN_WS=$(echo "$WIN_AUDIT" | sed -n 's/.*ws:\([^|]*\).*/\1/p')
     ALL_OK=1

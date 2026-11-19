@@ -127,7 +127,13 @@ if [ "$RESTART" = true ]; then
     API_TOKEN_FILE="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}/api.token"
     API_TOKEN=""
     [ -r "$API_TOKEN_FILE" ] && API_TOKEN=$(tr -d '[:space:]' < "$API_TOKEN_FILE")
-    curl -s -X POST -H "X-Tetherly-Token: ${API_TOKEN}" http://127.0.0.1:45716/api/v1/system/shutdown >/dev/null 2>&1 || true
+    # Token reaches curl via stdin config, never argv: a same-user `ps` must
+    # not observe the API token while the request is in flight.
+    curl -s --config - >/dev/null 2>&1 <<CURLCFG || true
+header = "X-Tetherly-Token: ${API_TOKEN}"
+request = "POST"
+url = "http://127.0.0.1:45716/api/v1/system/shutdown"
+CURLCFG
     daemon_stopped=""
     for _ in $(seq 1 20); do
         if ! pgrep -f "Tetherly.app/Contents/MacOS/Tetherly" >/dev/null 2>&1; then
@@ -235,7 +241,13 @@ if [ "$RESTART" = true ]; then
     # §169: `GET /api/v1/input` (Read tier) reports the input engine state;
     # the legacy `/api/input/ensure` is gone. This is a best-effort print.
     TOKEN_FILE="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}/api.token"
-    [ -r "$TOKEN_FILE" ] && curl -s -H "X-Tetherly-Token: $(tr -d '[:space:]' < "$TOKEN_FILE")" http://127.0.0.1:45716/api/v1/input | jq . || true
+    if [ -r "$TOKEN_FILE" ]; then
+        # Same argv hygiene as the shutdown call above: token via stdin config.
+        curl -s --config - <<CURLCFG | jq . || true
+header = "X-Tetherly-Token: $(tr -d '[:space:]' < "$TOKEN_FILE")"
+url = "http://127.0.0.1:45716/api/v1/input"
+CURLCFG
+    fi
 else
     echo "==> [4/4] Package complete: $APP_DIR is ready."
 fi

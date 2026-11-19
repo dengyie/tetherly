@@ -1,0 +1,208 @@
+# 深度 Review 修复路线图
+
+## 速读（当前有效 · 维护于 2026-11-19）
+
+- 当前审计基线为 workspace `v0.2.65`、review snapshot `3609ca1`；本文件是 review 实施合同，不替代 `docs/DEVELOPMENT.md` 的实现合同。
+- 深度 review 已确认发布阻断项：本地权限边界、HTTP/文件资源上界、会话 teardown 原子性、Android/release/deploy 门禁均存在待修问题；在 P1 修复和定向回归完成前禁止新 tag、release、生产部署。
+- 修复顺序固定为：取证基线 → P1 安全/资源/发布阻断 → P2 生命周期与可靠性 → CI/release/deploy gate → 仅以 GitHub CI 和现场证据判定可发布。
+- 当前修复轮已完成 Batch 1、Batch 2 主要资源边界、Batch 3 主要状态原子性和 Batch 4 clipboard/browser/Tauri 的本地代码与定向 GREEN；未运行 GitHub CI、Android/Windows/macOS release、生产部署或真实设备验收，故本文件仍不是发布批准。
+- 当前明确残余为 timeout/cancel/shutdown 后 partial/sidecar 策略的现场确认、Android 真机/Gradle 证据，以及三平台 CI、artifact provenance、现场 readiness/rollback。multi-peer 失败分支和 shutdown 已统一复用 terminal transition，清理 pending/cancel 状态并更新 outbox/stats；两条高层集成证据（inbound stalled-transfer、multi-peer queue-full 隔离）已按 RED→GREEN 落地。发布冻结继续有效。
+- `Cargo.toml`、tag 和现场 health 是二进制版本依据；仓库 `DEVELOPMENT.md` 顶部、Obsidian canonical 速读和 `.codex-memory/todo.md` 存在历史版本漂移，不能互相静默覆盖。
+
+## 1. 范围与判定口径
+
+### 1.1 Review 范围
+
+覆盖以下边界：
+
+- `tetherly-core`：输入、文件、通知、状态机和协议不变量。
+- `tetherly-net`：Noise session、文件通道、framing、backpressure、rekey 和 cancellation。
+- `tetherly-node`：HTTP/API、token tier、文件存储/传输、screen/input/session 生命周期、平台 hook。
+- `client` / Tauri / Android：SSE、quick reply、foreground service、前端构建和桌面 bundle。
+- CI、release、部署和 smoke/crossing 脚本：版本、产物、readiness、rollback、API contract。
+
+### 1.2 Finding 状态
+
+- **confirmed**：有静态代码证据、可达触发条件和明确生产影响，进入修复批次。
+- **needs confirmation**：依赖威胁模型、平台语义或运行时并发时序；先补测试/取证，不直接当作已确认漏洞。
+- **capability gap**：产品能力尚未实现，不应伪装成当前 bug 修复。
+
+每个 confirmed finding 在实现时必须补齐：
+
+1. RED：能稳定证明缺陷的定向测试或脚本证据。
+2. GREEN：修复后同一证据通过。
+3. CI：对应 crate、平台矩阵或前端/Android job 通过。
+4. Release/deploy：只有涉及发布或生产行为时才记录 tag、artifact、health 和回滚证据。
+
+## 2. Findings 登记
+
+### 2.1 P1：权限与本地副作用
+
+| 状态 | 问题与证据 | 影响 | 修复合同 |
+|---|---|---|---|
+| confirmed | **Write-tier 路径发送越过本地权限边界**。`crates/tetherly-node/src/uihttp/v1.rs:1586-1646` 只检查 supplied path 是普通文件且不超过 `FILE_MAX`；`runtime/files.rs:976-1019,1853-1884` 由 daemon 读取并发送；Windows 部署以 LocalSystem 运行。 | 持有 `client.token` 的本地进程可要求 SYSTEM 读取并外传 SYSTEM 可访问文件，包括 `identity.bin`。 | 将路径限制在受控 data/export 目录，或增加显式用户授权；补 client-token、SYSTEM、paired destination 和拒绝敏感路径的回归测试。若产品明确允许任意路径，必须把该信任边界写入架构文档并接受风险。 |
+| confirmed | **Read-tier GET 接口执行任意路径写入**。screen snapshot、recording snapshot、whiteboard export 的 `out` 参数位于 `uihttp/v1.rs:4405-4438,4461-4473,4686-4699`；`screen_media.rs:547-565,645-660,935-955` 创建目录并 `std::fs::write()`。 | 低权限 client token 可借助高权限 daemon 截断/覆盖其自身无权写入的文件。 | 改为 Write 级 POST；输出限制在专用 export directory；拒绝绝对路径、路径穿越和默认覆盖；补授权、路径 containment、existing-target 和 SYSTEM 回归。 |
+| confirmed | **legacy SSE 绕过 v1 Read token**。`uihttp.rs:307-348` 在 token gate 前把 `/api/events` 与 `/api/events/stream` 交给 `handle_sse()`；事件 handler `:528-590` 无 token。 | 任意本地进程可读取设备、peer、文件名/大小、通知标题/app、handoff、媒体等元数据；目前未证实 OTP 数字、clipboard/body 明文泄露。 | 迁移调用方到 `/api/v1/events`，或给 legacy SSE 加 Read tier 并移除不必要 wildcard CORS；补无 token/Read token/跨 origin 测试。 |
+
+### 2.2 P1：内存、连接和 session liveness
+
+| 状态 | 问题与证据 | 影响 | 修复合同 |
+|---|---|---|---|
+| confirmed | **raw inbox download 完整读入内存**。`runtime/storage.rs:782-815` 使用 `std::fs::read()`；`uihttp/v1.rs:5880-5889` 构造完整 `UiResponse<Vec<u8>>`；`uihttp.rs:435-472` 再完整写出；`FILE_MAX` 为 64 GiB，而 `MAX_BODY` 只约束请求体。 | Read-tier 调用方可触发巨大分配、swap/OOM 或机器卡顿，尤其在慢下载客户端下 body 长时间存活。 | 采用文件句柄流式响应、独立下载上限、异步/阻塞隔离和响应写 timeout；补大文件内存上界、慢客户端和取消测试。 |
+| confirmed | **文件端口 pre-auth 空闲连接无上界**。`lifecycle.rs:738-807` 在 LAN/overlay 监听；`runtime.rs:1238-1265` 每连接直接 spawn；`files.rs:224-232` 先读未认证 header；`filechan.rs:159-187`、`codec.rs:29-38` 使用无 deadline 的 `read_exact()`。 | 无需配对、token 或有效 transfer ID，连接后不发数据即可永久占用 socket、task、fd，造成文件服务 DoS。 | header 短 deadline；全局/per-peer semaphore；连接空闲、异常和 shutdown 统一回收；补空连接、半 header、并发上限和 listener shutdown 测试。 |
+| confirmed | **已接受/出站文件传输无 end-to-end deadline**。`files.rs:366-407` 只与用户 cancel 竞争；`filechan.rs:264-307` chunk read/write 无 timeout；出站 `TcpStream::connect` 与 streaming 在 `files.rs:1850-1949` 无统一 deadline。 | peer 停顿可长期占用 task、socket、`.part`、active transfer、resume state，重复 stalled transfer 可耗尽状态预算。 | 分离 connect、header、chunk idle、total transfer deadline；超时进入 terminal failure 并清理 cancel sender、file handle、sidecar、active state；补 inbound/outbound stall tests。 |
+| confirmed | **`recv_inner()` 通过 `flush_outbox()` 绕过写 timeout**。`session.rs:141-176` 的 `recv_inner()` 先 flush，只有 `send_bounded()` 才包 `SESSION_WRITE_TIMEOUT`；screen pump 在 `screen_stream.rs:1197-1200` 直接调用。 | 对端保持连接但停止读取时，接收 pump 可卡在 writer，阻塞入站处理、shutdown 和 teardown。 | 统一所有 writer flush 的 deadline，或拆分独立 writer task；stalled writer 必须触发 session teardown；补 recv-path stalled-writer 回归。 |
+
+### 2.3 P1：发布和部署门禁
+
+| 状态 | 问题与证据 | 影响 | 修复合同 |
+|---|---|---|---|
+| confirmed | **Android release 发布 debug APK 且版本过期**。`release.yml:173-184` 执行 `assembleDebug` 并上传 `app-debug.apk`；`android/app/build.gradle.kts:10-15` 仍为 `versionCode=1`、`versionName=0.1.0`。 | 发布物不是生产 release variant，升级/version identity 不可信。 | 使用 `assembleRelease`、正式 CI signing、单一版本注入；publish 前解析 APK manifest 并校验 variant、签名和版本。 |
+| confirmed | **manual release tag 未绑定 checkout revision**。`release.yml:5-10,192-223` 接受任意 `inputs.tag`，build jobs 未按该 tag checkout，也无跨文件 version gate。 | 不同源码可被发布为任意 tag，无法可靠复现。 | dispatch 时 checkout tag/commit；校验 tag、Cargo/package/Tauri/Android 版本；不一致直接失败。 |
+| confirmed | **Tauri bundle 使用未验证的 committed `client/dist`**。`tauri.conf.json:6-8` 指向 `../dist`；`release.yml:113-116` 明确不构建 frontend；CI 无 pnpm/check/test/build gate。 | source 更新后 installer 仍可能嵌入旧 JS/CSS。 | release 中固定 Node/pnpm 并构建 frontend；CI 加 `pnpm check/test/build`；若保留 committed dist，增加 source-to-dist 一致性校验。 |
+| confirmed | **smoke/crossing 脚本仍使用已删除 legacy API**。`scripts/verify_cross_platform_smoke.sh`、`scripts/verify_crossing.py` 仍调用 `/api/health`、`/api/input/*`、`/api/clip/*` 等，而当前 contract 是 `/api/v1/*`。 | 验收脚本无法证明当前 release，静默 curl 还可能把旧路由失败伪装成业务失败。 | 全部迁移 `/api/v1`、加入 token tier 和严格 status 检查；把脚本纳入 release gate。 |
+| confirmed | **Windows restart/deploy 无 replacement readiness/rollback**。`lifecycle.rs:964-993` spawn 成功即返回；`deploy.sh:220-238` 等待后单次 health，未确认 PID/version/start time，也不恢复旧 binary。 | 新进程初始化失败或旧进程仍响应时可误报成功，失败会留下不可用主机。 | 保留旧 binary/config；replacement 独立 readiness probe；验证 PID/version/start time；失败自动回滚并启动旧版本。 |
+| confirmed | **release asset 可被静默覆盖且下载无 provenance gate**。`release.yml:215-216` 使用 `--clobber`；deploy/package 未做 checksum/signature/attestation 校验。 | rerun 可替换已发布物；错误或被替换的 artifact 可进入生产。 | 默认 immutable release；重复发布比较 digest 或显式批准；部署前验证 SHA-256、签名或 GitHub attestation。 |
+| confirmed | **Android 15 `dataSync` foreground service 无 timeout/recovery**。target SDK 35、manifest `dataSync`、`ForegroundKeep.kt:13-45` 长期 `startForeground()`，无超时回调/恢复。 | 系统停止服务后通知会话可能静默消失。 | 按 Android 15 规则重新选择 service 设计；实现 timeout、重启/重连和 UI 可观测状态；补系统停止后的恢复测试。 |
+
+### 2.4 P2：状态原子性、teardown 和可靠性
+
+- **screen replacement teardown**：`screen_stream.rs:930-959` generation 检查后才异步清 `screen_peer/screen_out`，且 privacy flags 在 `still_active` 外无条件清零。旧 pump 可清理新 session。修复必须让所有 session-scoped state 共享 generation ownership，并覆盖 replacement race 测试。
+- **screen control failure cleanup**：`screen_control.rs:95-141` 的 `screen_start` 在发送失败时可能留下 odd ticket；`:217-225` 的 `screen_stop` 在发送失败时不清 privacy flags。使用统一 guard/finally-style cleanup，补 stale Stop 和 send failure 测试。
+- **inbox 同名 TOCTOU**：`files.rs:424-439,2319-2337` 先 exists-check 再 rename，Unix 并发同名 transfer 可覆盖。用独占占位/`create_new` 或原子目标预留，补并发同名测试。
+- **camera detach ownership**：`camera.rs:212-219` 先 `take()` 再验证 session/peer。先只读验证所有权，再移除；补跨 peer detach 测试。
+- **outbound offer rollback**：`files.rs:906-968,1029-1092` 在 `send_to()` 前发布 pending/active/outbox，发送失败不回滚。失败必须移除 payload、标记 terminal failure、清理 outbox 并发事件。
+- **inbound accept rollback**：`files.rs:477-524` 先把 offer 变 Accepted 并建 active transfer，再发送 accept；失败后不能再 reject/accept。需要事务化发送或可逆状态转换，补 queue-full/peer-gone 测试。
+- **Android quick reply**：`NotifyListener.kt:48-75` 只在新通知时 drain，并 destructive take 后丢弃失败项。reply arrival 触发 drain，失败项限时重试/requeue。
+- **clipboard partial delivery**：`clipboard.rs:460-513` 忽略逐 peer `send_to()` 错误，先记 hash 和成功计数。改为 per-peer result、retry 或明确 partial delivery，补 queue-full 测试。
+- **browser/Tauri SSE**：browser `http.ts:9,52-75` 声明 idle constant 但未使用；Tauri `events.rs:157-168` 未验证 HTTP status 就发 Established。补 half-open、401/500、reconnect 和 status gate 测试。
+
+### 2.5 P3/低优先级
+
+- ~~authenticated storage/open API 返回绝对 filesystem path~~：**已修复**。`GET /api/v1/storage` 的 `data_dir`/`inbox_dir` 与 inbox open 报告的 `path` 现按 tier 分级：Admin（daemon token，CLI/运维）保留真实路径；Read/Write（client token）返回 `<data-dir>`/`inbox/<name>` 相对占位。回归：`uihttp::v1::tests::inbox_open_path_is_redacted_below_admin` + `v1_file_domains_serve_and_gate` tier 断言；node lib 315/315。
+- ~~macOS packaging 将 Admin token 放入 curl argv~~：**已修复**。`package-macos-app.sh` 两处 curl 改用 stdin config（`curl --config -`），token 不再出现在进程 argv；`bash -n` 通过。
+- Windows smooth-wheel 子 detent 可能被 `/120` 整数除法丢弃；是否违反产品契约需先确认。
+
+## 3. 修复批次合同
+
+### Batch 0：发布冻结与证据基线
+
+- 暂停新 tag、release、deploy；固定 Cargo/tag/health、当前 artifact、API 路由和 threat model。
+- 迁移并运行 smoke/crossing 脚本前先记录旧路由失败证据。
+- 明确 client token 的调用者身份和 Windows LocalSystem 威胁模型。
+
+### Batch 1：权限边界与本地副作用
+
+- 路径发送 containment/授权；导出接口动词、tier 和输出目录；legacy SSE Read auth。
+- RED/GREEN：client token、绝对路径、SYSTEM readable file、existing target、无 token SSE、Read token SSE、cross-origin。
+- 完成本批前不接受新的本地 API 能力扩展。
+
+### Batch 2：内存、连接与写入生命周期上界
+
+- raw download 流式化；file listener admission/header timeout；transfer connect/chunk/total deadline；统一 session writer timeout。
+- RED/GREEN：大文件、慢客户端、空连接、半 header、stalled writer、取消、shutdown、inbound/outbound stall。
+- 资源上界必须在代码中表达，不能只靠 OS backlog、`FILE_MAX` 或固定 sleep。
+
+### Batch 3：状态机原子性与 teardown
+
+- screen generation/privacy cleanup、screen start/stop failure cleanup；offer/accept rollback；duplicate transfer admission；同名目标原子占位；camera ownership。
+- RED/GREEN：replacement race、queue full、peer disconnect、双连接 transfer、并发同名文件、跨 peer detach。
+- 每个共享 map/sidecar/cancel sender 都要有 terminal-state 或 ownership 证明。
+
+### Batch 4：客户端可靠性
+
+- clipboard partial retry；Android quick reply retry；Android 15 service 生命周期；browser/Tauri SSE liveness/status。
+- RED/GREEN：queue-full、延迟 reply、通知消失、PendingIntent failure、half-open SSE、401/500 response。
+
+### Batch 5：CI、release、deploy gate
+
+- manual tag checkout/version gate；frontend build/check/test/dist consistency；Android release variant/signing/version；artifact digest/provenance；immutable assets；Windows readiness/rollback；smoke/crossing `/api/v1` 迁移。
+- 只有 Rust 三平台、Android、deny、frontend/Tauri、脚本 smoke、release artifact inspection 全部通过，才允许 tag/release/deploy。
+
+## 4. 测试矩阵与入口
+
+### Rust/core/net
+
+- `crates/tetherly-core/tests/{decoders.rs,fuzz_decoders.rs,state_machines.rs}`
+- `crates/tetherly-net/tests/{decoders.rs,backpressure.rs,rekey.rs,screen_wire.rs}`
+- `crates/tetherly-crypto/tests/limits.rs`
+- `crates/tetherly-api/tests/contract.rs`
+- `tests/loopback.rs`、`tests/phase1.rs` 至 `tests/phase5.rs`
+
+### Client/Tauri/Android
+
+- `client/package.json` 中的 build/test/check；`client/vitest.config.ts`、`client/playwright.config.ts`、`client/e2e/`。
+- Android unit test、release APK manifest/signature/version inspection，以及 target SDK 35 service lifecycle evidence。
+- Tauri SSE status/sequence contract 和 bundle source-to-dist consistency。
+
+### CI/release
+
+- Rust：`cargo fmt --all -- --check`、三平台 `cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --locked`。
+- Android：cargo-ndk、unit tests、正式 release variant；不得把 debug assemble 误当 release 验收。
+- Dependency：`cargo deny check advisories licenses bans sources`。
+- Release：Linux glibc floor、desktop binaries、Tauri bundles、Android artifacts、publish digest/provenance 和 immutable asset policy。
+
+历史“全量测试全绿”只能作为背景，不能替代本路线图每项 finding 的定向 RED/GREEN 证据。
+
+## 5. Needs confirmation 与不纳入 bugfix
+
+### Needs confirmation
+
+- client token 是否有意允许 daemon 以更高身份读取任意本地路径；若同机低权限进程属于威胁模型，路径发送和导出写入必须按 P1 权限漏洞处理。
+- macOS hook 并发启动、Windows/macOS hook shutdown 是否要求 in-process 生命周期；先补并发启动、重复 Node、shutdown 后 worker/tap 存活测试再定级。
+- Windows smooth-wheel 子 detent 是否属于产品协议承诺；若承诺平滑滚轮，按 P2 correctness 修复。
+
+### Capability gap，不是本轮 bugfix
+
+- Windows session viewer 目前是 wire-side-only 诚实 stub。
+- Edge Strip、真实 Ghost Overlay、被动跨屏拖拽原生窗口层未实施。
+- 多显示器输入注入当前只寻址主屏，需要独立虚拟桌面/per-display 设计。
+
+这些能力缺口已在 `docs/DEVELOPMENT.md §171` 和 ADR-137/138 语境中登记，不应借本修复批次伪装成已完成。
+
+## 6. Release checklist
+
+发布前必须全部满足：
+
+- [ ] Batch 1–4 的 P1/P2 finding 均有 RED/GREEN 链接和对应测试结果。
+- [ ] Rust 三平台 CI、Android、cargo-deny 全绿。
+- [ ] client build/check/test 和 Playwright/Tauri 关键路径已执行；bundle 使用当前 source 构建的 dist。
+- [ ] Android artifact 是 release variant，版本、签名和 native `.so` 对齐。
+- [ ] release tag checkout 与四文件版本一致；artifact digest/provenance 通过；禁止无审计 `--clobber`。
+- [ ] Windows replacement readiness 已确认新 PID/version/start time；失败可回滚旧 binary。
+- [ ] smoke/crossing 脚本只使用当前 `/api/v1` contract，并严格检查 HTTP status。
+- [ ] Mac/Windows health、SYSTEM 身份、受保护进程和回滚锚点均有现场证据。
+- [ ] 物理输入、屏幕、文件投递和 Android 长稳等 Manual-required 项单独记录，不用模拟测试替代。
+
+## 7. 关联入口
+
+- 仓库实现合同：[`DEVELOPMENT.md`](DEVELOPMENT.md)
+- API 迁移声明：[`LEGACY_API_MAP.md`](LEGACY_API_MAP.md)
+- 控制客户端架构：[`adr/139-control-client-architecture.md`](adr/139-control-client-architecture.md)
+- 当前执行待办：[`../.codex-memory/todo.md`](../.codex-memory/todo.md)
+- Tetherly Obsidian canonical：`Note/Project/tetherly/tetherly 开发文档.md`
+- 文档治理：Obsidian `AI-DOC-ROUTER` → `routers/projects.md` → Tetherly canonical；长流水写 `00.MOC/生产变更速记.md`。
+
+## 8. 变更与验证记录
+
+- **2026-11-19 review baseline**：完成 v0.2.65 深度 review 汇总，确认 P1/P2 风险、批次顺序和 release gate；当时未改业务代码、未运行新的代码测试/构建、未触发 CI/release/deploy。
+- **2026-11-19 remediation GREEN（本地代码与定向测试）**：
+  - Batch 1：`data_dir/send` 私有 staging + canonical containment，single/multi/batch/outbox resend 统一校验；GET export 拒绝 `out`，POST snapshot/recording/whiteboard Admin-only，export 目录 real-private + `create_new` 文件句柄；legacy SSE 至少 Read，显式 v1 connector + EventEnvelope/`UiEvent::V1` facade；两套 CLI `--out` 改 POST。
+  - Batch 2：raw inbox 改为已校验文件句柄 + 64 KiB 分块 HTTP 响应，定向下载回归覆盖 128 KiB 内容完整性和 `Content-Length`；file listener 共享 32 permit/header timeout；file connect/chunk/total deadline；`recv_inner`/rekey/发送路径统一 `SESSION_WRITE_TIMEOUT`。`cargo test -p tetherly-net --lib --locked` = **13 passed**；`cargo test -p tetherly-net --test backpressure --locked` = **3 passed**；node idle-header/send-path 回归通过。
+  - Batch 3：screen generation/privacy/ticket failure cleanup 定向回归通过；camera detach peer+session ownership；单目标 offer/accept rollback；同源同元数据 duplicate admission；hard-link atomic inbox reservation。`cargo test -p tetherly-core --lib --locked` = **334 passed**；`cargo test -p tetherly-node --lib --locked` = **309 passed**；`cargo check -p tetherly-node --lib --tests --locked` 通过；screen failure cleanup、inbox reservation、send-path policy 定向测试通过。
+  - Batch 4：clipboard preview/commit 分离 + per-peer bounded retry（3 attempts/8 seconds），clipboard delivery tests = **3 passed**、clipboard policy tests = **6 passed**；browser/Tauri SSE handshake/idle/reconnect/sequence 定向传输 = **14 passed**，Tauri Rust SSE = **10 passed**。Android quick-reply queue/foreground dataSync timeout/restart 状态机和纯 JVM 测试源码已落地，但未执行 Android 编译或 unit test。
+  - Batch 5：CI frontend build gate、release tag/version prepare、Android `assembleRelease`/manifest/signature inspection、artifact checksum/immutable publish、Windows readiness/rollback、smoke/crossing/HARQ/TWCC v1 route/token migration 代码落地；workflow YAML（Ruby parser）、shell/Python syntax、`git diff --check` 通过；未触发 GitHub CI/release。
+  - Existing fresh evidence retained：`cargo test -p tetherly-loopback --lib --locked` = **12 passed**；`cargo test -p tetherly-api --lib --locked` bindings + contract = **43 passed**；`cargo check -p tetherly-cli` 通过；目标 legacy-route grep 通过。
+  - Residual：timeout/cancel/shutdown 后 inbound `.part`/resume sidecar 保留策略尚未做现场确认；Android Gradle/unit/NDK/真机、真实浏览器/WebView、三平台 GitHub CI、Windows ACL/junction/readiness/rollback、macOS artifact、release provenance 和生产部署均未验证。
+- **文档治理**：本机固定 Obsidian `doc-lookup`/`doc-check` 路径不存在，未伪造治理通过；发布冻结继续有效。
+- **2026-11-19 深度优化迭代（本地）**：
+  - 前端门禁根因修复：`pnpm check` 的 13 个错误中 4 个源于 `tetherly-api` `render()` decl 列表漏登 `TransferStats`/`TrayOwner`/`DisplayModeDto`（生成的 api.ts 引用悬空），补 decl + `TETHERLY_API_BLESS=1` 重新 bless 后，临时 shim `api-contract-shims.d.ts` 已删除；其余 9 个为测试 fixture 缺新字段（`Device.group`、`System.lan_only`、`Transfers.stats`、`SettingsGeneral.tray_owner`），最小补齐。最终 `pnpm check` 0 errors / `pnpm test` 36 passed。
+  - P3 storage/open 路径脱敏：storage 报告与 inbox open 报告按 tier 分级返回（Admin 真实路径，client token 相对占位）；`granted` tier 穿透两层 route。回归 `inbox_open_path_is_redacted_below_admin` + `v1_file_domains_serve_and_gate`。
+  - P3 macOS token argv：`package-macos-app.sh` 两处 curl 改 stdin config。
+  - Fresh tests：`cargo test -p tetherly-node --lib --locked` = **315 passed**；`cargo test -p tetherly-api --test contract --locked` 通过；bindings bless 后复验通过；`bash -n scripts/package-macos-app.sh` 通过。
+- **2026-11-19/20 传输集成证据（本地）**：
+  - Inbound stalled-transfer：真实 TCP peer 发送 TFL2 header + 1 个 64 KiB chunk 后停顿，测试构建注入 500ms chunk-idle 窗口（`files.rs` `#[cfg(test)]` 包装 + 惰性 `TEST_CHUNK_IDLE_MS`，生产构建整体编译消失，四个生产常量不变）；断言 Timeout、`transfer_cancels` 清理、active Failed、`.part` 与 `.resume.json` sidecar 按续传语义保留。RED（无注入 4.05s 等满 15s 生产窗口）→ GREEN 0.55s：`inbound_stall_tests::stalled_inbound_transfer_fails_and_keeps_resume_state`。
+  - Multi-peer queue-full 隔离：一个 peer 的 256 深度 outbound 队列填满、另一 peer 正常，`offer_and_send_bytes_multi(TargetSelector::AllOnline)` 断言失败项 success=false、该 transfer Failed/pending 清理/outbox Failed、健康 peer 不受影响、计数正确。RED 用突变测试（临时移除 `set_transfer_phase` 调用 → 0.03s 捕获 `Transferring≠Failed`）→ GREEN：`multi_peer_file_dispatch_isolates_queue_full_failure_to_its_peer`。
+  - Fresh tests：`cargo test -p tetherly-net --lib --locked` = **13 passed**；`cargo test -p tetherly-node --lib --locked` = **317 passed**；`cargo check -p tetherly-node --lib --tests --locked` 通过；rustfmt/`git diff --check` 通过。
+- **发布结论**：当前达到本地定向 GREEN，但不是发布批准，仍禁止 tag/release/deploy；后续必须补三平台 GitHub CI、Android release artifact inspection、Windows ACL/junction and readiness/rollback 现场证据、真实设备验收与 `doc-check` 闭环。
+- 后续每个批次必须在此追加：范围、RED/GREEN、CI run、release artifact、部署 health、回滚证据和 residual/manual 项。

@@ -834,13 +834,9 @@ impl Node {
         let peer_id = self.resolve_peer(&entry.peer)?;
 
         let new_transfer_id = if let Some(ref path_str) = entry.source_path {
-            let p = std::path::Path::new(path_str);
-            if !p.exists() || !p.is_file() {
-                return Err(CoreError::File(format!(
-                    "source file '{path_str}' no longer exists on disk"
-                )));
-            }
-            self.offer_and_send_file(&peer_id, p, Some(&entry.filename))
+            let requested = std::path::Path::new(path_str);
+            let p = self.validate_send_source_path(requested)?;
+            self.offer_and_send_file(&peer_id, &p, Some(&entry.filename))
                 .await?
         } else {
             return Err(CoreError::File(

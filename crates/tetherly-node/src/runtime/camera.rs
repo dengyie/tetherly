@@ -211,8 +211,10 @@ impl Node {
         frame.sanitize();
         let was_active = {
             let mut guard = self.shared.active_camera.lock().expect("active_camera");
-            if let Some(session) = guard.take() {
-                session.session_id == frame.session_id || session.peer_id == peer_str
+            if guard.as_ref().is_some_and(|session| {
+                session.session_id == frame.session_id && session.peer_id == peer_str
+            }) {
+                guard.take().is_some()
             } else {
                 false
             }
@@ -638,5 +640,88 @@ impl Node {
             policy.allowed_types = v;
         }
         self.set_camera_policy(policy)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn active_session(peer: &DeviceId, session_id: &str) -> ActiveCameraSession {
+        ActiveCameraSession {
+            session_id: session_id.to_string(),
+            peer_id: peer.to_string(),
+            role: CameraRole::Host,
+            lens_id: "back".to_string(),
+            resolution: CameraResolution::fhd(),
+            target_fps: 30,
+            current_fps: 30,
+            codec: CameraCodec::Mjpeg,
+            flashlight_on: false,
+            zoom_ratio: 1.0,
+            frames_sent: 0,
+            frames_received: 0,
+            bytes_transferred: 0,
+            started_at_ms: 1_000,
+            last_activity_ms: 1_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_camera_detach_validates_owner_peer_and_session_before_take() {
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("camera-detach-owner");
+        let owner = DeviceId::from_id_pk(&[1u8; 32]);
+        let foreign = DeviceId::from_id_pk(&[2u8; 32]);
+        let session = active_session(&owner, "cam-session-owner");
+
+        *node.shared.active_camera.lock().expect("active_camera") = Some(session.clone());
+
+        node.receive_camera_detach(
+            &foreign,
+            CameraDetachFrame {
+                session_id: session.session_id.clone(),
+                reason: Some("foreign peer".to_string()),
+                timestamp_ms: 2_000,
+            },
+        )
+        .await;
+        assert_eq!(
+            node.camera_status().session,
+            Some(session.clone()),
+            "a detach from a different peer must not clear the active session"
+        );
+
+        node.receive_camera_detach(
+            &owner,
+            CameraDetachFrame {
+                session_id: "wrong-session".to_string(),
+                reason: Some("wrong session".to_string()),
+                timestamp_ms: 3_000,
+            },
+        )
+        .await;
+        assert_eq!(
+            node.camera_status().session,
+            Some(session.clone()),
+            "the owner must also present the active session id"
+        );
+
+        node.receive_camera_detach(
+            &owner,
+            CameraDetachFrame {
+                session_id: session.session_id.clone(),
+                reason: Some("owner detach".to_string()),
+                timestamp_ms: 4_000,
+            },
+        )
+        .await;
+        assert!(
+            node.camera_status().session.is_none(),
+            "the matching owner peer and session must clear the active session"
+        );
+
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -14,8 +14,9 @@
 //! `TFL1` (the pre-resume format) is still accepted on receive: it is treated
 //! as `TFL2` with `start = 0`.
 
-use crate::codec::{read_len_prefixed, write_len_prefixed};
+use crate::codec::read_len_prefixed;
 use crate::error::NetError;
+use std::time::Duration;
 use tetherly_core::hex_sha256;
 use tetherly_crypto::{aead_open, aead_seal, counter_nonce, file_token};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -23,6 +24,73 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub const FILE_MAGIC: [u8; 4] = *b"TFL1";
 pub const FILE_MAGIC_V2: [u8; 4] = *b"TFL2";
 pub const CHUNK: usize = 64 * 1024;
+/// Maximum idle time allowed while an unauthenticated file peer sends its
+/// framing header. The listener admission permit remains held for this entire
+/// attempt, so this must stay short and explicit.
+pub const FILE_HEADER_TIMEOUT: Duration = Duration::from_secs(3);
+/// Bound establishment of the separate file data connection.
+pub const FILE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound one stalled read/write while a file is in flight.
+pub const FILE_CHUNK_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound the lifetime of one file data stream.
+pub const FILE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+async fn timed_read_exact<R: AsyncRead + Unpin>(
+    r: &mut R,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> Result<(), NetError> {
+    tokio::time::timeout(timeout, r.read_exact(buf))
+        .await
+        .map_err(|_| NetError::Timeout)??;
+    Ok(())
+}
+
+async fn timed_write_all<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    buf: &[u8],
+    timeout: Duration,
+) -> Result<(), NetError> {
+    tokio::time::timeout(timeout, w.write_all(buf))
+        .await
+        .map_err(|_| NetError::Timeout)??;
+    Ok(())
+}
+
+async fn timed_flush<W: AsyncWrite + Unpin>(w: &mut W, timeout: Duration) -> Result<(), NetError> {
+    tokio::time::timeout(timeout, w.flush())
+        .await
+        .map_err(|_| NetError::Timeout)??;
+    Ok(())
+}
+
+async fn timed_write_len_prefixed<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<(), NetError> {
+    if payload.len() > crate::codec::MAX_OUTER {
+        return Err(NetError::TooLarge);
+    }
+    timed_write_all(w, &(payload.len() as u32).to_be_bytes(), timeout).await?;
+    timed_write_all(w, payload, timeout).await?;
+    timed_flush(w, timeout).await
+}
+
+async fn timed_read_len_prefixed<R: AsyncRead + Unpin>(
+    r: &mut R,
+    timeout: Duration,
+) -> Result<Vec<u8>, NetError> {
+    let mut len_buf = [0u8; 4];
+    timed_read_exact(r, &mut len_buf, timeout).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > crate::codec::MAX_OUTER {
+        return Err(NetError::TooLarge);
+    }
+    let mut buf = vec![0u8; len];
+    timed_read_exact(r, &mut buf, timeout).await?;
+    Ok(buf)
+}
 
 pub fn token_for(handshake_hash: &[u8; 32], transfer_id: &str) -> [u8; 32] {
     file_token(handshake_hash, transfer_id.as_bytes())
@@ -47,15 +115,31 @@ pub async fn send_chunks_from<W: AsyncWrite + Unpin>(
     start: u64,
     data: &[u8],
 ) -> Result<(), NetError> {
+    tokio::time::timeout(
+        FILE_TOTAL_TIMEOUT,
+        send_chunks_from_inner(w, token, transfer_id, total, start, data),
+    )
+    .await
+    .map_err(|_| NetError::Timeout)?
+}
+
+async fn send_chunks_from_inner<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    token: &[u8; 32],
+    transfer_id: &str,
+    total: u64,
+    start: u64,
+    data: &[u8],
+) -> Result<(), NetError> {
     debug_assert_eq!(
         start % CHUNK as u64,
         0,
         "resume start must be chunk-aligned"
     );
-    w.write_all(&FILE_MAGIC_V2).await?;
-    write_len_prefixed(w, transfer_id.as_bytes()).await?;
-    write_len_prefixed(w, &total.to_be_bytes()).await?;
-    write_len_prefixed(w, &start.to_be_bytes()).await?;
+    timed_write_all(w, &FILE_MAGIC_V2, FILE_CHUNK_TIMEOUT).await?;
+    timed_write_len_prefixed(w, transfer_id.as_bytes(), FILE_CHUNK_TIMEOUT).await?;
+    timed_write_len_prefixed(w, &total.to_be_bytes(), FILE_CHUNK_TIMEOUT).await?;
+    timed_write_len_prefixed(w, &start.to_be_bytes(), FILE_CHUNK_TIMEOUT).await?;
     let mut off = 0usize;
     while off < data.len() {
         let end = (off + CHUNK).min(data.len());
@@ -64,21 +148,39 @@ pub async fn send_chunks_from<W: AsyncWrite + Unpin>(
         let nonce = counter_nonce(counter);
         let aad = aad_for(transfer_id, chan_offset);
         let ct = aead_seal(token, &nonce, &aad, &data[off..end])?;
-        write_len_prefixed(w, &ct).await?;
+        timed_write_len_prefixed(w, &ct, FILE_CHUNK_TIMEOUT).await?;
         off = end;
     }
-    w.flush().await?;
+    timed_flush(w, FILE_CHUNK_TIMEOUT).await?;
     Ok(())
 }
 
-/// Send from an AsyncRead stream as encrypted chunks, starting from `start`
-/// (which must be `CHUNK`-aligned). Reads up to `CHUNK` bytes at a time
-/// until `total` bytes from `start` have been read and sent. Memory is bounded to
-/// one chunk (64 KiB) throughout the transfer.
-///
-/// Calls `on_chunk(chan_offset, chunk_len)` after encrypting and writing each chunk.
+/// Send from an AsyncRead stream as encrypted chunks with bounded idle and
+/// total transfer time. Memory remains bounded to one chunk.
 #[allow(clippy::too_many_arguments)]
 pub async fn send_stream_from_with_progress<R, W, F>(
+    r: &mut R,
+    w: &mut W,
+    token: &[u8; 32],
+    transfer_id: &str,
+    total: u64,
+    start: u64,
+    on_chunk: F,
+) -> Result<(), NetError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(u64, usize) -> Result<(), NetError>,
+{
+    tokio::time::timeout(
+        FILE_TOTAL_TIMEOUT,
+        send_stream_from_with_progress_inner(r, w, token, transfer_id, total, start, on_chunk),
+    )
+    .await
+    .map_err(|_| NetError::Timeout)?
+}
+
+async fn send_stream_from_with_progress_inner<R, W, F>(
     r: &mut R,
     w: &mut W,
     token: &[u8; 32],
@@ -97,33 +199,30 @@ where
         0,
         "resume start must be chunk-aligned"
     );
-    w.write_all(&FILE_MAGIC_V2).await?;
-    write_len_prefixed(w, transfer_id.as_bytes()).await?;
-    write_len_prefixed(w, &total.to_be_bytes()).await?;
-    write_len_prefixed(w, &start.to_be_bytes()).await?;
+    timed_write_all(w, &FILE_MAGIC_V2, FILE_CHUNK_TIMEOUT).await?;
+    timed_write_len_prefixed(w, transfer_id.as_bytes(), FILE_CHUNK_TIMEOUT).await?;
+    timed_write_len_prefixed(w, &total.to_be_bytes(), FILE_CHUNK_TIMEOUT).await?;
+    timed_write_len_prefixed(w, &start.to_be_bytes(), FILE_CHUNK_TIMEOUT).await?;
 
     let mut buf = vec![0u8; CHUNK];
     let mut sent = start;
     while sent < total {
         let want = ((total - sent) as usize).min(CHUNK);
-        r.read_exact(&mut buf[..want]).await?;
+        timed_read_exact(r, &mut buf[..want], FILE_CHUNK_TIMEOUT).await?;
         let chan_offset = sent;
         let counter = chan_offset / CHUNK as u64 + 1;
         let nonce = counter_nonce(counter);
         let aad = aad_for(transfer_id, chan_offset);
         let ct = aead_seal(token, &nonce, &aad, &buf[..want])?;
-        write_len_prefixed(w, &ct).await?;
+        timed_write_len_prefixed(w, &ct, FILE_CHUNK_TIMEOUT).await?;
         sent += want as u64;
         on_chunk(chan_offset, want)?;
     }
-    w.flush().await?;
+    timed_flush(w, FILE_CHUNK_TIMEOUT).await?;
     Ok(())
 }
 
-/// Send from an AsyncRead stream as encrypted chunks, starting from `start`
-/// (which must be `CHUNK`-aligned). Reads up to `CHUNK` bytes at a time
-/// until `total` bytes from `start` have been read and sent. Memory is bounded to
-/// one chunk (64 KiB) throughout the transfer.
+/// Send from an AsyncRead stream as encrypted chunks, starting from `start`.
 pub async fn send_stream_from<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     r: &mut R,
     w: &mut W,
@@ -177,6 +276,19 @@ pub async fn read_header<R: AsyncRead + Unpin>(r: &mut R) -> Result<(String, u64
     }
 }
 
+/// Read a file header with one explicit deadline covering the complete
+/// unauthenticated header. This is used by the file listener before it has a
+/// transfer id or session token with which to authenticate the peer.
+pub async fn read_header_with_timeout<R: AsyncRead + Unpin>(
+    r: &mut R,
+    timeout: Duration,
+) -> Result<(String, u64, u64), NetError> {
+    match tokio::time::timeout(timeout, read_header(r)).await {
+        Ok(result) => result,
+        Err(_) => Err(NetError::Timeout),
+    }
+}
+
 async fn read_u64<R: AsyncRead + Unpin>(r: &mut R) -> Result<u64, NetError> {
     let b = read_len_prefixed(r).await?;
     if b.len() != 8 {
@@ -203,7 +315,7 @@ where
     R: AsyncRead + Unpin,
     F: FnMut(&[u8], u64) -> Result<(), NetError>,
 {
-    let (id, total, start) = read_header(r).await?;
+    let (id, total, start) = read_header_with_timeout(r, FILE_HEADER_TIMEOUT).await?;
     if id != expected_id {
         return Err(NetError::Handshake);
     }
@@ -215,6 +327,38 @@ where
 /// decrypt). `total`/`start` come from [`read_header`].
 #[allow(clippy::too_many_arguments)]
 pub async fn recv_chunks_after_header<R, F>(
+    r: &mut R,
+    token: &[u8; 32],
+    expected_id: &str,
+    total: u64,
+    start: u64,
+    max_size: u64,
+    out: &mut Vec<u8>,
+    on_chunk: F,
+) -> Result<[u8; 32], NetError>
+where
+    R: AsyncRead + Unpin,
+    F: FnMut(&[u8], u64) -> Result<(), NetError>,
+{
+    tokio::time::timeout(
+        FILE_TOTAL_TIMEOUT,
+        recv_chunks_after_header_inner(
+            r,
+            token,
+            expected_id,
+            total,
+            start,
+            max_size,
+            out,
+            on_chunk,
+        ),
+    )
+    .await
+    .map_err(|_| NetError::Timeout)?
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recv_chunks_after_header_inner<R, F>(
     r: &mut R,
     token: &[u8; 32],
     expected_id: &str,
@@ -235,7 +379,7 @@ where
         return Err(NetError::Handshake);
     }
     while (out.len() as u64) < total {
-        let ct = read_len_prefixed(r).await?;
+        let ct = timed_read_len_prefixed(r, FILE_CHUNK_TIMEOUT).await?;
         let chan_offset = out.len() as u64;
         let counter = chan_offset / CHUNK as u64 + 1;
         let nonce = counter_nonce(counter);
@@ -269,6 +413,41 @@ pub async fn recv_chunks_to_sink<R, W, F>(
     total: u64,
     start: u64,
     max_size: u64,
+    hasher: tetherly_core::IncrementalSha256,
+    on_chunk: F,
+) -> Result<[u8; 32], NetError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(u64, usize) -> Result<(), NetError>,
+{
+    tokio::time::timeout(
+        FILE_TOTAL_TIMEOUT,
+        recv_chunks_to_sink_inner(
+            r,
+            w,
+            token,
+            expected_id,
+            total,
+            start,
+            max_size,
+            hasher,
+            on_chunk,
+        ),
+    )
+    .await
+    .map_err(|_| NetError::Timeout)?
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recv_chunks_to_sink_inner<R, W, F>(
+    r: &mut R,
+    w: &mut W,
+    token: &[u8; 32],
+    expected_id: &str,
+    total: u64,
+    start: u64,
+    max_size: u64,
     mut hasher: tetherly_core::IncrementalSha256,
     mut on_chunk: F,
 ) -> Result<[u8; 32], NetError>
@@ -285,7 +464,7 @@ where
     }
     let mut received = start;
     while received < total {
-        let ct = read_len_prefixed(r).await?;
+        let ct = timed_read_len_prefixed(r, FILE_CHUNK_TIMEOUT).await?;
         let chan_offset = received;
         let counter = chan_offset / CHUNK as u64 + 1;
         let nonce = counter_nonce(counter);
@@ -296,14 +475,14 @@ where
             return Err(NetError::TooLarge);
         }
         hasher.update(&pt);
-        w.write_all(&pt).await?;
+        timed_write_all(w, &pt, FILE_CHUNK_TIMEOUT).await?;
         received += chunk_len as u64;
         on_chunk(chan_offset, chunk_len)?;
     }
     if received != total {
         return Err(NetError::Handshake);
     }
-    w.flush().await?;
+    timed_flush(w, FILE_CHUNK_TIMEOUT).await?;
     Ok(hasher.finalize_bytes())
 }
 
@@ -348,7 +527,17 @@ fn parse_sha256_hex(hex: &str) -> Result<[u8; 32], NetError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::write_len_prefixed;
     use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn incomplete_header_times_out_with_explicit_deadline() {
+        let (_writer, mut reader) = duplex(16);
+        let err = read_header_with_timeout(&mut reader, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, NetError::Timeout), "{err:?}");
+    }
 
     #[tokio::test]
     async fn file_bytes_roundtrip() {

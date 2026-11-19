@@ -350,6 +350,35 @@ impl ClipHub {
         self.clear_history()
     }
 
+    /// Preview the next local clipboard frame without changing the committed
+    /// hash/sequence. The node commits it only after every target accepts the
+    /// frame into its bounded session queue.
+    pub fn preview_local(&self, text: &str) -> Result<Option<ClipSet>, CoreError> {
+        if text.len() > CLIP_TEXT_MAX {
+            return Err(CoreError::ClipboardTooLarge);
+        }
+        let hash = hex_sha256(text.as_bytes());
+        if self.last_hash.as_deref() == Some(hash.as_str()) {
+            return Ok(None);
+        }
+        Ok(Some(ClipSet::text(self.last_seq.saturating_add(1), text)?))
+    }
+
+    /// Preview an explicit local send, even when its hash matches the last
+    /// committed frame. The state is committed separately after delivery.
+    pub fn preview_force_local(&self, text: &str) -> Result<ClipSet, CoreError> {
+        if text.len() > CLIP_TEXT_MAX {
+            return Err(CoreError::ClipboardTooLarge);
+        }
+        ClipSet::text(self.last_seq.saturating_add(1), text)
+    }
+
+    /// Commit a frame after its delivery result is known to be complete.
+    pub fn commit_local(&mut self, clip: &ClipSet) {
+        self.last_seq = self.last_seq.max(clip.clip_seq);
+        self.last_hash = Some(clip.hash.clone());
+    }
+
     /// Local user copied text. None if it is the same bytes we just wrote.
     pub fn prepare_local(&mut self, text: &str) -> Result<Option<ClipSet>, CoreError> {
         if text.len() > CLIP_TEXT_MAX {

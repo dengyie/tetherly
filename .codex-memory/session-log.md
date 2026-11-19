@@ -1,5 +1,17 @@
 # Session log
 
+## 2026-11-19 · 深度 review 修复路线图（v0.2.65）
+- 汇总当前 HEAD `3609ca1` 的安全、资源、生命周期、客户端、CI/release/deploy 审计，形成 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)。
+- 登记 P1/P2 修复批次：权限边界与本地副作用、HTTP/文件/session 资源上界、状态机 teardown、客户端可靠性、CI/release/deploy gate。
+- 明确发布冻结：P1/P2 定向 RED/GREEN、GitHub CI、release artifact 和现场 readiness/rollback 证据完成前，不新增 tag、release 或生产部署。
+- 本轮随后完成本地 remediation：node lib **306/306**、loopback **12/12**、API bindings+contract **43**、net backpressure **3/3**、Tauri SSE **8/8**；node check、CLI check、bash/python 静态门禁和目标旧 API grep 通过。
+- 已落地：私有 send staging/路径 containment、Admin-only POST export + 原子 `create_new`、legacy/v1 SSE 鉴权与 parser、file listener admission/header timeout、recv flush timeout、camera ownership、browser/Tauri SSE、Android reply/service 代码、CI/release/smoke route 迁移。
+- 后续 remediation 代理已补齐：raw inbox 句柄+64 KiB 分块响应；file connect/header/chunk/total deadline；单目标 offer/accept rollback；同源同元数据 duplicate admission；hard-link atomic inbox reservation；screen generation/privacy/ticket failure cleanup；clipboard preview/commit + bounded per-peer retry；browser/Tauri SSE handshake/idle/sequence；Android quick-reply queue 与 foreground timeout/restart 状态机；CI/release/deploy/smoke gate 代码和静态契约。
+- 当前未完成：multi-peer queue-full 高层集成证据、高层 stalled-transfer 集成证据、timeout/shutdown 后 partial/sidecar 现场策略确认；未运行 Android Gradle/unit/NDK、GitHub CI、workspace 全量、Windows/macOS release/deploy、真实 Android/浏览器/WebView/跨平台现场验收；发布冻结继续有效。
+- 新增 GREEN：`runtime::lifecycle::tests::terminal_transfer_transition_clears_outbound_state` 1/1；`runtime::lifecycle::tests::shutdown_transitions_outbound_transfer_and_outbox_to_terminal` 1/1；node `cargo check --lib --tests --locked` 通过。multi-peer failure branches and shutdown now reuse terminal transition to clear pending/cancel state and update outbox/stats.
+- 深度优化迭代：前端 13 个 check 错误根因修复（tetherly-api decl 列表补 `TransferStats`/`TrayOwner`/`DisplayModeDto` + 重新 bless + 删除临时 shim；fixture 补新字段），`pnpm check` 0 errors / `pnpm test` 36/36；P3 storage/open 绝对路径按 tier 脱敏（Admin 保留，client token 相对占位，node lib **315/315**）；P3 macOS 打包 token 改 curl stdin config 不进 argv；生成器 decl() 出口逐行 trim，blessed api.ts 无尾随空格。
+- 传输集成证据：`inbound_stall_tests::stalled_inbound_transfer_fails_and_keeps_resume_state`（cfg(test) 500ms 注入窗口，RED 4.05s→GREEN 0.55s，.part/sidecar 保留）；`multi_peer_file_dispatch_isolates_queue_full_failure_to_its_peer`（突变测试 RED→GREEN 0.03s）。node lib **317/317**、net lib 13/13。剩余 Residual 仅 sidecar 现场确认与外部平台/CI 门禁。
+
 ## 2026-10-19 (59) - LAN device discovery & beacon governance, discovery observability & instant pairing parity (v1.61 / ADR-054)
 - Task: 实现局域网设备自发现治理、信标可观测性与一键拨号配对闭环 (LAN Device Discovery & Beacon Governance, Discovery Observability & Instant Pairing Parity)，终结既有系统单向广播自身但从未浏览/监听对端信标的“监听黑盒”，提供强类型 DTO 画像、动态重新探测、智能拨号寻址引擎、零明文事件即时分发、双端 CLI 完整同构与 Web UI 一键直连交互面板。
 - **背景与缺陷根因**:

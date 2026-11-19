@@ -46,6 +46,9 @@ impl Node {
     ) -> Result<Self, crate::store::NodeStoreError> {
         cleanup_stale_old_binaries();
         let identity = crate::cred::load_or_create_identity(&cfg.data_dir)?;
+        // File-send sources are daemon-owned inputs. Create and permission the
+        // staging root before serving any UI or file listener.
+        crate::store::ensure_private_dir(&crate::store::send_staging_dir(&cfg.data_dir))?;
         let trust = load_trust(&cfg.data_dir)?;
         let (events, _) = broadcast::channel(64);
         let (shutdown, _) = watch::channel(false);
@@ -511,6 +514,7 @@ impl Node {
             screen_privacy_last_change_us: AtomicU64::new(0),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
+            file_admission: Arc::new(Semaphore::new(FILE_HANDLER_LIMIT)),
             shutdown,
             overlay: Mutex::new(initial_overlay),
             ancs: Mutex::new(ancs),
@@ -560,6 +564,10 @@ impl Node {
             clip_sensitive_blocked_count: AtomicU64::new(0),
             last_auto_sync_hash: Mutex::new(None),
             last_clip_token: Mutex::new(None),
+            clipboard_send_lock: AsyncMutex::new(()),
+            clipboard_delivery: Mutex::new(
+                crate::runtime::clipboard::ClipboardDeliveryState::default(),
+            ),
             handoff_policy: Mutex::new(initial_handoff_policy),
             handoff_inbox: Mutex::new(initial_handoff_inbox),
             handoff_seq: AtomicU64::new(0),
@@ -628,6 +636,8 @@ impl Node {
             input_trace: Mutex::new(VecDeque::with_capacity(super::input::INPUT_TRACE_CAP)),
             screen_channel_gen: std::sync::atomic::AtomicU64::new(0),
             screen_client_gen: std::sync::atomic::AtomicU64::new(0),
+            screen_session_gen: std::sync::atomic::AtomicU64::new(0),
+            screen_registration: AsyncMutex::new(()),
             input_client_task: Mutex::new(None),
             input_dialing: std::sync::atomic::AtomicBool::new(false),
             input_attach_kick_at: Mutex::new(None),
@@ -791,7 +801,7 @@ impl Node {
             });
         }
         for l in file_listeners {
-            node_accept_loop(self.clone_handle(), l, "file", |node, s, a| async move {
+            node_file_accept_loop(self.clone_handle(), l, "file", |node, s, a| async move {
                 node.accept_file(s, a).await
             });
         }
@@ -821,6 +831,38 @@ impl Node {
         }
         if let Ok(mut sessions) = self.shared.sessions.try_lock() {
             sessions.clear();
+        }
+        // Wake every file worker before dropping its source ownership; this
+        // makes shutdown the same terminal path as user cancellation.
+        let cancel_senders = {
+            let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
+            cancels.drain().map(|(_, tx)| tx).collect::<Vec<_>>()
+        };
+        for tx in cancel_senders {
+            let _ = tx.send(());
+        }
+        self.shared.pending_out.lock().expect("pending").clear();
+        // Reuse the normal terminal transition so shutdown updates failure
+        // statistics, outbox history, and observers exactly like timeout or
+        // user cancellation. Collect IDs first because the transition also
+        // mutates/prunes the active-transfer map.
+        let in_flight = {
+            let transfers = self.shared.active_transfers.lock().expect("transfers");
+            transfers
+                .values()
+                .filter(|transfer| {
+                    transfer.phase == TransferPhase::Transferring
+                        || transfer.phase == TransferPhase::Verifying
+                })
+                .map(|transfer| transfer.transfer_id.clone())
+                .collect::<Vec<_>>()
+        };
+        for transfer_id in in_flight {
+            self.set_transfer_phase(
+                &transfer_id,
+                TransferPhase::Failed,
+                Some("node shutdown".into()),
+            );
         }
         self.shared.live.lock().expect("live").clear();
         self.shared
@@ -2134,6 +2176,265 @@ fn cleanup_old_binaries_in(parent: &std::path::Path, stem: &str, cutoff: std::ti
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn screen_start_send_failure_closes_ticket_window() {
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("screen-start-failure");
+        let err = node
+            .screen_start()
+            .await
+            .expect_err("no screen channel must fail");
+        assert!(err.to_string().contains("screen"));
+        assert_eq!(
+            node.shared
+                .screen_start_ticket
+                .load(std::sync::atomic::Ordering::SeqCst)
+                % 2,
+            0,
+            "failed start must not leave an odd refusal window open"
+        );
+        assert!(!node
+            .shared
+            .screen_start_refused
+            .load(std::sync::atomic::Ordering::SeqCst));
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn screen_stop_send_failure_clears_privacy_state() {
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("screen-stop-failure");
+        node.screen_set_privacy_mode(true, true).await.unwrap();
+        let err = node
+            .screen_stop()
+            .await
+            .expect_err("no screen channel must fail");
+        assert!(err.to_string().contains("screen"));
+        let privacy = node.screen_privacy_report();
+        assert!(!privacy.enabled, "failed stop must clear privacy enabled");
+        assert!(!privacy.lock_input, "failed stop must clear input lock");
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn screen_start_and_stop_failure_cleanup_is_deterministic() {
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("screen-control-failure");
+        node.shared
+            .screen_start_refused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        node.shared
+            .screen_start_ticket
+            .store(6, std::sync::atomic::Ordering::SeqCst);
+        let _ = node.screen_start().await;
+        assert_eq!(
+            node.shared
+                .screen_start_ticket
+                .load(std::sync::atomic::Ordering::SeqCst)
+                % 2,
+            0
+        );
+        node.screen_set_privacy_mode(true, true).await.unwrap();
+        let _ = node.screen_stop().await;
+        assert!(!node.screen_privacy_report().enabled);
+        assert!(!node.screen_privacy_report().lock_input);
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn terminal_transfer_transition_clears_outbound_state() {
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("terminal-cleanup");
+        let peer = DeviceId::from_id_pk(&[91u8; 32]);
+        let transfer_id = "tr_terminal_cleanup".to_string();
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        {
+            node.shared.pending_out.lock().unwrap().insert(
+                transfer_id.clone(),
+                OutboundFile {
+                    peer: peer.clone(),
+                    name: "payload.bin".into(),
+                    source: OutboundSource::Bytes(vec![1, 2, 3]),
+                    size: 3,
+                },
+            );
+            node.shared
+                .transfer_cancels
+                .lock()
+                .unwrap()
+                .insert(transfer_id.clone(), cancel_tx);
+            node.shared.active_transfers.lock().unwrap().insert(
+                transfer_id.clone(),
+                ActiveTransfer {
+                    transfer_id: transfer_id.clone(),
+                    peer: peer.clone(),
+                    direction: TransferDirection::Outbound,
+                    filename: "payload.bin".into(),
+                    total: 3,
+                    transferred: 0,
+                    speed_bps: 0,
+                    phase: TransferPhase::Transferring,
+                    error: None,
+                    started_ms: 1,
+                    updated_ms: 1,
+                    resume_offset: None,
+                    is_resumed: false,
+                },
+            );
+            node.shared.outbox_engine.lock().unwrap().push(OutboxEntry {
+                id: format!("out_{transfer_id}"),
+                transfer_id: transfer_id.clone(),
+                peer: peer.to_string(),
+                peer_alias: None,
+                filename: "payload.bin".into(),
+                size: 3,
+                sha256: "a".repeat(64),
+                source_path: None,
+                status: OutboxStatus::InFlight,
+                error: None,
+                started_ms: 1,
+                completed_ms: None,
+                speed_bps: 0,
+            });
+        }
+
+        node.set_transfer_phase(
+            &transfer_id,
+            TransferPhase::Failed,
+            Some("send failed".into()),
+        );
+
+        assert!(node.shared.pending_out.lock().unwrap().is_empty());
+        assert!(node.shared.transfer_cancels.lock().unwrap().is_empty());
+        assert_eq!(
+            node.transfer_by_id(&transfer_id).unwrap().phase,
+            TransferPhase::Failed
+        );
+        assert_eq!(
+            node.outbox_history(None, None, None)
+                .unwrap()
+                .entries
+                .last()
+                .unwrap()
+                .status,
+            OutboxStatus::Failed
+        );
+        assert_eq!(node.transfer_stats().failed_count, 1);
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shutdown_transitions_outbound_transfer_and_outbox_to_terminal() {
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("transfer-shutdown");
+        let peer = DeviceId::from_id_pk(&[92u8; 32]);
+        let transfer_id = "tr_shutdown_cleanup".to_string();
+        node.shared.active_transfers.lock().unwrap().insert(
+            transfer_id.clone(),
+            ActiveTransfer {
+                transfer_id: transfer_id.clone(),
+                peer: peer.clone(),
+                direction: TransferDirection::Outbound,
+                filename: "payload.bin".into(),
+                total: 3,
+                transferred: 1,
+                speed_bps: 10,
+                phase: TransferPhase::Transferring,
+                error: None,
+                started_ms: 1,
+                updated_ms: 1,
+                resume_offset: None,
+                is_resumed: false,
+            },
+        );
+        node.shared.outbox_engine.lock().unwrap().push(OutboxEntry {
+            id: format!("out_{transfer_id}"),
+            transfer_id: transfer_id.clone(),
+            peer: peer.to_string(),
+            peer_alias: None,
+            filename: "payload.bin".into(),
+            size: 3,
+            sha256: "b".repeat(64),
+            source_path: None,
+            status: OutboxStatus::InFlight,
+            error: None,
+            started_ms: 1,
+            completed_ms: None,
+            speed_bps: 10,
+        });
+
+        node.shutdown();
+
+        let transfer = node.transfer_by_id(&transfer_id).unwrap();
+        assert_eq!(transfer.phase, TransferPhase::Failed);
+        assert_eq!(transfer.error.as_deref(), Some("node shutdown"));
+        assert_eq!(node.transfer_stats().failed_count, 1);
+        let outbox = node.outbox_history(None, None, None).unwrap();
+        let entry = outbox.entries.last().unwrap();
+        assert_eq!(entry.status, OutboxStatus::Failed);
+        assert_eq!(entry.error.as_deref(), Some("node shutdown"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_listener_admission_is_global_and_shutdown_releases_every_permit() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("file-admission");
+        let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_addr = first.local_addr().unwrap();
+        let second_addr = second.local_addr().unwrap();
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for (listener, label) in [(first, "file"), (second, "overlay file")] {
+            let started = started.clone();
+            node_file_accept_loop(
+                node.clone_handle(),
+                listener,
+                label,
+                move |_node, _stream, _addr| {
+                    let started = started.clone();
+                    async move {
+                        started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::future::pending::<Result<(), tetherly_net::NetError>>().await
+                    }
+                },
+            );
+        }
+
+        let mut clients = Vec::new();
+        for _ in 0..FILE_HANDLER_LIMIT {
+            clients.push(tokio::net::TcpStream::connect(first_addr).await.unwrap());
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while started.load(std::sync::atomic::Ordering::SeqCst) < FILE_HANDLER_LIMIT {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first listener should acquire the complete shared budget");
+        clients.push(tokio::net::TcpStream::connect(second_addr).await.unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            started.load(std::sync::atomic::Ordering::SeqCst),
+            FILE_HANDLER_LIMIT,
+            "overlay listener must not exceed the LAN listener's shared budget"
+        );
+
+        node.shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while node.shared.file_admission.available_permits() != FILE_HANDLER_LIMIT {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown must cancel handlers and release all file permits");
+        drop(clients);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     // Production 2026-11-14: a promotion handshake went half-open (the peer
     // attached the LAN session, ours never completed) and sat on the 20 s
     // session HANDSHAKE_TIMEOUT. Meanwhile the peer kept the dead LAN path
@@ -2521,6 +2822,131 @@ mod tests {
         assert!(unrelated.exists());
         assert!(recent_backup.exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Remediation residual: multi-peer partial failure. One live peer's send
+    // queue is full while the other is healthy: the aggregate report must
+    // carry the per-peer outcome, the failed peer's transfer must reach the
+    // same terminal cleanup as a single-target failure (Failed phase,
+    // pending_out cleared, outbox Failed), and the healthy peer's dispatch
+    // must be untouched.
+    #[tokio::test]
+    async fn multi_peer_file_dispatch_isolates_queue_full_failure_to_its_peer() {
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("multi-partial-fail");
+        let fail_peer = DeviceId::from_id_pk(&[201u8; 32]);
+        let ok_peer = DeviceId::from_id_pk(&[202u8; 32]);
+
+        // The failing peer is live but its outbound queue is full, so
+        // `send_to` surfaces the queue-full error on the offer.
+        let (full_tx, _full_rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
+        node.register_session(test_live_peer(&fail_peer, "127.0.0.1:11"), full_tx.clone())
+            .await;
+        for i in 0..SESSION_QUEUE_DEPTH {
+            full_tx
+                .try_send(ping(1_000 + i as u64))
+                .expect("fill the queue exactly to depth");
+        }
+
+        // The healthy peer is live with an empty queue.
+        let (ok_tx, mut ok_rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
+        node.register_session(test_live_peer(&ok_peer, "127.0.0.1:12"), ok_tx)
+            .await;
+
+        let report = node
+            .offer_and_send_bytes_multi(
+                &crate::store::TargetSelector::AllOnline,
+                "multi.bin",
+                b"multi-payload",
+            )
+            .await
+            .expect("aggregate dispatch must report instead of failing");
+
+        // (4) Aggregate counts: one success, one failure, nothing skipped.
+        assert_eq!(report.target_count, 2);
+        assert_eq!(report.success_count, 1);
+        assert_eq!(report.failed_count, 1);
+        assert_eq!(report.skipped_offline_count, 0);
+
+        // (1) The queue-full peer's dispatch item failed with the send error.
+        let failed = report
+            .dispatches
+            .iter()
+            .find(|d| d.peer == fail_peer.to_string())
+            .expect("queue-full peer must be reported");
+        assert!(!failed.success);
+        let queue_full_err = "json: peer busy; send queue full";
+        assert_eq!(failed.error.as_deref(), Some(queue_full_err));
+        let failed_tid = failed
+            .transfer_id
+            .clone()
+            .expect("failed dispatch keeps its transfer id");
+
+        // (2) The failed peer's transfer reached the terminal state: Failed
+        // phase, pending_out cleaned, outbox entry Failed.
+        let failed_transfer = node
+            .transfer_by_id(&failed_tid)
+            .expect("failed transfer retained for reporting");
+        assert_eq!(failed_transfer.phase, TransferPhase::Failed);
+        assert_eq!(failed_transfer.error.as_deref(), Some(queue_full_err));
+        assert!(
+            !node
+                .shared
+                .pending_out
+                .lock()
+                .expect("pending")
+                .contains_key(&failed_tid),
+            "failed dispatch must not leave a pending outbound entry"
+        );
+        let outbox = node.outbox_history(None, None, None).unwrap();
+        let failed_entry = outbox
+            .entries
+            .iter()
+            .find(|e| e.transfer_id == failed_tid)
+            .expect("outbox entry for the failed peer");
+        assert_eq!(failed_entry.status, OutboxStatus::Failed);
+        assert_eq!(failed_entry.error.as_deref(), Some(queue_full_err));
+
+        // (3) The healthy peer's dispatch is unaffected: item ok, offer frame
+        // queued, transfer still Transferring with pending_out intact and an
+        // InFlight outbox entry.
+        let ok = report
+            .dispatches
+            .iter()
+            .find(|d| d.peer == ok_peer.to_string())
+            .expect("healthy peer must be reported");
+        assert!(ok.success);
+        assert!(ok.error.is_none());
+        let ok_tid = ok
+            .transfer_id
+            .clone()
+            .expect("successful dispatch keeps its transfer id");
+        let ok_transfer = node
+            .transfer_by_id(&ok_tid)
+            .expect("active transfer for the healthy peer");
+        assert_eq!(ok_transfer.phase, TransferPhase::Transferring);
+        assert!(node
+            .shared
+            .pending_out
+            .lock()
+            .expect("pending")
+            .contains_key(&ok_tid));
+        let ok_entry = outbox
+            .entries
+            .iter()
+            .find(|e| e.transfer_id == ok_tid)
+            .expect("outbox entry for the healthy peer");
+        assert_eq!(ok_entry.status, OutboxStatus::InFlight);
+        let frame = ok_rx
+            .try_recv()
+            .expect("offer frame queued for the healthy peer");
+        assert_eq!(frame.ty, tetherly_core::frame::TYPE_FILE_OFFER);
+
+        // Exactly one failure counted overall.
+        assert_eq!(node.transfer_stats().failed_count, 1);
+
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

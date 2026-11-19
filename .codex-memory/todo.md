@@ -1,8 +1,21 @@
 # TODO
 
-## 当前接手基线（截至 2026-11-13）
+## 当前接手基线（截至 2026-11-19）
 
-> **v0.2.37（2026-11-14，§109）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **review 基线：workspace/tag v0.2.65，最高 ADR-139。** 本文件保留历史条目作为证据，不把旧接手版本或历史“未修”描述重新当作当前 TODO。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。新的深度 review 修复合同见 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)。
+
+## 2026-11-19 深度 review 修复路线图（当前执行状态）
+
+- [x] **Batch 0 · 发布冻结与证据基线**：review 基线固定为 workspace/tag v0.2.65、snapshot `3609ca1`；发布冻结仍有效。
+- [x] **Batch 1 · 权限边界与本地副作用（本地 GREEN）**：发送源限制到私有 `data_dir/send`，GET export 无副作用，POST export Admin-only 且 `create_new` 预留，legacy/v1 SSE 分流并鉴权；node/loopback/API/CLI 定向验证通过。
+- [ ] **Batch 2 · 内存、连接与写入生命周期上界（代码 GREEN）**：raw inbox 分块响应、listener admission/header timeout、connect/chunk/total deadline、recv flush timeout、inbound stalled-transfer 集成证据（RED→GREEN，sidecar 续传语义保留）均通过定向验证。残余为 timeout/cancel/shutdown 后 partial/sidecar 策略现场确认。
+- [ ] **Batch 3 · 状态原子性与 teardown（代码 GREEN）**：screen start/stop failure cleanup、camera ownership、单目标 offer/accept rollback、同源同元数据 duplicate admission、atomic inbox target、multi-peer failure terminal transition、shutdown outbox/stats cleanup、multi-peer queue-full 隔离证据（RED→GREEN）均通过定向验证。残余仅为上述 sidecar 现场确认。
+- [ ] **Batch 4 · 客户端可靠性（代码/定向 GREEN，平台证据未完成）**：clipboard partial retry、browser/Tauri SSE status/idle/reconnect 已通过定向测试；Android reply queue/foreground recovery 已静态完成并新增纯 JVM 测试源码。Android Gradle/unit/真机与真实 WebView 仍未验证。
+- [ ] **Batch 5 · CI/release/deploy gate（代码/静态 GREEN，实际门禁未完成）**：frontend gate、tag/version checkout、Android release variant、artifact digest、smoke route migration、Windows readiness/rollback 代码和静态检查已落；GitHub CI、Windows/macOS readiness/rollback 现场、artifact provenance 和发布证据尚未完成。
+- [ ] 每个批次必须先有 RED，再有 GREEN；Rust 三平台、Android、cargo-deny、frontend/Tauri 和 release artifact 证据齐全后才允许发布。
+- [ ] Needs confirmation：client token 的本地权限威胁模型、Windows ACL/junction 现场验证、hook 并发启动/shutdown 生命周期、Windows smooth-wheel 子 detent 协议承诺。
+- [x] 不重开 §171 已解决的 input-link/Android Compose 项；Windows viewer、Edge Strip/Ghost Overlay、被动拖拽和多显示器继续作为能力缺口/Manual-required 单列。
+- [ ] 详细合同见 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)。
 
 ## v0.2.37 Mac 漫游被接管后 Windows 光标在 Mac 不可见、反复弹回（2026-11-14，DEVELOPMENT.md §109）
 - [x] 日志：18:34:53 Mac 被接管降级后 25 s 内 8 轮 apply: enter → 菜单栏 rem_y=0..11 → 0.5–1 s 内弹回 Windows。
@@ -104,7 +117,7 @@
 - [x] v0.2.15 幽灵漫游卡死（production 2026-11-11 23:47）：persistent channel 在 session release 后仍开放 → drive 路径无授权越界进 Remote（双端引擎对漂、物理鼠标冻结）+ reconcile 被通道开挡住不救。修复：reconcile 只豁免活 Controller 授权；drive 越界需授权（grace / ADR-138 session / tunnel grant），无授权就地 debounced attach 补会话；pre_arm_epoch 防旧通道 pump teardown 误杀新预置授权（9d7eef2）。m3_1..m3_7 更新为 attach 契约并等双端会话就位。
 - [ ] 远控：Windows session viewer（**§171 已核对**：viewer 为 macOS-only AppKit 子进程，Windows 诚实 stub wire-side only，CI 仅 macOS 分发——缺口确认，原生 viewer 独立立项）；核对 H.264 viewer 解码、clip 会话联动、lock-to-screen 的实际缺口，再决定设计 / 实施顺序；屏幕 codec、clip hub 或无漫游边界不能替代这些能力的闭环证据。
 - [ ] 文件投递：Edge Strip / 真实 Ghost Overlay / 被动跨屏拖拽与原生落点语义（**§171 已核对**：协议/编排层完整，三者为原生窗口层未实施，与 ADR-137 §14/§35 登记一致——缺口确认，功能立项）；已落地托盘 UI 不代表这些全功能完成。
-- [ ] Android Compose 改版（**v0.2.65 已落地**：gradle×3 + MainActivity 重写 Material 3，行为等价；真机/CI assembleDebug 待 build-android job 验证）。
+- [x] Android Compose 改版（**v0.2.65 已落地**：gradle×3 + MainActivity 重写 Material 3，行为等价；CI build-android job 负责构建验证，真机长稳仍 Manual-required）。
 - [ ] 其他历史 backlog（fuzz、Android / iOS、Wayland、硬件编码与桌面外壳等）需重新核对现有实现与优先级后立项，不沿用旧版“未开始 / 已验证”标签。
 
 ## 真机验收（Manual-required）

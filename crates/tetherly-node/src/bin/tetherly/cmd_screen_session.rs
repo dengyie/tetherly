@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Screen session lifecycle: allow/revoke/start/stop/status/snapshot.
 
-use super::util::urlencode_path;
 use super::*;
 
 /// `tetherly screen allow` -- Allow arm of the screen dispatcher.
@@ -422,7 +421,10 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Annotations:  active: {} · total_added: {} · laser_active: {} · laser_updates: {}",
-                rep.annotations_count, rep.annotations_total, rep.laser_active, rep.laser_updates_total
+                rep.annotations_count,
+                rep.annotations_total,
+                rep.laser_active,
+                rep.laser_updates_total
             );
             if rep.whiteboard_undo_count > 0
                 || rep.whiteboard_redo_count > 0
@@ -465,7 +467,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         if rep.delta_enabled || rep.delta_frames_sent > 0 || rep.delta_saved_bytes > 0 {
             println!(
                 "  Delta Patch:  enabled: {} · interval: {} · delta_sent: {} · keyframes: {} · saved: {} B",
-                rep.delta_enabled, rep.delta_keyframe_interval, rep.delta_frames_sent, rep.delta_keyframes_sent, rep.delta_saved_bytes
+                rep.delta_enabled,
+                rep.delta_keyframe_interval,
+                rep.delta_frames_sent,
+                rep.delta_keyframes_sent,
+                rep.delta_saved_bytes
             );
         }
         if rep.metric_enabled || rep.metric_evaluated_frames > 0 {
@@ -476,8 +482,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
             };
             println!(
                 "  Visual Metric:enabled: {} · interval: {} · evaluated: {} · psnr: {:.2} dB · ssim: {:.4}{warn_str}",
-                rep.metric_enabled, rep.metric_sample_interval, rep.metric_evaluated_frames,
-                rep.metric_psnr_db, rep.metric_ssim
+                rep.metric_enabled,
+                rep.metric_sample_interval,
+                rep.metric_evaluated_frames,
+                rep.metric_psnr_db,
+                rep.metric_ssim
             );
         }
         if rep.qoe_enabled || rep.qoe_actions_total > 0 || rep.qoe_mode != "off" {
@@ -503,7 +512,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         if rep.ltr_enabled || rep.ltr_anchors_established > 0 || rep.ltr_recoveries_completed > 0 {
             println!(
                 "  LTR Recovery:   status: {} · auto_interval: {} · anchor_seq: #{} · anchors: {} · recoveries: {}",
-                if rep.ltr_enabled { "enabled" } else { "disabled" },
+                if rep.ltr_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.ltr_auto_interval,
                 rep.ltr_current_seq,
                 rep.ltr_anchors_established,
@@ -518,7 +531,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  SVC-T Stream:   status: {} · mode: {} · drop_t1: {} · T0: {} · T1: {} · dropped: {}",
-                if rep.svc_enabled { "enabled" } else { "disabled" },
+                if rep.svc_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.svc_mode,
                 rep.svc_drop_t1,
                 rep.svc_t0_sent,
@@ -533,7 +550,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Motion Scroll:  status: {} · max_disp: {}px · motion_frames: {} · fallback: {} · saved: {}B",
-                if rep.motion_enabled { "enabled" } else { "disabled" },
+                if rep.motion_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.motion_max_displacement,
                 rep.motion_frames_sent,
                 rep.motion_fallback_frames_sent,
@@ -547,7 +568,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Spatial Tile-Grid: status: {} · tile_size: {}px · grid_frames: {} · dirty_tiles: {} · skipped: {} · saved: {}B",
-                if rep.tile_enabled { "enabled" } else { "disabled" },
+                if rep.tile_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_size,
                 rep.tile_frames_sent,
                 rep.dirty_tiles_sent,
@@ -569,7 +594,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
             };
             println!(
                 "  Tile Dictionary:  status: {} · entries: {} · hits: {} · misses: {} · hit_ratio: {:.1}% · saved: {}B",
-                if rep.tile_cache_enabled { "enabled" } else { "disabled" },
+                if rep.tile_cache_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_cache_entries,
                 rep.tile_cache_hits,
                 rep.tile_cache_misses,
@@ -585,7 +614,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Foveated Focus:   status: {} · mode: {} · radius: {}px · skip_ratio: {} · focus_tiles: {} · peripheral_sent: {} · peripheral_skipped: {} · saved: {}B",
-                if rep.focus_enabled { "enabled" } else { "disabled" },
+                if rep.focus_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.focus_mode,
                 rep.focus_radius,
                 rep.focus_peripheral_skip_ratio,
@@ -604,7 +637,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Palette:     status: {} · max_colors: {} · solid: {} · bilevel: {} · palette: {} · truecolor: {} · saved: {}B",
-                if rep.tile_palette_enabled { "enabled" } else { "disabled" },
+                if rep.tile_palette_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_palette_max_colors,
                 rep.tile_palette_solid_tiles,
                 rep.tile_palette_bilevel_tiles,
@@ -619,7 +656,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Predict:     status: {} · filter: {} · rct: {} · predict_tiles: {} · saved: {}B",
-                if rep.tile_predict_enabled { "enabled" } else { "disabled" },
+                if rep.tile_predict_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_predict_filter_mode,
                 rep.tile_predict_enable_rct,
                 rep.tile_predict_tiles_sent,
@@ -632,7 +673,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Present:     status: {} · vsync: {} · double_buf: {} · anti_tear: {} · committed_tx: {} · swapped: {} · torn_prevented: {} · avg_latency: {}µs",
-                if rep.tile_present_enabled { "enabled" } else { "disabled" },
+                if rep.tile_present_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_present_vsync_mode,
                 rep.tile_present_double_buffer,
                 rep.tile_present_tear_prevention,
@@ -649,7 +694,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Micro-NACK:  status: {} · timeout: {}ms · max_retries: {} · nack_sent: {} · retransmitted: {} · degraded: {}",
-                if rep.tile_nack_enabled { "enabled" } else { "disabled" },
+                if rep.tile_nack_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_nack_timeout_ms,
                 rep.tile_nack_max_retries,
                 rep.tile_nack_requests_sent,
@@ -665,7 +714,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Saliency:    status: {} · high_thresh: {} · low_thresh: {} · drop_bg_congest: {} · critical: {} · normal: {} · background: {} · bg_skipped: {}",
-                if rep.tile_saliency_enabled { "enabled" } else { "disabled" },
+                if rep.tile_saliency_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_saliency_high_threshold,
                 rep.tile_saliency_low_threshold,
                 rep.tile_saliency_drop_background_on_congestion,
@@ -683,7 +736,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile LoD Downsample: status: {} · max_lod: Lod{} · auto_lod_congest: {} · lod0: {} · lod1: {} · lod2: {} · bytes_saved: {} B",
-                if rep.tile_lod_enabled { "enabled" } else { "disabled" },
+                if rep.tile_lod_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_lod_max_lod,
                 rep.tile_lod_auto_lod_on_congestion,
                 rep.tile_lod0_tiles,
@@ -699,7 +756,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Batching:    status: {} · target_chunk: {} B · pacing: {} µs · batches: {} · chunks: {} · avg_chunk: {} B · pauses: {}",
-                if rep.tile_batch_enabled { "enabled" } else { "disabled" },
+                if rep.tile_batch_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_batch_target_chunk_bytes,
                 rep.tile_batch_pacing_interval_us,
                 rep.tile_batches_sent,
@@ -715,7 +776,11 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
         {
             println!(
                 "  Tile Motion Est:  status: {} · max_disp: {} px · min_match: {}% · motion_tiles: {} · fallback_tiles: {} · bytes_saved: {} B",
-                if rep.tile_motion_enabled { "enabled" } else { "disabled" },
+                if rep.tile_motion_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 rep.tile_motion_max_displacement,
                 rep.tile_motion_min_match_ratio,
                 rep.tile_motion_tiles_sent,
@@ -828,16 +893,24 @@ pub(crate) async fn screen_snapshot(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let query = match (&out, format.as_str()) {
-        (Some(o), f) => format!("?format={f}&out={}", urlencode_path(o)),
-        (None, f) => format!("?format={f}"),
+    let (method, uri, body) = if let Some(path) = out {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "format": format,
+            "out": path,
+        }))?;
+        ("POST", "/api/v1/screen/snapshot".to_string(), Some(body))
+    } else {
+        (
+            "GET",
+            format!("/api/v1/screen/snapshot?format={format}"),
+            None,
+        )
     };
-    let uri = format!("/api/v1/screen/snapshot{query}");
     let (code, resp) = tetherly_node::loopback_request(
         ui_port,
-        "GET",
+        method,
         &uri,
-        None,
+        body.as_deref(),
         tetherly_node::api_token_for(ui_port).as_deref(),
     )
     .await

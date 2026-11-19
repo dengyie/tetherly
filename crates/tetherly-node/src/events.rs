@@ -2,11 +2,19 @@
 //! UI-facing events. Bodies, OTP digits, and clipboard text never appear here.
 
 use serde::{Deserialize, Serialize};
+use tetherly_api::Event as ApiEvent;
 use tetherly_core::{CandidateView, DeviceId, IncomingTransfer, ReplyView};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UiEvent {
+    /// A v1 resource event received from `/api/v1/events`. The envelope
+    /// sequence is retained so consumers can resume or order updates without
+    /// confusing it with the legacy event bus variants below.
+    V1 {
+        seq: u64,
+        event: ApiEvent,
+    },
     Candidate {
         candidate: CandidateViewDto,
     },
@@ -102,6 +110,20 @@ pub enum UiEvent {
         hash: String,
         timestamp_ms: u64,
         sent_peers: usize,
+    },
+    /// Per-peer clipboard delivery state. This is emitted for both immediate
+    /// queue admission and bounded retry outcomes; it never carries text.
+    ClipboardDelivery {
+        seq: u64,
+        peer: String,
+        hash: String,
+        status: String,
+        attempt: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry_at_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        timestamp_ms: u64,
     },
     ClipboardCleared {
         timestamp_ms: u64,

@@ -765,17 +765,26 @@ pub(crate) async fn screen_whiteboard(
         }) => {
             let port = if p != 45716 { p } else { ui_port };
             let is_json = j || json;
-            let uri = if let Some(ref o) = out {
-                format!("/api/screen/whiteboard/export?out={}", urlencode_path(o))
+            let (code, resp) = if let Some(path) = out.clone() {
+                let body = serde_json::to_vec(&serde_json::json!({ "out": path }))?;
+                tetherly_loopback::loopback_post(port, "/api/v1/screen/whiteboard/export", &body)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?
             } else {
-                "/api/screen/whiteboard/export".to_string()
+                tetherly_loopback::loopback_get(port, "/api/v1/screen/whiteboard/export")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?
             };
-            let (code, resp) = loopback_get(port, &uri).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{port} ({e}); \
-                                     start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
             if code != 200 {
                 anyhow::bail!(
                     "whiteboard export failed (HTTP {code}): {}",
@@ -793,8 +802,8 @@ pub(crate) async fn screen_whiteboard(
                     .unwrap_or(0);
                 if let Some(ref dest) = out {
                     println!(
-                                    "Whiteboard vector snapshot successfully exported ({items} items) to: {dest}"
-                                );
+                        "Whiteboard vector snapshot successfully exported ({items} items) to: {dest}"
+                    );
                 } else {
                     println!(
                         "{}",

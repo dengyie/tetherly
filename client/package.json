@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:ci": "pnpm check && pnpm test && pnpm build && test -z \"$(git status --porcelain -- dist)\"",
     "test": "vitest run",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },

@@ -23,6 +23,7 @@ TAG=""
 RUN_ID=""
 REMOTE_HOST="${REMOTE_HOST:-home-win}"
 REMOTE_PORT=45716
+DATA_DIR="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}"
 LOCAL_PORT=45716
 RUN_SMOKE=false
 PROTECT_PROCS="SRBMiner-MULTI,verge-mihomo,komari-agent"
@@ -114,15 +115,26 @@ deploy_mac() {
     if [ -n "$RUN_ID" ]; then
         echo "==> Fetching macOS binary from GitHub Actions run ${RUN_ID}..."
         gh run download "$RUN_ID" -n "tetherly-macos-arm64" -D "$TMP_DIR"
+        gh run download "$RUN_ID" -n "tetherly-release-digests" -D "$TMP_DIR"
     else
         echo "==> Fetching macOS binary from GitHub Release ${TAG}..."
-        gh release download "$TAG" -p "tetherly-macos-arm64" -D "$TMP_DIR"
+        gh release download "$TAG" -p "tetherly-macos-arm64" -p "SHA256SUMS" -D "$TMP_DIR"
     fi
-
+    if [ ! -s "$TMP_DIR/SHA256SUMS" ]; then
+        echo "Error: release digest manifest is missing; refusing deployment." >&2
+        exit 1
+    fi
     if [ ! -f "$MAC_BIN" ]; then
         echo "Error: expected binary not found at $MAC_BIN" >&2
         exit 1
     fi
+    expected=$(awk -v name="$(basename "$MAC_BIN")" '$2 == name || $2 == "./" name || $2 == "*" name {print $1; exit}' "$TMP_DIR/SHA256SUMS")
+    actual=$(shasum -a 256 "$MAC_BIN" | awk '{print $1}')
+    if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+        echo "Error: digest mismatch for $(basename "$MAC_BIN"); refusing deployment." >&2
+        exit 1
+    fi
+
     chmod +x "$MAC_BIN"
 
     echo "==> Packaging /Applications/Tetherly.app with stable Designated Requirement..."
@@ -191,13 +203,23 @@ deploy_windows() {
     if [ -n "$RUN_ID" ]; then
         echo "==> Fetching Windows binaries from GitHub Actions run ${RUN_ID}..."
         gh run download "$RUN_ID" -n "tetherly-windows-x86_64" -D "$TMP_DIR"
+        gh run download "$RUN_ID" -n "tetherly-release-digests" -D "$TMP_DIR"
     else
         echo "==> Fetching Windows binaries from GitHub Release ${TAG}..."
-        gh release download "$TAG" -p "tetherly-windows-x86_64.exe" -p "tetherly-cli-windows-x86_64.exe" -D "$TMP_DIR"
+        gh release download "$TAG" -p "tetherly-windows-x86_64.exe" -p "tetherly-cli-windows-x86_64.exe" -p "SHA256SUMS" -D "$TMP_DIR"
     fi
-
+    if [ ! -s "$TMP_DIR/SHA256SUMS" ]; then
+        echo "Error: release digest manifest is missing; refusing deployment." >&2
+        exit 1
+    fi
     if [ ! -f "$WIN_BIN" ]; then
         echo "Error: expected binary not found at $WIN_BIN" >&2
+        exit 1
+    fi
+    expected=$(awk -v name="$(basename "$WIN_BIN")" '$2 == name || $2 == "./" name || $2 == "*" name {print $1; exit}' "$TMP_DIR/SHA256SUMS")
+    actual=$(shasum -a 256 "$WIN_BIN" | awk '{print $1}')
+    if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+        echo "Error: digest mismatch for $(basename "$WIN_BIN"); refusing deployment." >&2
         exit 1
     fi
 
@@ -217,6 +239,17 @@ deploy_windows() {
     echo "==> Mirroring staged binary into daemon update staging dir (C:)..."
     ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path 'C:\Users\mango\AppData\Local\tetherly\updates' | Out-Null; Copy-Item 'E:\code\tetherly\data\updates\\${REMOTE_STAGING_NAME}' 'C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}' -Force\""
 
+    echo "==> Capturing old daemon PID and process start-time rollback anchor..."
+    OLD_PROCESS=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$p=Get-Process tetherly -ErrorAction Stop | Select-Object -First 1; [pscustomobject]@{pid=\$p.Id; start_ticks=\$p.StartTime.ToUniversalTime().Ticks; path=\$p.Path} | ConvertTo-Json -Compress\"")
+    OLD_PID=$(printf '%s' "$OLD_PROCESS" | jq -r '.pid // empty')
+    OLD_START_TICKS=$(printf '%s' "$OLD_PROCESS" | jq -r '.start_ticks // empty')
+    OLD_EXE=$(printf '%s' "$OLD_PROCESS" | jq -r '.path // empty')
+    OLD_SHA256=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"(Get-FileHash -Algorithm SHA256 -LiteralPath '$OLD_EXE').Hash.ToLowerInvariant()\"")
+    if [ -z "$OLD_PID" ] || [ -z "$OLD_START_TICKS" ] || [ -z "$OLD_EXE" ] || ! [[ "$OLD_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "Error: failed to capture old daemon PID/start time; refusing restart." >&2
+        exit 1
+    fi
+
     echo "==> Initiating NTFS in-use atomic hot-restart via /api/v1/system/restart..."
     # v0.2.52 (P0-1): restart requires the daemon's per-start API token.
     # §169: the endpoint lives at `/api/v1/system/restart` (Admin tier) since
@@ -225,17 +258,40 @@ deploy_windows() {
     # Administrator, so it can read it.
     RESTART_RESP=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$h=@{}; \$tf='C:\Users\mango\AppData\Local\tetherly\api.token'; if (Test-Path \$tf) { \$h['X-Tetherly-Token']=(Get-Content -Raw \$tf).Trim() }; Invoke-RestMethod -Uri http://127.0.0.1:45716/api/v1/system/restart -Method Post -Headers \$h -Body (ConvertTo-Json @{replacement_path='C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}'}) -ContentType 'application/json' | ConvertTo-Json -Compress\"")
     echo "Restart response: $RESTART_RESP"
-
-    echo "==> Waiting 3s for daemon handoff..."
-    sleep 3
-
-    echo "==> Verifying Windows node health (version gate)..."
-    HEALTH_JSON=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health | ConvertTo-Json -Compress\"")
-    echo "$HEALTH_JSON"
-    if [ -n "${TAG}" ] && ! echo "$HEALTH_JSON" | grep -q "\"version\":\"${TAG#v}\""; then
-        echo "FATAL: deployed version does not match ${TAG}!" >&2
+    RESTART_OLD_PID=$(printf '%s' "$RESTART_RESP" | jq -r '.old_pid // empty')
+    if [ "$RESTART_OLD_PID" != "$OLD_PID" ]; then
+        echo "FATAL: restart response old_pid does not match captured process." >&2
         exit 3
     fi
+
+    echo "==> Waiting for replacement readiness (new PID/version/start time)..."
+    EXPECTED_VERSION="${TAG#v}"
+    READY=false
+    for _ in $(seq 1 30); do
+        PROBE=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$p=Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object -First 1; \$h=try { Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health -ErrorAction Stop } catch { \$null }; \$s=try { Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/system -Headers @{'X-Tetherly-Token'=(Get-Content -Raw 'C:\\Users\\mango\\AppData\\Local\\tetherly\\api.token').Trim()} -ErrorAction Stop } catch { \$null }; if (\$p -and \$h -and \$s) { [pscustomobject]@{pid=\$p.Id; start_ticks=\$p.StartTime.ToUniversalTime().Ticks; health_pid=\$s.pid; version=\$h.version; ok=\$h.ok} | ConvertTo-Json -Compress }\"")
+        NEW_PID=$(printf '%s' "$PROBE" | jq -r '.pid // empty' 2>/dev/null || true)
+        NEW_START_TICKS=$(printf '%s' "$PROBE" | jq -r '.start_ticks // empty' 2>/dev/null || true)
+        HEALTH_PID=$(printf '%s' "$PROBE" | jq -r '.health_pid // empty' 2>/dev/null || true)
+        HEALTH_VERSION=$(printf '%s' "$PROBE" | jq -r '.version // empty' 2>/dev/null || true)
+        HEALTH_OK=$(printf '%s' "$PROBE" | jq -r '.ok // false' 2>/dev/null || true)
+        if [ "$HEALTH_OK" = "true" ] && [ "$NEW_PID" = "$HEALTH_PID" ] && [ "$NEW_PID" != "$OLD_PID" ] && [ "$NEW_START_TICKS" != "$OLD_START_TICKS" ] && { [ -z "$TAG" ] || [ "$HEALTH_VERSION" = "$EXPECTED_VERSION" ]; }; then
+            READY=true
+            break
+        fi
+        sleep 0.5
+    done
+    if [ "$READY" != "true" ]; then
+        echo "FATAL: replacement readiness failed; restoring old daemon binary." >&2
+        ROLLBACK_PS="\$exe='$OLD_EXE'; Stop-Process -Name tetherly -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500; \$old=Get-ChildItem (Split-Path \$exe) -Filter 'tetherly.exe.old.*' | Where-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath \$_.FullName).Hash.ToLowerInvariant() -eq '$OLD_SHA256' } | Select-Object -First 1; if (-not \$old) { throw 'matching rollback binary backup not found' }; Move-Item \$old.FullName \$exe -Force; Start-ScheduledTask -TaskName TetherlySystemLauncher"
+        ROLLBACK_B64=$(printf '%s' "$ROLLBACK_PS" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\r\n')
+        ssh "${REMOTE_HOST}" "powershell -NoProfile -EncodedCommand ${ROLLBACK_B64}" || {
+            echo "FATAL: automatic rollback command failed; old binary backup may need operator restoration." >&2
+            exit 4
+        }
+        exit 3
+    fi
+    HEALTH_JSON=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health | ConvertTo-Json -Compress\"")
+    echo "$HEALTH_JSON"
 
     echo "==> Post-checking protected production processes on ${REMOTE_HOST}..."
     WIN_POST_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Get-Process ${PROTECT_PROCS} -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, SessionId | ConvertTo-Json -Compress\"" 2>/dev/null || true)

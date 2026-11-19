@@ -24,6 +24,7 @@ const device = (id: string, name: string, over: Partial<Device> = {}): Device =>
   caps: [],
   features: [],
   tags: [],
+  group: null,
   ...over,
 });
 
@@ -40,6 +41,7 @@ const snapshot = (devices: Device[]): Snapshot => ({
     peers: { live: devices.filter((d) => d.online).length, trusted: devices.length },
     caps: [],
     features: [],
+    lan_only: false,
   },
   devices,
   pairing: { pin_active: false, pin_expires_in_secs: 0 },

@@ -289,34 +289,52 @@ impl SseStream {
     }
 }
 
-/// Open the `/api/events` SSE stream with explicit deadlines.
-///
-/// Prefer [`loopback_events_connect`], which applies the crate's policy; this
-/// form exists so callers with a different tolerance (and the tests below) can
-/// set their own.
-pub async fn loopback_events_connect_with_deadlines(
+async fn loopback_events_connect_path_with_deadlines(
     port: u16,
+    path: &str,
     handshake_timeout: Duration,
     idle_timeout: Duration,
 ) -> io::Result<SseStream> {
     let fut = async {
         let mut stream = connect(port, CONNECT_TIMEOUT).await?;
-        let req =
-            "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n";
+        let token = api_token_for(port);
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{}Accept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+            auth_line(token.as_deref())
+        );
         stream.write_all(req.as_bytes()).await?;
         stream.flush().await?;
 
         let mut lines = BufReader::new(stream).lines();
         let status_line = lines.next_line().await?.unwrap_or_default();
-        if !status_line.contains("200") {
+        let status = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(0);
+        if !(200..300).contains(&status) {
             return Err(io::Error::other(format!(
                 "SSE HTTP handshake failed: {status_line}"
             )));
         }
+        let mut content_type = None;
         while let Some(header) = lines.next_line().await? {
             if header.trim().is_empty() {
                 break;
             }
+            if let Some((name, value)) = header.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("content-type") {
+                    content_type = Some(value.trim().to_ascii_lowercase());
+                }
+            }
+        }
+        if !content_type
+            .as_deref()
+            .is_some_and(|value| value.starts_with("text/event-stream"))
+        {
+            return Err(io::Error::other(
+                "SSE HTTP handshake requires Content-Type: text/event-stream",
+            ));
         }
         Ok(SseStream {
             lines,
@@ -332,9 +350,59 @@ pub async fn loopback_events_connect_with_deadlines(
     }
 }
 
-/// Connect to a node's loopback UI API and open the `/api/events` SSE stream.
+/// Open the legacy `/api/events` SSE stream with explicit deadlines.
+///
+/// This remains available for event families that predate the v1 envelope.
+pub async fn loopback_legacy_events_connect_with_deadlines(
+    port: u16,
+    handshake_timeout: Duration,
+    idle_timeout: Duration,
+) -> io::Result<SseStream> {
+    loopback_events_connect_path_with_deadlines(
+        port,
+        "/api/events",
+        handshake_timeout,
+        idle_timeout,
+    )
+    .await
+}
+
+/// Open the legacy `/api/events` SSE stream with explicit deadlines.
+///
+/// The default remains legacy because several CLI watchers consume event kinds
+/// that are not represented by the v1 resource envelope. The request is still
+/// authenticated and the handshake is validated by the shared transport.
+pub async fn loopback_events_connect_with_deadlines(
+    port: u16,
+    handshake_timeout: Duration,
+    idle_timeout: Duration,
+) -> io::Result<SseStream> {
+    loopback_legacy_events_connect_with_deadlines(port, handshake_timeout, idle_timeout).await
+}
+
+/// Open the v1 `/api/v1/events` resource stream with explicit deadlines.
+pub async fn loopback_v1_events_connect_with_deadlines(
+    port: u16,
+    handshake_timeout: Duration,
+    idle_timeout: Duration,
+) -> io::Result<SseStream> {
+    loopback_events_connect_path_with_deadlines(
+        port,
+        "/api/v1/events",
+        handshake_timeout,
+        idle_timeout,
+    )
+    .await
+}
+
+/// Connect to a node's authenticated legacy event stream.
 pub async fn loopback_events_connect(port: u16) -> io::Result<SseStream> {
     loopback_events_connect_with_deadlines(port, SSE_HANDSHAKE_TIMEOUT, SSE_IDLE_TIMEOUT).await
+}
+
+/// Connect to a node's authenticated v1 resource event stream.
+pub async fn loopback_v1_events_connect(port: u16) -> io::Result<SseStream> {
+    loopback_v1_events_connect_with_deadlines(port, SSE_HANDSHAKE_TIMEOUT, SSE_IDLE_TIMEOUT).await
 }
 
 #[cfg(test)]
@@ -482,6 +550,75 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn sse_uses_v1_path_and_port_token() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        set_port_api_token(port, Some("port-token".into()));
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut req = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                req.extend_from_slice(&chunk[..n]);
+            }
+            let request = String::from_utf8(req).unwrap();
+            assert!(
+                request.starts_with("GET /api/v1/events HTTP/1.1\r\n"),
+                "{request}"
+            );
+            assert!(
+                request.contains("X-Tetherly-Token: port-token\r\n"),
+                "{request}"
+            );
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {}\n\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut sse = loopback_v1_events_connect_with_deadlines(
+            port,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sse.next_event().await.unwrap().as_deref(), Some("{}"));
+        server.await.unwrap();
+        set_port_api_token(port, None);
+    }
+
+    #[tokio::test]
+    async fn sse_rejects_success_with_wrong_content_type() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let err = match loopback_events_connect_with_deadlines(
+            port,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+        {
+            Ok(_) => panic!("non-SSE content type must fail the handshake"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("text/event-stream"), "{err}");
+        server.await.unwrap();
     }
 
     #[test]

@@ -2,7 +2,7 @@
 """Real-device acceptance check for the Windows -> Mac crossing (§111/§112).
 
 Records a start time, lets the operator perform the gesture for N seconds,
-then pulls both nodes' /api/input/trace and judges:
+then pulls both nodes' /api/v1/input/trace and judges:
 
   * Mac: every `cursor_reveal controller entered` must end visible
     (`visible=..->true`). An invisible pointer on Enter was the v0.2.39
@@ -37,8 +37,9 @@ import urllib.request
 
 MAC_UI = "http://127.0.0.1:45716"
 WIN_HOST = "home-win"
-WIN_TRACE_CMD = "curl.exe -s http://127.0.0.1:45716/api/input/trace"
-WIN_HEALTH_CMD = "curl.exe -s http://127.0.0.1:45716/api/health"
+WIN_TRACE_PATH = "/api/v1/input/trace"
+WIN_HEALTH_PATH = "/api/v1/health"
+WIN_SYSTEM_PATH = "/api/v1/system"
 
 REVEAL_RE = re.compile(r"visible=(true|false)->(true|false)")
 EXTRA_RE = re.compile(r"extra_shows=(\d+)")
@@ -49,14 +50,34 @@ KV_RE = re.compile(r"(\w+)=([\w./-]+)")
 # ---------------------------------------------------------------- collection
 
 
-def fetch_mac(path: str) -> dict:
-    with urllib.request.urlopen(MAC_UI + path, timeout=5) as r:
+def _read_token() -> str:
+    from pathlib import Path
+    import os
+
+    path = Path(os.environ.get("TETHERLY_DATA_DIR", Path.home() / ".local/share/tetherly")) / "api.token"
+    token = path.read_text(encoding="utf-8").strip()
+    if not token:
+        raise RuntimeError(f"API token is empty: {path}")
+    return token
+
+
+def fetch_mac(path: str, token: str | None = None) -> dict:
+    request = urllib.request.Request(MAC_UI + path)
+    if token:
+        request.add_header("X-Tetherly-Token", token)
+    with urllib.request.urlopen(request, timeout=5) as r:
         return json.loads(r.read().decode())
 
 
-def fetch_win(cmd: str) -> dict:
+def fetch_win(path: str) -> dict:
+    command = (
+        "powershell -NoProfile -Command \\\"$ProgressPreference='SilentlyContinue'; "
+        "$token=(Get-Content -Raw 'C:\\Users\\mango\\AppData\\Local\\tetherly\\api.token').Trim(); "
+        "$h=@{'X-Tetherly-Token'=$token}; "
+        f"Invoke-RestMethod -Uri http://127.0.0.1:45716{path} -Headers $h | ConvertTo-Json -Compress\\\""
+    )
     out = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=8", WIN_HOST, cmd],
+        ["ssh", "-o", "ConnectTimeout=8", WIN_HOST, command],
         capture_output=True,
         text=True,
         timeout=30,
@@ -193,9 +214,11 @@ def main() -> int:
             win = load_file(a.win_trace) if a.win_trace else {"entries": []}
             since = a.since or 0
         else:
-            mh = fetch_mac("/api/health")
-            wh = fetch_win(WIN_HEALTH_CMD)
-            print(f"Mac {mh.get('version')} pid {mh.get('pid')} | Windows {wh.get('version')} pid {wh.get('pid')}")
+            token = _read_token()
+            mh = fetch_mac(WIN_HEALTH_PATH)
+            ms = fetch_mac(WIN_SYSTEM_PATH, token)
+            wh = fetch_win(WIN_SYSTEM_PATH)
+            print(f"Mac {mh.get('version')} pid {ms.get('pid')} | Windows {wh.get('version')} pid {wh.get('pid')}")
             since = int(time.time() * 1000)
             print(
                 f"开始：先用 Mac 鼠标进 Windows 控制几秒，再拿 Windows 鼠标接管并划向 Mac（底边），"
@@ -204,8 +227,8 @@ def main() -> int:
             for left in range(a.seconds, 0, -5):
                 print(f"  ...{left}s", flush=True)
                 time.sleep(min(5, left))
-            mac = fetch_mac("/api/input/trace")
-            win = fetch_win(WIN_TRACE_CMD)
+            mac = fetch_mac(WIN_TRACE_PATH, token)
+            win = fetch_win(WIN_TRACE_PATH)
     except Exception as exc:  # collection only; analysis errors should surface
         print(f"COLLECT ERROR: {exc}", file=sys.stderr)
         return 2

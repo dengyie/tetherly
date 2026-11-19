@@ -9,10 +9,27 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tetherly_core::frame::{FileDone, FileOffer, IncrementalSha256};
 use tetherly_core::{CoreError, DeviceId};
-use tetherly_net::filechan::read_header as read_file_header;
+use tetherly_net::filechan::{
+    read_header_with_timeout as read_file_header, FILE_CONNECT_TIMEOUT, FILE_HEADER_TIMEOUT,
+};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
+
+/// Test-only receive window cap (ms) for [`Node::accept_file`]. Stalled-peer
+/// integration tests set this to a few hundred milliseconds so the Failed /
+/// cleanup / `.part`-retention path is exercised deterministically instead of
+/// waiting on the 15 s production `FILE_CHUNK_TIMEOUT` inside filechan. The
+/// default is inert (one year), and the wrapper compiles only into this
+/// crate's test build: production builds keep filechan's internal deadlines
+/// untouched. Tests that flip this must reset it — sibling tests in this
+/// process run concurrently.
+#[cfg(test)]
+static TEST_CHUNK_IDLE_MS: AtomicU64 = AtomicU64::new(TEST_CHUNK_IDLE_INERT_MS);
+
+/// Inert value: no real accept_file run can span a year.
+#[cfg(test)]
+const TEST_CHUNK_IDLE_INERT_MS: u64 = 31_536_000_000;
 
 /// Single target dispatch outcome for multi-peer file offer fan-out.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -220,7 +237,67 @@ pub struct TransferStats {
     pub failed_count: u64,
 }
 
+/// Directory from which privileged file-send routes may read.
+///
+/// The daemon may run as SYSTEM/root while its loopback HTTP clients run as an
+/// ordinary user. Keeping the source under a daemon-owned directory prevents a
+/// token holder from turning the daemon into an arbitrary local-file reader.
+
+/// Resolve and validate a file-send source against the daemon's staging root.
+///
+/// Both the lexical `ParentDir` check and canonical containment check are
+/// intentional: the first keeps the request contract unambiguous, while the
+/// second closes symlink escapes. The returned path is canonical so all later
+/// hashing, streaming, and outbox persistence use the same object.
+pub(super) fn validate_send_source_path(
+    data_dir: &std::path::Path,
+    requested: &std::path::Path,
+) -> Result<std::path::PathBuf, CoreError> {
+    if requested
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(CoreError::UnsafeFileName);
+    }
+
+    let root = crate::store::send_staging_dir(data_dir);
+    let canonical_root = crate::store::ensure_private_dir(&root)
+        .map_err(|_| CoreError::InvalidPayload("send staging directory unavailable".into()))?;
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        root.join(requested)
+    };
+    let canonical = std::fs::canonicalize(&candidate)
+        .map_err(|_| CoreError::InvalidPayload("send source is not readable".into()))?;
+    if !canonical.starts_with(&canonical_root) || canonical == canonical_root {
+        return Err(CoreError::UnsafeFileName);
+    }
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|_| CoreError::InvalidPayload("cannot read send source metadata".into()))?;
+    if !metadata.is_file() {
+        return Err(CoreError::File("send source is not a regular file".into()));
+    }
+    if metadata.len() > tetherly_core::FILE_MAX {
+        return Err(CoreError::FileTooLarge(tetherly_core::FILE_MAX));
+    }
+    Ok(canonical)
+}
+
 impl Node {
+    /// Validate a path supplied to any privileged file-send operation.
+    pub fn validate_send_source_path(
+        &self,
+        requested: &std::path::Path,
+    ) -> Result<std::path::PathBuf, CoreError> {
+        validate_send_source_path(&self.shared.cfg.data_dir, requested)
+    }
+
+    /// Ensure the daemon-owned source directory exists for local staging tools.
+    pub fn send_staging_dir(&self) -> std::path::PathBuf {
+        crate::store::send_staging_dir(&self.shared.cfg.data_dir)
+    }
+
     pub async fn accept_file(
         &self,
         mut stream: TcpStream,
@@ -229,7 +306,8 @@ impl Node {
         // Header is unauthenticated (id/total/start). It only names the
         // transfer; the token (HKDF over the Noise handshake + transfer_id)
         // gates every chunk, so a forged id simply fails to decrypt.
-        let (transfer_id, total, start) = read_file_header(&mut stream).await?;
+        let (transfer_id, total, start) =
+            read_file_header(&mut stream, FILE_HEADER_TIMEOUT).await?;
         let (accepted, source, size, resume_hint, name, expected) = {
             let hubs = self.shared.hubs.lock().expect("hubs");
             let t = hubs
@@ -381,6 +459,20 @@ impl Node {
                 Ok(())
             },
         );
+        // Test-only: bound the receive window so stalled-peer integration tests
+        // drive the real error path below in milliseconds. The value maps to
+        // the same `NetError::Timeout` filechan's per-chunk deadline produces,
+        // so this build shares the production failure handling verbatim.
+        #[cfg(test)]
+        let recv_fut = {
+            let cap = std::time::Duration::from_millis(TEST_CHUNK_IDLE_MS.load(Ordering::Relaxed));
+            async move {
+                match tokio::time::timeout(cap, recv_fut).await {
+                    Ok(inner) => inner,
+                    Err(_elapsed) => Err(tetherly_net::NetError::Timeout),
+                }
+            }
+        };
 
         let res = tokio::select! {
             _ = &mut cancel_rx => {
@@ -434,8 +526,8 @@ impl Node {
         // rename) so the file never appears in the inbox unmarked, and the
         // completion below is not delayed behind it.
         super::shell_reveal::mark_received_file(&part, source.as_str());
-        let path = unique_inbox_path(&dest_dir, &name);
-        std::fs::rename(&part, &path)?;
+        let path = reserve_inbox_target(&part, &dest_dir, &name)?;
+        std::fs::remove_file(&part)?;
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -520,8 +612,23 @@ impl Node {
                 },
             );
         }
-        // Token is derived from the live session handshake hash.
-        self.send_to(&source, decision.accept_frame()?).await?;
+        // Token is derived from the live session handshake hash. If the
+        // control queue is full or the peer disappeared, undo both state
+        // mutations so the offer remains retryable and no phantom active
+        // transfer survives.
+        let frame = decision.accept_frame()?;
+        if let Err(e) = self.send_to(&source, frame).await {
+            {
+                let mut hubs = self.shared.hubs.lock().expect("hubs");
+                let _ = hubs.files.rollback_accept(transfer_id);
+            }
+            self.shared
+                .active_transfers
+                .lock()
+                .expect("transfers")
+                .remove(transfer_id);
+            return Err(e);
+        }
         Ok(FileDecisionReport {
             ok: true,
             accepted: true,
@@ -965,7 +1072,16 @@ impl Node {
             OutboxStatus::InFlight.as_str(),
             now,
         ));
-        self.send_to(peer, offer.to_frame()?).await?;
+        let frame = offer.to_frame()?;
+        if let Err(e) = self.send_to(peer, frame).await {
+            self.shared
+                .pending_out
+                .lock()
+                .expect("pending")
+                .remove(&transfer_id);
+            self.set_transfer_phase(&transfer_id, TransferPhase::Failed, Some(e.to_string()));
+            return Err(e);
+        }
         let _ = _wait_accept;
         Ok(transfer_id)
     }
@@ -979,14 +1095,9 @@ impl Node {
         path: &std::path::Path,
         name: Option<&str>,
     ) -> Result<String, CoreError> {
-        if !path.is_file() {
-            return Err(CoreError::File("not a regular file".into()));
-        }
-        let meta = std::fs::metadata(path)?;
+        let path = self.validate_send_source_path(path)?;
+        let meta = std::fs::metadata(&path)?;
         let size = meta.len();
-        if size > tetherly_core::FILE_MAX {
-            return Err(CoreError::FileTooLarge(tetherly_core::FILE_MAX));
-        }
         let filename = name
             .map(|s| s.to_string())
             .or_else(|| {
@@ -1088,7 +1199,16 @@ impl Node {
             OutboxStatus::InFlight.as_str(),
             now,
         ));
-        self.send_to(peer, offer.to_frame()?).await?;
+        let frame = offer.to_frame()?;
+        if let Err(e) = self.send_to(peer, frame).await {
+            self.shared
+                .pending_out
+                .lock()
+                .expect("pending")
+                .remove(&transfer_id);
+            self.set_transfer_phase(&transfer_id, TransferPhase::Failed, Some(e.to_string()));
+            return Err(e);
+        }
         Ok(transfer_id)
     }
 
@@ -1102,14 +1222,9 @@ impl Node {
         path: &std::path::Path,
         name: Option<&str>,
     ) -> Result<MultiFileSendReport, CoreError> {
-        if !path.is_file() {
-            return Err(CoreError::File("not a regular file".into()));
-        }
-        let meta = std::fs::metadata(path)?;
+        let path = self.validate_send_source_path(path)?;
+        let meta = std::fs::metadata(&path)?;
         let size = meta.len();
-        if size > tetherly_core::FILE_MAX {
-            return Err(CoreError::FileTooLarge(tetherly_core::FILE_MAX));
-        }
         let filename = name
             .map(|s| s.to_string())
             .or_else(|| {
@@ -1267,27 +1382,11 @@ impl Node {
                 Err(e) => {
                     failed_count += 1;
                     let err_str = e.to_string();
-                    self.shared
-                        .pending_out
-                        .lock()
-                        .expect("pending")
-                        .remove(&transfer_id);
-                    if let Ok(mut engine) = self.shared.outbox_engine.lock() {
-                        engine.update_status(
-                            &transfer_id,
-                            OutboxStatus::Failed,
-                            Some(err_str.clone()),
-                            Some(now),
-                            Some(0),
-                        );
-                    }
-                    if let Ok(mut transfers) = self.shared.active_transfers.lock() {
-                        if let Some(t) = transfers.get_mut(&transfer_id) {
-                            t.phase = TransferPhase::Failed;
-                            t.error = Some(err_str.clone());
-                            t.updated_ms = now;
-                        }
-                    }
+                    self.set_transfer_phase(
+                        &transfer_id,
+                        TransferPhase::Failed,
+                        Some(err_str.clone()),
+                    );
                     dispatches.push(PeerFileSendItem {
                         peer: peer_str,
                         peer_alias: alias,
@@ -1481,27 +1580,11 @@ impl Node {
                 Err(e) => {
                     failed_count += 1;
                     let err_str = e.to_string();
-                    self.shared
-                        .pending_out
-                        .lock()
-                        .expect("pending")
-                        .remove(&transfer_id);
-                    if let Ok(mut engine) = self.shared.outbox_engine.lock() {
-                        engine.update_status(
-                            &transfer_id,
-                            OutboxStatus::Failed,
-                            Some(err_str.clone()),
-                            Some(now),
-                            Some(0),
-                        );
-                    }
-                    if let Ok(mut transfers) = self.shared.active_transfers.lock() {
-                        if let Some(t) = transfers.get_mut(&transfer_id) {
-                            t.phase = TransferPhase::Failed;
-                            t.error = Some(err_str.clone());
-                            t.updated_ms = now;
-                        }
-                    }
+                    self.set_transfer_phase(
+                        &transfer_id,
+                        TransferPhase::Failed,
+                        Some(err_str.clone()),
+                    );
                     dispatches.push(PeerFileSendItem {
                         peer: peer_str,
                         peer_alias: alias,
@@ -1593,7 +1676,22 @@ impl Node {
 
         for item in items {
             if let Some(ref path_str) = item.path {
-                let p = std::path::Path::new(path_str);
+                let requested = std::path::Path::new(path_str);
+                let p = match self.validate_send_source_path(requested) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: None,
+                            name: item.name.clone().unwrap_or_else(|| "file.bin".into()),
+                            size: 0,
+                            sha256: None,
+                            status: "failed".to_string(),
+                            error: Some(e.to_string()),
+                        });
+                        failed_files += 1;
+                        continue;
+                    }
+                };
                 let fname = item.name.clone().unwrap_or_else(|| {
                     p.file_name()
                         .and_then(|n| n.to_str())
@@ -1627,7 +1725,7 @@ impl Node {
                     failed_files += 1;
                     continue;
                 }
-                let meta = match std::fs::metadata(p) {
+                let meta = match std::fs::metadata(&p) {
                     Ok(m) => m,
                     Err(e) => {
                         reports.push(BatchTransferItemReport {
@@ -1655,7 +1753,7 @@ impl Node {
                     failed_files += 1;
                     continue;
                 }
-                match self.offer_and_send_file(peer, p, Some(&safe_name)).await {
+                match self.offer_and_send_file(peer, &p, Some(&safe_name)).await {
                     Ok(transfer_id) => {
                         let sha = transfer_id.strip_prefix("tr_").map(|s| s.to_string());
                         reports.push(BatchTransferItemReport {
@@ -1860,8 +1958,13 @@ impl Node {
                                 }
                             }
                             let dest = SocketAddr::new(addr.ip(), file_port);
-                            match TcpStream::connect(dest).await {
-                                Ok(mut stream) => {
+                            match tokio::time::timeout(
+                                FILE_CONNECT_TIMEOUT,
+                                TcpStream::connect(dest),
+                            )
+                            .await
+                            {
+                                Ok(Ok(mut stream)) => {
                                     let node_prog = node.clone_handle();
                                     let tid_prog = tid.clone();
                                     tetherly_net::filechan::send_stream_from_with_progress(
@@ -1882,7 +1985,8 @@ impl Node {
                                     )
                                     .await
                                 }
-                                Err(e) => Err(tetherly_net::NetError::Io(e)),
+                                Ok(Err(e)) => Err(tetherly_net::NetError::Io(e)),
+                                Err(_) => Err(tetherly_net::NetError::Timeout),
                             }
                         }
                         Err(e) => Err(tetherly_net::NetError::Io(e)),
@@ -1937,7 +2041,9 @@ impl Node {
         data: &[u8],
     ) -> Result<(), tetherly_net::NetError> {
         let dest = SocketAddr::new(peer_addr.ip(), file_port);
-        let mut stream = TcpStream::connect(dest).await?;
+        let mut stream = tokio::time::timeout(FILE_CONNECT_TIMEOUT, TcpStream::connect(dest))
+            .await
+            .map_err(|_| tetherly_net::NetError::Timeout)??;
         let res = tetherly_net::filechan::send_chunks_from(
             &mut stream,
             token,
@@ -2006,6 +2112,7 @@ impl Node {
         error: Option<String>,
     ) {
         let now = self.shared.clock.unix_ms();
+        let terminal = phase == TransferPhase::Completed || phase == TransferPhase::Failed;
         let outbox_info = {
             let mut transfers = self.shared.active_transfers.lock().expect("transfers");
             if let Some(t) = transfers.get_mut(transfer_id) {
@@ -2070,6 +2177,19 @@ impl Node {
                 None
             }
         };
+
+        if terminal {
+            self.shared
+                .pending_out
+                .lock()
+                .expect("pending")
+                .remove(transfer_id);
+            self.shared
+                .transfer_cancels
+                .lock()
+                .expect("cancels")
+                .remove(transfer_id);
+        }
 
         if let Some((peer_str, filename, size, speed)) = outbox_info {
             let outbox_status = match phase {
@@ -2316,54 +2436,293 @@ impl Node {
     }
 }
 
-/// First free name for `name` in `dir`: `a.txt`, `a (1).txt`, `a (2).txt` ...
-/// A dotfile or extensionless name gets the counter appended.
-pub(super) fn unique_inbox_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
+/// Reserve a unique inbox target atomically. The reservation is a hard link
+/// to the completed `.part`; unlike `exists()` followed by `rename()`, another
+/// concurrent receiver cannot select the same destination between the check
+/// and the install. The caller removes the source `.part` after this returns.
+pub(super) fn reserve_inbox_target(
+    part: &std::path::Path,
+    dir: &std::path::Path,
+    name: &str,
+) -> std::io::Result<std::path::PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
         _ => (name, None),
     };
-    (1u32..)
-        .map(|n| match ext {
-            Some(ext) => dir.join(format!("{stem} ({n}).{ext}")),
-            None => dir.join(format!("{stem} ({n})")),
-        })
-        .find(|p| !p.exists())
-        .expect("u32 counter exhausted")
+    for n in 0u32.. {
+        let candidate = if n == 0 {
+            dir.join(name)
+        } else {
+            match ext {
+                Some(ext) => dir.join(format!("{stem} ({n}).{ext}")),
+                None => dir.join(format!("{stem} ({n})")),
+            }
+        };
+        match std::fs::hard_link(part, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("u32 counter exhausted")
 }
 
 #[cfg(test)]
 mod inbox_name_tests {
-    use super::unique_inbox_path;
+    use super::reserve_inbox_target;
 
-    /// P2: a received file silently replaced an existing inbox file with the
-    /// same name.
+    /// Two completed partials racing for one name must get distinct targets;
+    /// the reservation itself, rather than a preceding exists-check, decides.
     #[test]
     fn received_file_never_overwrites_an_existing_one() {
         let dir = std::env::temp_dir().join(format!("tetherly-uniq-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(unique_inbox_path(&dir, "a.txt"), dir.join("a.txt"));
-        std::fs::write(dir.join("a.txt"), b"1").unwrap();
-        assert_eq!(unique_inbox_path(&dir, "a.txt"), dir.join("a (1).txt"));
-        std::fs::write(dir.join("a (1).txt"), b"2").unwrap();
-        assert_eq!(unique_inbox_path(&dir, "a.txt"), dir.join("a (2).txt"));
-        std::fs::write(dir.join("Makefile"), b"").unwrap();
-        assert_eq!(
-            unique_inbox_path(&dir, "Makefile"),
-            dir.join("Makefile (1)")
-        );
-        std::fs::write(dir.join("x.tar.gz"), b"").unwrap();
-        assert_eq!(
-            unique_inbox_path(&dir, "x.tar.gz"),
-            dir.join("x.tar (1).gz")
-        );
-        std::fs::write(dir.join(".env"), b"").unwrap();
-        assert_eq!(unique_inbox_path(&dir, ".env"), dir.join(".env (1)"));
+        let part_a = dir.join(".a.part");
+        let part_b = dir.join(".b.part");
+        std::fs::write(&part_a, b"1").unwrap();
+        std::fs::write(&part_b, b"2").unwrap();
+        let first = reserve_inbox_target(&part_a, &dir, "a.txt").unwrap();
+        let second = reserve_inbox_target(&part_b, &dir, "a.txt").unwrap();
+        assert_eq!(first, dir.join("a.txt"));
+        assert_eq!(second, dir.join("a (1).txt"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"1");
+        assert_eq!(std::fs::read(&second).unwrap(), b"2");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod send_path_policy_tests {
+    use super::validate_send_source_path;
+    use crate::store::send_staging_dir;
+    use std::path::Path;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tetherly-send-policy-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn accepts_only_regular_files_inside_send_staging() {
+        let data = temp_dir("inside");
+        let staging = send_staging_dir(&data);
+        std::fs::create_dir_all(&staging).unwrap();
+        let inside = staging.join("payload.txt");
+        std::fs::write(&inside, b"payload").unwrap();
+        let outside = data.join("outside.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+
+        assert_eq!(
+            validate_send_source_path(&data, &inside).unwrap(),
+            inside.canonicalize().unwrap()
+        );
+        assert!(validate_send_source_path(&data, &outside).is_err());
+        assert!(validate_send_source_path(&data, Path::new("../outside.txt")).is_err());
+
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_from_send_staging() {
+        let data = temp_dir("symlink");
+        let staging = send_staging_dir(&data);
+        std::fs::create_dir_all(&staging).unwrap();
+        let outside = data.join("secret.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, staging.join("link.txt")).unwrap();
+
+        assert!(validate_send_source_path(&data, &staging.join("link.txt")).is_err());
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[tokio::test]
+    async fn idle_file_handler_does_not_wait_forever_for_header() {
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("header-timeout-red");
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+        use tokio::io::AsyncWriteExt;
+        client.write_all(b"TFL").await.unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            node.accept_file(server, peer),
+        )
+        .await
+        .expect("file handler must have a bounded header wait");
+        assert!(matches!(result, Err(tetherly_net::NetError::Timeout)));
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// High-level evidence for the inbound stalled-transfer path (remediation
+/// residual): a peer that stops mid-transfer must drive the real failure
+/// handling — Failed phase with an error, transfer_cancels cleanup, and the
+/// `.part`/resume sidecar kept for a later resume — within the chunk idle
+/// window, not hang forever.
+#[cfg(test)]
+mod inbound_stall_tests {
+    use super::*;
+    use tetherly_core::frame::InnerFrame;
+    use tetherly_crypto::{aead_seal, counter_nonce};
+    use tetherly_net::codec::write_len_prefixed;
+    use tetherly_net::filechan::{token_for, FILE_MAGIC_V2};
+
+    /// One full chunk plus a tail: after chunk 1 the receiver must wait for a
+    /// second chunk that never arrives.
+    const STALL_TOTAL: usize = tetherly_core::FILE_CHUNK + 10;
+
+    fn stalled_chunk() -> Vec<u8> {
+        (0..tetherly_core::FILE_CHUNK)
+            .map(|i| (i % 251) as u8)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stalled_inbound_transfer_fails_and_keeps_resume_state() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("inbound-stall");
+        let peer = DeviceId::from_id_pk(&[77u8; 32]);
+        let transfer_id = "tr_stall_1".to_string();
+        let total = STALL_TOTAL as u64;
+        let handshake: [u8; 32] = [7u8; 32];
+
+        // Live peer registration gives `file_token_for` its handshake hash; the
+        // session channel itself stays unused (the peer stalls on the data
+        // channel, not the control channel).
+        let (tx, _rx) = tokio::sync::mpsc::channel::<InnerFrame>(4);
+        let live = LivePeer {
+            device_id: peer.clone(),
+            name: "stall-peer".into(),
+            platform: "test".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            handshake_hash: handshake,
+            file_port: None,
+            input_port: None,
+            screen_port: None,
+            caps: Vec::new(),
+            path: tetherly_core::PathKind::Lan,
+            rtt_ms: None,
+            last_seen_ms: 0,
+        };
+        node.register_session(live, tx).await;
+
+        // An accepted offer whose size matches the wire header the peer sends.
+        let now = node.shared.clock.unix_ms();
+        {
+            let mut hubs = node.shared.hubs.lock().expect("hubs");
+            hubs.files
+                .offer_resumable(
+                    peer.clone(),
+                    FileOffer {
+                        transfer_id: transfer_id.clone(),
+                        files: vec![tetherly_core::FileMeta {
+                            name: "stall.bin".into(),
+                            size: total,
+                            sha256: "a".repeat(64),
+                        }],
+                    },
+                    now,
+                    None,
+                )
+                .unwrap();
+            hubs.files.accept(&transfer_id, now).unwrap();
+        }
+
+        // Real TCP peer: write the TFL2 header plus exactly one full encrypted
+        // chunk, flush, then stall with the connection held open.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, peer_addr) = listener.accept().await.unwrap();
+
+        let token = token_for(&handshake, &transfer_id);
+        let chunk = stalled_chunk();
+        let nonce = counter_nonce(1);
+        let mut aad = transfer_id.as_bytes().to_vec();
+        aad.extend_from_slice(&0u64.to_le_bytes());
+        let ct = aead_seal(&token, &nonce, &aad, &chunk).unwrap();
+        use tokio::io::AsyncWriteExt;
+        client.write_all(&FILE_MAGIC_V2).await.unwrap();
+        write_len_prefixed(&mut client, transfer_id.as_bytes())
+            .await
+            .unwrap();
+        write_len_prefixed(&mut client, &total.to_be_bytes())
+            .await
+            .unwrap();
+        write_len_prefixed(&mut client, &0u64.to_be_bytes())
+            .await
+            .unwrap();
+        write_len_prefixed(&mut client, &ct).await.unwrap();
+        client.flush().await.unwrap();
+
+        // Test-only injection: the stalled read must fail within a window far
+        // below the 15 s production chunk deadline (see TEST_CHUNK_IDLE_MS).
+        TEST_CHUNK_IDLE_MS.store(500, Ordering::Relaxed);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            node.accept_file(server, peer_addr),
+        )
+        .await
+        .expect("stalled transfer must fail within the chunk idle window");
+        TEST_CHUNK_IDLE_MS.store(TEST_CHUNK_IDLE_INERT_MS, Ordering::Relaxed);
+
+        // (1) The receive loop surfaced the chunk idle timeout.
+        let err = result.unwrap_err();
+        assert!(matches!(err, tetherly_net::NetError::Timeout), "{err:?}");
+
+        // (2) The terminal transition cleared the cancel slot for this id.
+        assert!(
+            !node
+                .shared
+                .transfer_cancels
+                .lock()
+                .expect("cancels")
+                .contains_key(&transfer_id),
+            "cancelled transfer slot must be cleaned on the timeout path"
+        );
+
+        // (3) The active transfer is Failed and carries the error.
+        let transfer = node
+            .transfer_by_id(&transfer_id)
+            .expect("failed transfer must be retained for reporting");
+        assert_eq!(transfer.phase, TransferPhase::Failed);
+        assert_eq!(transfer.direction, TransferDirection::Inbound);
+        assert!(
+            transfer.error.is_some(),
+            "failed transfer must carry an error"
+        );
+        assert_eq!(node.transfer_stats().failed_count, 1);
+
+        // (4) The chunk-aligned partial and the resume sidecar are kept for a
+        // later offer to resume from.
+        let part = dir.join("inbox").join(format!(".{transfer_id}.part"));
+        let part_bytes = std::fs::read(&part).expect(".part must be kept for resume");
+        assert_eq!(part_bytes.len(), tetherly_core::FILE_CHUNK);
+        assert_eq!(part_bytes, chunk, "received chunk must be durable in .part");
+        let sidecar = dir
+            .join("inbox")
+            .join(format!(".{transfer_id}.resume.json"));
+        let side = serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&sidecar).expect("resume sidecar must be written alongside the partial"),
+        )
+        .unwrap();
+        assert_eq!(side["offset"], tetherly_core::FILE_CHUNK as u64);
+        assert_eq!(side["total"], total);
+
+        drop(client);
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

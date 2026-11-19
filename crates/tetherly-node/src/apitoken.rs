@@ -53,21 +53,53 @@ const V1_ADMIN_PATHS: &[&str] = &[
     "/api/v1/system/restart",
     "/api/v1/system/shutdown",
     "/api/v1/diagnostics/log-level",
+    // A transfer path is read by the daemon under its own OS identity. Keep
+    // the client token from turning that into a privileged file-read proxy.
+    "/api/v1/transfers",
+    "/api/v1/transfers/multi",
+    "/api/v1/transfers/batch",
+    "/api/v1/screen/snapshot",
+    "/api/v1/screen/whiteboard/export",
 ];
 
 /// Tier a `/api/v1` request needs, or `None` when it is open. Only
 /// `GET /api/v1/health` is open, so a client can tell "daemon down" from
 /// "token wrong". `path` may carry a query string.
 pub fn v1_required_tier(method: &str, path: &str) -> Option<Tier> {
-    let path = path.split_once('?').map_or(path, |(p, _)| p);
+    let (path_only, query) = path
+        .split_once('?')
+        .map_or((path, None), |(p, q)| (p, Some(q)));
+    let output_requested = query.is_some_and(|q| {
+        q.split('&').any(|part| {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            key == "out" && !value.is_empty()
+        })
+    });
     if method == "GET" {
-        return (path != "/api/v1/health").then_some(Tier::Read);
+        if path_only == "/api/v1/health" {
+            return None;
+        }
+        // Exporting to a caller-selected path is a privileged filesystem
+        // side effect, even though the endpoint also has a read-only form.
+        if output_requested
+            && matches!(
+                path_only,
+                "/api/v1/screen/snapshot"
+                    | "/api/v1/screen/recording/snapshot"
+                    | "/api/v1/screen/whiteboard/export"
+            )
+        {
+            return Some(Tier::Admin);
+        }
+        return Some(Tier::Read);
     }
-    Some(if V1_ADMIN_PATHS.contains(&path) {
-        Tier::Admin
-    } else {
-        Tier::Write
-    })
+    Some(
+        if V1_ADMIN_PATHS.contains(&path_only) || path_only == "/api/v1/screen/recording/snapshot" {
+            Tier::Admin
+        } else {
+            Tier::Write
+        },
+    )
 }
 
 /// Tier a presented credential grants. The daemon-minted token grants
@@ -349,8 +381,19 @@ mod tests {
         assert_eq!(t("GET", "/api/v1/health?x=1"), None);
         assert_eq!(t("GET", "/api/v1/system"), Some(Tier::Read));
         assert_eq!(t("GET", "/api/v1/events"), Some(Tier::Read));
-        assert_eq!(t("POST", "/api/v1/transfers"), Some(Tier::Write));
+        assert_eq!(t("POST", "/api/v1/transfers"), Some(Tier::Admin));
+        assert_eq!(t("POST", "/api/v1/transfers/multi"), Some(Tier::Admin));
+        assert_eq!(t("POST", "/api/v1/transfers/batch"), Some(Tier::Admin));
+        assert_eq!(t("POST", "/api/v1/screen/snapshot"), Some(Tier::Admin));
+        assert_eq!(
+            t("POST", "/api/v1/screen/whiteboard/export"),
+            Some(Tier::Admin)
+        );
         assert_eq!(t("PATCH", "/api/v1/settings"), Some(Tier::Write));
+        assert_eq!(
+            t("GET", "/api/v1/screen/snapshot?out=escape.bmp"),
+            Some(Tier::Admin)
+        );
         assert_eq!(t("POST", "/api/v1/health"), Some(Tier::Write));
         assert_eq!(t("POST", "/api/v1/system/restart"), Some(Tier::Admin));
         assert_eq!(
@@ -427,7 +470,7 @@ mod tests {
             v1_required_tier("POST", "/api/v1/system/shutdown"),
             Some(Tier::Admin)
         );
-        assert_eq!(V1_ADMIN_PATHS.len(), 3, "new admin paths extend this pin");
+        assert_eq!(V1_ADMIN_PATHS.len(), 8, "new admin paths extend this pin");
     }
 
     #[test]

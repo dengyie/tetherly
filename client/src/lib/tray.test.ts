@@ -35,6 +35,7 @@ const device = (id: string, name: string, over: Partial<Device> = {}): Device =>
   caps: [],
   features: [],
   tags: [],
+  group: null,
   ...over,
 });
 
@@ -51,6 +52,7 @@ const snapshot = (devices: Device[], input = { seat: "local", channel_open: fals
     peers: { live: devices.filter((d) => d.online).length, trusted: devices.length },
     caps: [],
     features: [],
+    lan_only: false,
   },
   devices,
   pairing: { pin_active: false, pin_expires_in_secs: 0 },
@@ -100,7 +102,10 @@ describe("tray panel compact route", () => {
     t.emit({
       id: 4,
       type: "settings.changed",
-      data: { general: { name: "mac", advertise: false, reconnect: true, loopback_only: true, overlay_enabled: true }, transfer: { auto_accept: false } },
+      data: {
+        general: { name: "mac", advertise: false, reconnect: true, loopback_only: true, overlay_enabled: true, tray_owner: "daemon" },
+        transfer: { auto_accept: false },
+      },
     });
     await waitFor(() => expect(screen.getByTestId("tray-state").textContent).toBe("共享已暂停"));
     expect(screen.getByTestId("tray-toggle").textContent).toBe("恢复共享");
@@ -112,7 +117,12 @@ describe("tray panel compact route", () => {
   it("active transfers show progress; finished ones drop off", async () => {
     const t = mountTray();
     t.emit({ id: 1, type: "snapshot", data: snapshot([]) });
-    const list: Transfers = { active_count: 1, terminal_count: 0, transfers: [transfer({})] };
+    const list: Transfers = {
+      active_count: 1,
+      terminal_count: 0,
+      transfers: [transfer({})],
+      stats: { bytes_sent: 0, bytes_received: 0, completed_count: 0, failed_count: 0 },
+    };
     t.emit({ id: 2, type: "transfers.changed", data: list });
     await waitFor(() => expect(screen.getByText("report.pdf")).toBeTruthy());
     expect(screen.getByText("62%")).toBeTruthy();
@@ -120,7 +130,12 @@ describe("tray panel compact route", () => {
     t.emit({
       id: 3,
       type: "transfers.changed",
-      data: { active_count: 0, terminal_count: 1, transfers: [transfer({ phase: "completed" })] },
+      data: {
+        active_count: 0,
+        terminal_count: 1,
+        transfers: [transfer({ phase: "completed" })],
+        stats: { bytes_sent: 0, bytes_received: 0, completed_count: 0, failed_count: 0 },
+      },
     });
     await waitFor(() => expect(screen.getByText("没有进行中的传输")).toBeTruthy());
   });

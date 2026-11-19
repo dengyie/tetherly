@@ -101,6 +101,7 @@ use tetherly_api::{
     ScreenRecordingStartRequest,
     ScreenRoiPatch,
     ScreenScalePatch,
+    ScreenSnapshotRequest,
     ScreenSquelchPatch,
     // §167: screen domain contract types.
     ScreenStartRequest,
@@ -124,6 +125,7 @@ use tetherly_api::{
     ScreenWatermarkEnableRequest,
     ScreenWatermarkPatch,
     ScreenWhiteboardExportReport,
+    ScreenWhiteboardExportRequest,
     ScreenWhiteboardImportReport,
     ScreenWhiteboardImportRequest,
     ScreenWhiteboardPolicyPatch,
@@ -248,7 +250,7 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/diagnostics/logs" => Some(&["GET"]),
         "/api/v1/link" => Some(&["GET"]),
         "/api/v1/link/heartbeat" => Some(&["GET", "PATCH"]),
-        "/api/v1/transfers" => Some(&["GET", "DELETE"]),
+        "/api/v1/transfers" => Some(&["GET", "POST", "DELETE"]),
         "/api/v1/inbox" => Some(&["GET", "DELETE", "POST"]),
         p if inbox_content_item(p).is_some() => Some(&["GET"]),
         "/api/v1/settings" => Some(&["GET", "PATCH"]),
@@ -379,14 +381,14 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         | "/api/v1/screen/playback/pause"
         | "/api/v1/screen/playback/resume"
         | "/api/v1/screen/playback/stop" => Some(&["POST"]),
-        "/api/v1/screen/snapshot" => Some(&["GET"]),
+        "/api/v1/screen/snapshot" => Some(&["GET", "POST"]),
         "/api/v1/screen/laser" => Some(&["GET", "POST"]),
         "/api/v1/screen/annotation" => Some(&["GET", "POST", "DELETE"]),
         "/api/v1/screen/whiteboard/undo"
         | "/api/v1/screen/whiteboard/redo"
         | "/api/v1/screen/whiteboard/clear"
         | "/api/v1/screen/whiteboard/import" => Some(&["POST"]),
-        "/api/v1/screen/whiteboard/export" => Some(&["GET"]),
+        "/api/v1/screen/whiteboard/export" => Some(&["GET", "POST"]),
         "/api/v1/screen/whiteboard/policy" => Some(&["GET", "PATCH"]),
         "/api/v1/screen/watermark" => Some(&["GET", "PATCH"]),
         "/api/v1/screen/watermark/enable" | "/api/v1/screen/watermark/disable" => Some(&["POST"]),
@@ -549,6 +551,7 @@ pub(super) async fn route(
     body: &[u8],
     node: &Node,
     hub: &Arc<EventHub>,
+    granted: Option<crate::apitoken::Tier>,
 ) -> UiResponse {
     let result = match (method, path) {
         ("GET", "/api/v1/health") => Ok(json(200, &Health::new(env!("CARGO_PKG_VERSION")))),
@@ -571,7 +574,7 @@ pub(super) async fn route(
                 Some(raw) => match raw.parse::<usize>() {
                     Ok(n) => Some(n),
                     Err(_) => {
-                        return error(ErrorCode::BadRequest, format!("invalid limit value: {raw}"))
+                        return error(ErrorCode::BadRequest, format!("invalid limit value: {raw}"));
                     }
                 },
                 None => None,
@@ -652,7 +655,7 @@ pub(super) async fn route(
                         return error(
                             ErrorCode::BadRequest,
                             format!("invalid before value: {raw}"),
-                        )
+                        );
                     }
                 },
                 None => None,
@@ -665,7 +668,7 @@ pub(super) async fn route(
         ("POST", "/api/v1/inbox") => {
             // §162a: name-less open — reveal the inbox directory itself (the
             // named-file variant lives at POST /inbox/{name}/open).
-            open_inbox_dir(node).await
+            open_inbox_dir(node, granted).await
         }
         ("GET", "/api/v1/offers") => {
             // §162b: pending offers resource with the legacy id/peer filters.
@@ -697,7 +700,7 @@ pub(super) async fn route(
                 Some(raw) => match raw.parse::<usize>() {
                     Ok(n) => Some(n),
                     Err(_) => {
-                        return error(ErrorCode::BadRequest, format!("invalid limit value: {raw}"))
+                        return error(ErrorCode::BadRequest, format!("invalid limit value: {raw}"));
                     }
                 },
                 None => None,
@@ -727,7 +730,16 @@ pub(super) async fn route(
         ("POST", p) if outbox_resend_action(p).is_some() => {
             post_outbox_resend(node, &outbox_resend_action(p).unwrap_or_default()).await
         }
-        ("GET", "/api/v1/storage") => Ok(json(200, &crate::apiv1::model::storage(node))),
+        ("GET", "/api/v1/storage") => {
+            let mut rep = crate::apiv1::model::storage(node);
+            if granted < Some(crate::apitoken::Tier::Admin) {
+                // P3: absolute filesystem layout is Admin-only; lower tiers
+                // get stable placeholders instead of the daemon's data dir.
+                rep.data_dir = "<data-dir>".to_string();
+                rep.inbox_dir = "<data-dir>/inbox".to_string();
+            }
+            Ok(json(200, &rep))
+        }
         ("POST", "/api/v1/storage/clean") => {
             // §162b: `orphaned_only` defaults to true (legacy parity); an
             // explicit false also sweeps in-flight partials.
@@ -999,9 +1011,11 @@ pub(super) async fn route(
         ("GET", "/api/v1/screen/recording/replay") => {
             get_screen_recording_replay(node, query).await
         }
-        ("GET", "/api/v1/screen/recording/snapshot")
-        | ("POST", "/api/v1/screen/recording/snapshot") => {
-            screen_recording_snapshot(node, query, body).await
+        ("GET", "/api/v1/screen/recording/snapshot") => {
+            screen_recording_snapshot(node, query, body, false).await
+        }
+        ("POST", "/api/v1/screen/recording/snapshot") => {
+            screen_recording_snapshot(node, query, body, true).await
         }
         ("GET", "/api/v1/screen/playback") => Ok(json(
             200,
@@ -1021,6 +1035,7 @@ pub(super) async fn route(
             Err(e) => Err(core_error(e)),
         },
         ("GET", "/api/v1/screen/snapshot") => get_screen_snapshot(node, query).await,
+        ("POST", "/api/v1/screen/snapshot") => post_screen_snapshot(node, body).await,
         ("GET", "/api/v1/screen/laser") => Ok(json(200, &screen_laser_report_of(node))),
         ("POST", "/api/v1/screen/laser") => post_screen_laser(node, body).await,
         ("GET", "/api/v1/screen/annotation") => Ok(json(
@@ -1051,6 +1066,9 @@ pub(super) async fn route(
         }
         ("GET", "/api/v1/screen/whiteboard/export") => {
             get_screen_whiteboard_export(node, query).await
+        }
+        ("POST", "/api/v1/screen/whiteboard/export") => {
+            post_screen_whiteboard_export(node, body).await
         }
         ("GET", "/api/v1/screen/whiteboard/policy") => Ok(json(
             200,
@@ -1390,7 +1408,7 @@ pub(super) async fn route(
                     // §162b: raw file bytes (legacy inbox download route).
                     ("GET", Some(name)) => get_inbox_content(node, &name),
                     _ => match (m, inbox_open_action(p)) {
-                        ("POST", Some(name)) => open_inbox_file(node, &name, body).await,
+                        ("POST", Some(name)) => open_inbox_file(node, &name, body, granted).await,
                         _ => match (m, inbox_item(p)) {
                             ("DELETE", Some(name)) => delete_inbox_file(node, &name),
                             _ => Ok(match allowed(path) {
@@ -1458,7 +1476,12 @@ fn delete_inbox_file(node: &Node, name: &str) -> Handled {
 /// returns the open report (name + on-disk path) instead of an empty 204 so
 /// the CLI's human/JSON printers keep the legacy detail level; both client
 /// transports tolerate a body where they used to see 204.
-async fn open_inbox_file(node: &Node, name: &str, body: &[u8]) -> Handled {
+async fn open_inbox_file(
+    node: &Node,
+    name: &str,
+    body: &[u8],
+    granted: Option<crate::apitoken::Tier>,
+) -> Handled {
     // Name comes from the path; the body (optional) is parsed for strictness
     // parity with other v1 POSTs but carries nothing today.
     let _req: Option<tetherly_api::InboxOpenRequest> = if body.iter().all(u8::is_ascii_whitespace) {
@@ -1484,11 +1507,12 @@ async fn open_inbox_file(node: &Node, name: &str, body: &[u8]) -> Handled {
             .await
             .map_err(|_| error(ErrorCode::Internal, "open task failed"))?
             .map_err(core_error)?;
+    let shown = redact_inbox_open_path(granted, rep.name.as_deref(), &rep.path);
     Ok(json(
         200,
         &tetherly_api::InboxOpenReport {
             name: rep.name,
-            path: rep.path,
+            path: shown,
         },
     ))
 }
@@ -1496,20 +1520,38 @@ async fn open_inbox_file(node: &Node, name: &str, body: &[u8]) -> Handled {
 /// `POST /inbox` (no name): reveals the inbox directory itself. §162a keeps
 /// the CLI's `inbox open` (name omitted) on the v1 surface; the report's
 /// `name` is null to mirror the directory branch of the legacy report.
-async fn open_inbox_dir(node: &Node) -> Handled {
+async fn open_inbox_dir(node: &Node, granted: Option<crate::apitoken::Tier>) -> Handled {
     let opener = node.opener();
     let node = node.clone_handle();
     let rep = tokio::task::spawn_blocking(move || node.open_inbox_file(None, opener.as_ref()))
         .await
         .map_err(|_| error(ErrorCode::Internal, "open task failed"))?
         .map_err(core_error)?;
+    let shown = redact_inbox_open_path(granted, rep.name.as_deref(), &rep.path);
     Ok(json(
         200,
         &tetherly_api::InboxOpenReport {
             name: rep.name,
-            path: rep.path,
+            path: shown,
         },
     ))
+}
+
+/// P3: the OS opener runs inside the daemon, so a remote caller never needs
+/// the absolute on-disk path. Only the Admin tier (the local operator's CLI)
+/// keeps the real path; lower tiers get an inbox-relative name.
+pub(super) fn redact_inbox_open_path(
+    granted: Option<crate::apitoken::Tier>,
+    name: Option<&str>,
+    path: &str,
+) -> String {
+    if granted >= Some(crate::apitoken::Tier::Admin) {
+        return path.to_string();
+    }
+    match name {
+        Some(name) => format!("inbox/{name}"),
+        None => "inbox".to_string(),
+    }
 }
 
 // ---- §162b: file-domain handlers (offers / send / outbox / storage) ----
@@ -1585,6 +1627,7 @@ fn resolve_send_target(
 
 /// Decode inline `data_base64` (path OR bytes must be present).
 fn decode_send_data(
+    node: &Node,
     path: &Option<String>,
     data_base64: &Option<String>,
 ) -> Result<SendSource, UiResponse> {
@@ -1607,26 +1650,11 @@ fn decode_send_data(
             "either path or data_base64 must be provided",
         ));
     };
-    let p = std::path::PathBuf::from(path_str);
-    if !p.is_file() {
-        return Err(error(
-            ErrorCode::BadRequest,
-            "file not found or not a regular file",
-        ));
-    }
-    let meta = std::fs::metadata(&p).map_err(|e| {
-        error(
-            ErrorCode::BadRequest,
-            format!("cannot read file metadata: {e}"),
-        )
-    })?;
-    if meta.len() > tetherly_core::FILE_MAX {
-        return Err(error(
-            ErrorCode::BadRequest,
-            "file exceeds FILE_MAX (64 GiB)",
-        ));
-    }
-    Ok(SendSource::Path(p))
+    let requested = std::path::Path::new(path_str);
+    let canonical = node
+        .validate_send_source_path(requested)
+        .map_err(core_error)?;
+    Ok(SendSource::Path(canonical))
 }
 
 enum SendSource {
@@ -1639,7 +1667,7 @@ async fn post_file_send(node: &Node, body: &[u8]) -> Handled {
     let req: tetherly_api::FileSendRequest = parse_body(body)?;
     let target = resolve_send_target(node, req.peer.as_deref())?;
     let name = req.name.clone();
-    match decode_send_data(&req.path, &req.data_base64)? {
+    match decode_send_data(node, &req.path, &req.data_base64)? {
         SendSource::Path(p) => {
             let id = node
                 .offer_and_send_file(&target, &p, name.as_deref())
@@ -1702,7 +1730,7 @@ async fn post_file_send_multi(node: &Node, body: &[u8]) -> Handled {
     )
     .map_err(|e| error(ErrorCode::BadRequest, e))?;
     let name = req.name.clone();
-    let rep = match decode_send_data(&req.path, &req.data_base64)? {
+    let rep = match decode_send_data(node, &req.path, &req.data_base64)? {
         SendSource::Path(p) => node
             .offer_and_send_file_multi(&selector, &p, name.as_deref())
             .await
@@ -1788,7 +1816,7 @@ fn patch_auto_accept_policy(node: &Node, body: &[u8]) -> Handled {
                     return Err(error(
                         ErrorCode::BadRequest,
                         format!("invalid device type '{t}': {e}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -1889,7 +1917,7 @@ async fn patch_clip_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Han
                 return Err(error(
                     ErrorCode::BadRequest,
                     format!("invalid clip sync mode '{m}': {e}"),
-                ))
+                ));
             }
         }
     }
@@ -1926,7 +1954,7 @@ async fn patch_clip_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Han
                     return Err(error(
                         ErrorCode::BadRequest,
                         format!("invalid device type '{t}': {e}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -2521,7 +2549,7 @@ async fn post_media_command(node: &Node, query: Option<&str>, body: &[u8]) -> Ha
             return Err(error(
                 ErrorCode::BadRequest,
                 format!("unsupported media command: '{other}'"),
-            ))
+            ));
         }
     };
     let target_player = req.target_player.clone();
@@ -3370,7 +3398,7 @@ async fn patch_focus_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Ha
                 return Err(error(
                     ErrorCode::BadRequest,
                     "invalid quiet_hours_start format (expected HH:MM)",
-                ))
+                ));
             }
         }
     }
@@ -3384,7 +3412,7 @@ async fn patch_focus_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Ha
                 return Err(error(
                     ErrorCode::BadRequest,
                     "invalid quiet_hours_end format (expected HH:MM)",
-                ))
+                ));
             }
         }
     }
@@ -4404,7 +4432,12 @@ async fn get_screen_recording_replay(node: &Node, query: Option<&str>) -> Handle
 
 /// `GET|POST /screen/recording/snapshot` (§167): `path` required; `format=bmp`
 /// streams binary, otherwise JSON.
-async fn screen_recording_snapshot(node: &Node, query: Option<&str>, body: &[u8]) -> Handled {
+async fn screen_recording_snapshot(
+    node: &Node,
+    query: Option<&str>,
+    body: &[u8],
+    allow_output: bool,
+) -> Handled {
     let qmap = query.map(super::parse_query_map).unwrap_or_default();
     let req = parse_body::<ScreenRecordingSnapshotRequest>(body)?;
     let q_str = |k: &str| qmap.get(k).cloned();
@@ -4426,17 +4459,45 @@ async fn screen_recording_snapshot(node: &Node, query: Option<&str>, body: &[u8]
         .pts
         .or_else(|| q_str("pts").and_then(|s| s.parse().ok()));
     let out = req.out.clone().or_else(|| q_str("out"));
+    if out.is_some() && !allow_output {
+        return Err(error(
+            ErrorCode::Forbidden,
+            "recording snapshot output requires POST with an admin token",
+        ));
+    }
+    let mut export_file = if allow_output {
+        create_screen_export(node, out.as_deref())?
+    } else {
+        None
+    };
     let format = req.format.clone().or_else(|| q_str("format"));
     if format.as_deref().map(|f| f.eq_ignore_ascii_case("bmp")) == Some(true) {
-        match node.screen_recording_snapshot_data(&path, frame, pts, out) {
-            Ok((bytes, _)) => Ok(UiResponse::new(200, "image/bmp", bytes)),
-            Err(e) => Err(core_error(e)),
+        let (bytes, mut report) = node
+            .screen_recording_snapshot_data(&path, frame, pts)
+            .map_err(core_error)?;
+        if let Some(file) = export_file.as_mut() {
+            use std::io::Write;
+            file.write_all(&bytes).map_err(|e| {
+                error(
+                    ErrorCode::Internal,
+                    format!("cannot write recording export: {e}"),
+                )
+            })?;
+            report.path = out;
+            report.data_base64 = None;
         }
+        Ok(UiResponse::new(200, "image/bmp", bytes))
     } else {
-        match node.screen_recording_snapshot(&path, frame, pts, out) {
-            Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_snapshot_of(rep))),
-            Err(e) => Err(core_error(e)),
+        if export_file.is_some() {
+            return Err(error(
+                ErrorCode::BadRequest,
+                "recording export output requires format=bmp",
+            ));
         }
+        let rep = node
+            .screen_recording_snapshot(&path, frame, pts)
+            .map_err(core_error)?;
+        Ok(json(200, &crate::apiv1::model::screen_snapshot_of(rep)))
     }
 }
 
@@ -4458,22 +4519,125 @@ async fn post_screen_playback_start(node: &Node, body: &[u8]) -> Handled {
     }
 }
 
-/// `GET /screen/snapshot` (§167): `?format=&out=`; no frame → 503.
+fn create_screen_export(
+    node: &Node,
+    out: Option<&str>,
+) -> Result<Option<std::fs::File>, UiResponse> {
+    let Some(raw) = out.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.contains('/') || raw.contains('\\') {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "export output must be a filename",
+        ));
+    }
+    let path = std::path::Path::new(raw);
+    let mut components = path.components();
+    let is_single_filename = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if path.is_absolute() || !is_single_filename || raw == "." || raw == ".." {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "export output must be a safe filename",
+        ));
+    }
+    let data_dir = std::fs::canonicalize(node.data_dir()).map_err(|e| {
+        error(
+            ErrorCode::Internal,
+            format!("cannot resolve node data directory: {e}"),
+        )
+    })?;
+    let dir = node.data_dir().join("exports");
+    let canonical_dir = crate::store::ensure_private_dir(&dir).map_err(|e| {
+        error(
+            ErrorCode::Forbidden,
+            format!("export directory is not private: {e}"),
+        )
+    })?;
+    if !canonical_dir.starts_with(&data_dir) {
+        return Err(error(
+            ErrorCode::Forbidden,
+            "export directory is outside the node data directory",
+        ));
+    }
+    let destination = canonical_dir.join(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&destination).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            error(ErrorCode::Conflict, "export output already exists")
+        } else {
+            error(
+                ErrorCode::Internal,
+                format!("cannot create export output: {e}"),
+            )
+        }
+    })?;
+    Ok(Some(file))
+}
+
+/// `GET /screen/snapshot` (§167): `?format=` only; no frame → 503.
 async fn get_screen_snapshot(node: &Node, query: Option<&str>) -> Handled {
     let qmap = query.map(super::parse_query_map).unwrap_or_default();
+    if qmap.get("out").is_some_and(|out| !out.trim().is_empty()) {
+        return Err(error(
+            ErrorCode::Forbidden,
+            "screen snapshot output requires a POST export request",
+        ));
+    }
     let format = qmap.get("format").cloned();
-    let out = qmap.get("out").cloned();
     if format.as_deref().map(|f| f.eq_ignore_ascii_case("bmp")) == Some(true) {
-        match node.screen_snapshot_data(Some("bmp".to_string()), out) {
+        match node.screen_snapshot_data(Some("bmp".to_string())) {
             Ok((bytes, _)) => Ok(UiResponse::new(200, "image/bmp", bytes)),
             Err(e) => Err(core_error(e)),
         }
     } else {
-        match node.screen_snapshot(format, out) {
+        match node.screen_snapshot(format) {
             Ok(rep) => Ok(json(200, &crate::apiv1::model::screen_snapshot_of(rep))),
             Err(e) => Err(core_error(e)),
         }
     }
+}
+
+/// `POST /screen/snapshot`: body `{format, out}`. The output path is passed to
+/// the runtime export guard; GET remains side-effect free.
+async fn post_screen_snapshot(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenSnapshotRequest>(body)?;
+    let Some(out) = req.out.filter(|path| !path.trim().is_empty()) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "screen snapshot export requires out",
+        ));
+    };
+    let format = req.format.unwrap_or_else(|| "bmp".to_string());
+    if !matches!(format.to_ascii_lowercase().as_str(), "bmp" | "raw") {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "screen snapshot export format must be bmp or raw",
+        ));
+    }
+    let mut file = create_screen_export(node, Some(&out))?
+        .ok_or_else(|| error(ErrorCode::BadRequest, "screen snapshot export requires out"))?;
+    let (bytes, report) = node
+        .screen_snapshot_data(Some(format))
+        .map_err(core_error)?;
+    use std::io::Write;
+    file.write_all(&bytes).map_err(|e| {
+        error(
+            ErrorCode::Internal,
+            format!("cannot write screen snapshot export: {e}"),
+        )
+    })?;
+    let mut report = crate::apiv1::model::screen_snapshot_of(report);
+    report.path = Some(out);
+    report.data_base64 = None;
+    Ok(json(200, &report))
 }
 
 fn screen_laser_report_of(node: &Node) -> ScreenLaserReport {
@@ -4621,7 +4785,7 @@ async fn post_screen_annotation(node: &Node, body: &[u8]) -> Handled {
             return Err(error(
                 ErrorCode::BadRequest,
                 format!("unsupported annotation kind: {other}"),
-            ))
+            ));
         }
     };
     let item = tetherly_core::AnnotationItem {
@@ -4683,11 +4847,16 @@ async fn post_screen_whiteboard_redo(node: &Node, body: &[u8]) -> Handled {
     }
 }
 
-/// `GET /screen/whiteboard/export` (§167): `?out=` optional write target.
+/// `GET /screen/whiteboard/export` (§167): pure snapshot only.
 async fn get_screen_whiteboard_export(node: &Node, query: Option<&str>) -> Handled {
     let qmap = query.map(super::parse_query_map).unwrap_or_default();
-    let out = qmap.get("out").cloned();
-    match node.screen_whiteboard_export(out.as_deref()) {
+    if qmap.get("out").is_some_and(|out| !out.trim().is_empty()) {
+        return Err(error(
+            ErrorCode::Forbidden,
+            "whiteboard export output requires a POST export request",
+        ));
+    }
+    match node.screen_whiteboard_export() {
         Ok(snapshot) => Ok(json(
             200,
             &ScreenWhiteboardExportReport {
@@ -4697,6 +4866,34 @@ async fn get_screen_whiteboard_export(node: &Node, query: Option<&str>) -> Handl
         )),
         Err(e) => Err(core_error(e)),
     }
+}
+
+/// `POST /screen/whiteboard/export`: body `{out}`. The handler reserves the
+/// destination atomically before serializing into its open file handle.
+async fn post_screen_whiteboard_export(node: &Node, body: &[u8]) -> Handled {
+    let req = parse_body::<ScreenWhiteboardExportRequest>(body)?;
+    let Some(out) = req.out.filter(|path| !path.trim().is_empty()) else {
+        return Err(error(
+            ErrorCode::BadRequest,
+            "whiteboard export requires out",
+        ));
+    };
+    let mut file = create_screen_export(node, Some(&out))?
+        .ok_or_else(|| error(ErrorCode::BadRequest, "whiteboard export requires out"))?;
+    let snapshot = node.screen_whiteboard_export().map_err(core_error)?;
+    let dto = crate::apiv1::model::whiteboard_snapshot_dto_of(snapshot);
+    let bytes = serde_json::to_vec_pretty(&dto)
+        .map_err(|e| error(ErrorCode::Internal, format!("cannot encode export: {e}")))?;
+    use std::io::Write;
+    file.write_all(&bytes)
+        .map_err(|e| error(ErrorCode::Internal, format!("cannot write export: {e}")))?;
+    Ok(json(
+        200,
+        &ScreenWhiteboardExportReport {
+            export: dto,
+            report: screen_annotations_now(node),
+        },
+    ))
 }
 
 /// `POST /screen/whiteboard/import` (§167): body `{snapshot|items|file, replace}`.
@@ -5880,11 +6077,13 @@ async fn patch_handoff_policy(node: &Node, query: Option<&str>, body: &[u8]) -> 
 /// `GET /inbox/{name}/content`: the raw file bytes with the sniffed mime
 /// type (§162b, legacy `/api/file/inbox/download` route shape).
 fn get_inbox_content(node: &Node, name: &str) -> Handled {
-    match node.read_inbox_file(name) {
-        Ok((clean_name, mime, bytes)) => Ok(UiResponse::new(200, mime, bytes).with_header(
-            "Content-Disposition",
-            format!("attachment; filename=\"{clean_name}\""),
-        )),
+    match node.open_inbox_download(name) {
+        Ok(download) => Ok(
+            UiResponse::from_file(200, download.mime, download.file, download.size).with_header(
+                "Content-Disposition",
+                format!("attachment; filename=\"{}\"", download.name),
+            ),
+        ),
         Err(e) => Err(core_error(e)),
     }
 }
@@ -6339,7 +6538,7 @@ fn patch_topology_policy(node: &Node, body: &[u8]) -> Handled {
                     return Err(error(
                         ErrorCode::BadRequest,
                         format!("invalid device type '{t}': {e}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -6420,7 +6619,7 @@ async fn post_notify_send(node: &Node, body: &[u8]) -> Handled {
                 return Err(error(
                     ErrorCode::BadRequest,
                     "multiple peers connected; pass peer (tdev_…)",
-                ))
+                ));
             }
         },
     };
@@ -7187,6 +7386,26 @@ async fn write_sse_timeout(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P3: open-path redaction is tier-gated — only Admin keeps the absolute
+    /// path, lower tiers see an inbox-relative name.
+    #[test]
+    fn inbox_open_path_is_redacted_below_admin() {
+        use crate::apitoken::Tier;
+        assert_eq!(
+            redact_inbox_open_path(Some(Tier::Admin), Some("a.txt"), "/real/inbox/a.txt"),
+            "/real/inbox/a.txt"
+        );
+        assert_eq!(
+            redact_inbox_open_path(Some(Tier::Write), Some("a.txt"), "/real/inbox/a.txt"),
+            "inbox/a.txt"
+        );
+        assert_eq!(
+            redact_inbox_open_path(Some(Tier::Read), None, "/real/inbox"),
+            "inbox"
+        );
+        assert_eq!(redact_inbox_open_path(None, None, "/real/inbox"), "inbox");
+    }
 
     /// §157: every CoreError a v1 route can surface maps onto the class its
     /// legacy route used — client faults never come back as 500.

@@ -112,7 +112,19 @@ impl Node {
                 == 1,
             "screen_start window must open odd"
         );
-        self.send_screen_control(ControlMsg::Start).await?;
+        let result = self.send_screen_control(ControlMsg::Start).await;
+        if let Err(err) = result {
+            // Every exit closes the refusal window. A failed enqueue must not
+            // leave an odd ticket that allows a stale Stop to poison a later
+            // start attempt.
+            self.shared
+                .screen_start_ticket
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.shared
+                .screen_start_refused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(err);
+        }
         // Give the host's reply a beat to round-trip before the caller reads
         // the latch (poll, not sleep-guess: exit early on refusal).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
@@ -139,6 +151,9 @@ impl Node {
         self.shared
             .screen_start_ticket
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.shared
+            .screen_start_refused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let peer = self
             .shared
             .screen_peer
@@ -216,13 +231,33 @@ impl Node {
 
     /// Visitor: ask the host to stop sending.
     pub async fn screen_stop(&self) -> Result<(), CoreError> {
-        self.send_screen_control(ControlMsg::Stop).await?;
+        // Stop is a local safety boundary: even when the wire send fails,
+        // privacy must fail closed and the next start must not inherit its
+        // refusal latch or an odd ticket window.
+        let send_result = self.send_screen_control(ControlMsg::Stop).await;
+        let now_us = self.shared.clock.unix_us();
         self.shared
             .screen_privacy_enabled
             .store(false, Ordering::Relaxed);
         self.shared
             .screen_privacy_lock_input
             .store(false, Ordering::Relaxed);
+        self.shared
+            .screen_privacy_last_change_us
+            .store(now_us, Ordering::Relaxed);
+        self.shared
+            .screen_start_refused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let ticket = self
+            .shared
+            .screen_start_ticket
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if ticket % 2 == 1 {
+            self.shared
+                .screen_start_ticket
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        send_result?;
         let peer = self
             .shared
             .screen_peer

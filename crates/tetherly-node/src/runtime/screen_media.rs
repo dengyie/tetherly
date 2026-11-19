@@ -436,7 +436,6 @@ impl Node {
     pub fn screen_snapshot_data(
         &self,
         format: Option<String>,
-        out: Option<String>,
     ) -> Result<(Vec<u8>, ScreenSnapshotReport), CoreError> {
         let fmt = format
             .map(|f| f.trim().to_ascii_lowercase())
@@ -544,25 +543,7 @@ impl Node {
             (bmp, "bmp".to_string())
         };
 
-        // 4. Save to disk if out path is specified
-        let mut saved_path = None;
-        if let Some(out_p) = out.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
-            let out_path = std::path::PathBuf::from(&out_p);
-            if out_path.file_name().is_none()
-                || out_path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return Err(CoreError::UnsafeFileName);
-            }
-            if let Some(parent) = out_path.parent() {
-                if !parent.as_os_str().is_empty() && !parent.exists() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-            }
-            std::fs::write(&out_path, &bytes)?;
-            saved_path = Some(out_path.display().to_string());
-        }
+        let saved_path = None;
 
         self.shared
             .screen_snapshot_count
@@ -602,9 +583,8 @@ impl Node {
     pub fn screen_snapshot(
         &self,
         format: Option<String>,
-        out: Option<String>,
     ) -> Result<ScreenSnapshotReport, CoreError> {
-        self.screen_snapshot_data(format, out).map(|(_, rep)| rep)
+        self.screen_snapshot_data(format).map(|(_, rep)| rep)
     }
 
     /// Extract a single frame from a recording container (.trec) and export as BMP (v2.17 / ADR-103).
@@ -613,7 +593,6 @@ impl Node {
         path: &str,
         frame_seq: Option<u64>,
         pts_us: Option<u64>,
-        out: Option<String>,
     ) -> Result<(Vec<u8>, ScreenSnapshotReport), CoreError> {
         let trimmed_path = path.trim();
         if trimmed_path.is_empty() {
@@ -642,24 +621,7 @@ impl Node {
 
         let bmp_bytes = frame.to_bmp()?;
 
-        let mut saved_path = None;
-        if let Some(out_p) = out.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
-            let out_path = std::path::PathBuf::from(&out_p);
-            if out_path.file_name().is_none()
-                || out_path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return Err(CoreError::UnsafeFileName);
-            }
-            if let Some(parent) = out_path.parent() {
-                if !parent.as_os_str().is_empty() && !parent.exists() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-            }
-            std::fs::write(&out_path, &bmp_bytes)?;
-            saved_path = Some(out_path.display().to_string());
-        }
+        let saved_path = None;
 
         self.shared
             .screen_snapshot_count
@@ -697,9 +659,8 @@ impl Node {
         path: &str,
         frame_seq: Option<u64>,
         pts_us: Option<u64>,
-        out: Option<String>,
     ) -> Result<ScreenSnapshotReport, CoreError> {
-        self.screen_recording_snapshot_data(path, frame_seq, pts_us, out)
+        self.screen_recording_snapshot_data(path, frame_seq, pts_us)
             .map(|(_, rep)| rep)
     }
 
@@ -932,29 +893,13 @@ impl Node {
     }
 
     /// Export whiteboard vector snapshot (v2.20 / ADR-106).
-    pub fn screen_whiteboard_export(
-        &self,
-        out: Option<&str>,
-    ) -> Result<tetherly_core::WhiteboardSnapshot, CoreError> {
+    pub fn screen_whiteboard_export(&self) -> Result<tetherly_core::WhiteboardSnapshot, CoreError> {
         let now_ms = self.shared.clock.unix_ms();
         let session_id = self.shared.identity.device_id().to_string();
         let snapshot = {
             let wb = self.shared.screen_whiteboard.read().expect("lock");
             wb.export_snapshot(session_id, now_ms)
         };
-        if let Some(path_str) = out {
-            let path = std::path::Path::new(path_str);
-            if path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return Err(CoreError::InvalidConfig("path traversal rejected".into()));
-            }
-            let json_bytes = serde_json::to_vec_pretty(&snapshot)
-                .map_err(|e| CoreError::InvalidConfig(e.to_string()))?;
-            std::fs::write(path, json_bytes)
-                .map_err(|e| CoreError::InvalidConfig(e.to_string()))?;
-        }
         Ok(snapshot)
     }
 

@@ -4,6 +4,7 @@
 use super::*;
 use crate::events::UiEvent;
 use crate::store::{save_clipboard_policy, ClipboardPolicy};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,6 +75,177 @@ pub struct ClipClearReport {
     pub clipboard_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+const CLIPBOARD_MAX_ATTEMPTS: u8 = 3;
+const CLIPBOARD_RETRY_DELAYS_MS: [u64; 2] = [800, 2_400];
+const CLIPBOARD_MAX_AGE_MS: u64 = 8_000;
+
+#[derive(Debug, Clone)]
+struct ClipboardDeliveryPeer {
+    attempts: u8,
+    next_retry_ms: u64,
+    delivered: bool,
+    terminal: bool,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ClipboardDelivery {
+    set: ClipSet,
+    frame: tetherly_core::frame::InnerFrame,
+    bytes: usize,
+    created_ms: u64,
+    automatic: bool,
+    peers: HashMap<DeviceId, ClipboardDeliveryPeer>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ClipboardDeliveryState {
+    pending: Option<ClipboardDelivery>,
+    /// A terminal failure suppresses repeated polling of an unchanged local
+    /// clipboard without pretending that the frame was delivered.
+    terminal_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardDeliveryStateKind {
+    Delivered,
+    Retrying,
+    Failed,
+}
+
+impl ClipboardDeliveryState {
+    fn begin(
+        &mut self,
+        set: ClipSet,
+        frame: tetherly_core::frame::InnerFrame,
+        bytes: usize,
+        targets: Vec<DeviceId>,
+        now_ms: u64,
+        automatic: bool,
+    ) {
+        self.terminal_hash = None;
+        self.pending = Some(ClipboardDelivery {
+            set,
+            frame,
+            bytes,
+            created_ms: now_ms,
+            automatic,
+            peers: targets
+                .into_iter()
+                .map(|peer| {
+                    (
+                        peer,
+                        ClipboardDeliveryPeer {
+                            attempts: 0,
+                            next_retry_ms: now_ms,
+                            delivered: false,
+                            terminal: false,
+                            last_error: None,
+                        },
+                    )
+                })
+                .collect(),
+        });
+    }
+
+    fn due(
+        &mut self,
+        now_ms: u64,
+    ) -> Option<(
+        ClipSet,
+        tetherly_core::frame::InnerFrame,
+        Vec<(DeviceId, u8)>,
+    )> {
+        let pending = self.pending.as_mut()?;
+        if now_ms.saturating_sub(pending.created_ms) > CLIPBOARD_MAX_AGE_MS {
+            for state in pending.peers.values_mut() {
+                if !state.delivered {
+                    state.terminal = true;
+                }
+            }
+        }
+        let frame = pending.frame.clone();
+        let set = pending.set.clone();
+        let peers = pending
+            .peers
+            .iter_mut()
+            .filter_map(|(peer, state)| {
+                if state.delivered || state.terminal || state.next_retry_ms > now_ms {
+                    return None;
+                }
+                state.attempts = state.attempts.saturating_add(1);
+                Some((peer.clone(), state.attempts))
+            })
+            .collect();
+        Some((set, frame, peers))
+    }
+
+    fn result(
+        &mut self,
+        peer: &DeviceId,
+        success: bool,
+        error: Option<String>,
+        now_ms: u64,
+    ) -> Option<(ClipboardDeliveryStateKind, u8, Option<u64>, Option<String>)> {
+        let pending = self.pending.as_mut()?;
+        let state = pending.peers.get_mut(peer)?;
+        if success {
+            state.delivered = true;
+            state.last_error = None;
+            return Some((
+                ClipboardDeliveryStateKind::Delivered,
+                state.attempts,
+                None,
+                None,
+            ));
+        }
+        state.last_error = error.clone();
+        if state.attempts >= CLIPBOARD_MAX_ATTEMPTS
+            || now_ms.saturating_sub(pending.created_ms) >= CLIPBOARD_MAX_AGE_MS
+        {
+            state.terminal = true;
+            Some((
+                ClipboardDeliveryStateKind::Failed,
+                state.attempts,
+                None,
+                error,
+            ))
+        } else {
+            let delay = CLIPBOARD_RETRY_DELAYS_MS
+                .get(state.attempts.saturating_sub(1) as usize)
+                .copied()
+                .unwrap_or(*CLIPBOARD_RETRY_DELAYS_MS.last().unwrap());
+            state.next_retry_ms = now_ms.saturating_add(delay);
+            Some((
+                ClipboardDeliveryStateKind::Retrying,
+                state.attempts,
+                Some(state.next_retry_ms),
+                error,
+            ))
+        }
+    }
+
+    fn finished(&self) -> Option<bool> {
+        let pending = self.pending.as_ref()?;
+        if pending.peers.values().all(|p| p.delivered) {
+            return Some(true);
+        }
+        if pending.peers.values().all(|p| p.delivered || p.terminal) {
+            return Some(false);
+        }
+        None
+    }
+
+    fn take_finished(&mut self) -> Option<ClipboardDelivery> {
+        self.pending.take()
+    }
+
+    fn reset(&mut self) {
+        self.pending = None;
+        self.terminal_hash = None;
+    }
 }
 
 impl Node {
@@ -319,41 +491,213 @@ impl Node {
         })
     }
 
+    fn emit_clipboard_delivery(
+        &self,
+        set: &ClipSet,
+        peer: &DeviceId,
+        status: ClipboardDeliveryStateKind,
+        attempt: u8,
+        retry_at_ms: Option<u64>,
+        error: Option<String>,
+        timestamp_ms: u64,
+    ) {
+        self.emit(UiEvent::ClipboardDelivery {
+            seq: set.clip_seq,
+            peer: peer.to_string(),
+            hash: set.hash.clone(),
+            status: match status {
+                ClipboardDeliveryStateKind::Delivered => "delivered",
+                ClipboardDeliveryStateKind::Retrying => "retrying",
+                ClipboardDeliveryStateKind::Failed => "failed",
+            }
+            .to_string(),
+            attempt,
+            retry_at_ms,
+            error,
+            timestamp_ms,
+        });
+    }
+
+    /// Send due clipboard entries and commit the hub only after every target
+    /// has accepted the frame. A failed peer is retried at most three times and
+    /// for at most eight seconds; only the latest frame is retained.
+    async fn drive_clipboard_delivery(&self, now_ms: u64) -> Result<usize, CoreError> {
+        let Some((set, frame, peers)) = self
+            .shared
+            .clipboard_delivery
+            .lock()
+            .expect("clipboard_delivery")
+            .due(now_ms)
+        else {
+            return Ok(0);
+        };
+        let mut delivered_now = 0;
+        for (peer, _attempt) in peers {
+            let result = self.send_to(&peer, frame.clone()).await;
+            let (success, error) = match result {
+                Ok(()) => (true, None),
+                Err(e) => (false, Some(e.to_string())),
+            };
+            if success {
+                delivered_now += 1;
+            }
+            let outcome = self
+                .shared
+                .clipboard_delivery
+                .lock()
+                .expect("clipboard_delivery")
+                .result(&peer, success, error, now_ms);
+            if let Some((status, attempt, retry_at_ms, error)) = outcome {
+                self.emit_clipboard_delivery(
+                    &set,
+                    &peer,
+                    status,
+                    attempt,
+                    retry_at_ms,
+                    error,
+                    now_ms,
+                );
+            }
+        }
+
+        let finished = self
+            .shared
+            .clipboard_delivery
+            .lock()
+            .expect("clipboard_delivery")
+            .finished();
+        if let Some(all_delivered) = finished {
+            let delivery = self
+                .shared
+                .clipboard_delivery
+                .lock()
+                .expect("clipboard_delivery")
+                .take_finished()
+                .expect("finished clipboard delivery");
+            if all_delivered {
+                let now = self.shared.clock.unix_ms();
+                let hash = delivery.set.hash.clone();
+                let seq = delivery.set.clip_seq;
+                {
+                    let mut hubs = self.shared.hubs.lock().expect("hubs");
+                    hubs.clip.commit_local(&delivery.set);
+                    hubs.clip.record_entry(ClipMetaEntry {
+                        seq,
+                        source: None,
+                        direction: ClipDirection::Outbound,
+                        bytes: delivery.bytes,
+                        hash: hash.clone(),
+                        timestamp_ms: now,
+                    });
+                }
+                *self
+                    .shared
+                    .last_auto_sync_hash
+                    .lock()
+                    .expect("last_auto_sync_hash") = Some(hash.clone());
+                if delivery.automatic {
+                    self.shared
+                        .clip_auto_synced_out_count
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                self.emit(UiEvent::ClipboardSynced {
+                    seq,
+                    source: "local".to_string(),
+                    direction: "outbound".to_string(),
+                    bytes: delivery.bytes,
+                    hash,
+                    timestamp_ms: now,
+                    sent_peers: delivery.peers.len(),
+                });
+                if delivery.automatic {
+                    if let Some(text) = delivery.set.text {
+                        if let Some(secs) = self.clipboard_policy().auto_clear_timeout_secs {
+                            if secs > 0 {
+                                let clip = self.shared.clip.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                                    if let Ok(Some(cur)) = clip.get_text() {
+                                        if cur == text {
+                                            let _ = clip.set_text("");
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            } else {
+                self.shared
+                    .clipboard_delivery
+                    .lock()
+                    .expect("clipboard_delivery")
+                    .terminal_hash = Some(delivery.set.hash);
+            }
+        }
+        Ok(delivered_now)
+    }
+
+    async fn begin_clipboard_delivery(
+        &self,
+        set: ClipSet,
+        targets: Vec<DeviceId>,
+        now_ms: u64,
+        automatic: bool,
+    ) -> Result<usize, CoreError> {
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        let frame = set.to_frame()?;
+        let bytes = set.text.as_ref().map_or(0, |text| text.len());
+        self.shared
+            .clipboard_delivery
+            .lock()
+            .expect("clipboard_delivery")
+            .begin(set, frame, bytes, targets, now_ms, automatic);
+        self.drive_clipboard_delivery(now_ms).await
+    }
+
     /// Polls system clipboard for automatic outbound synchronization.
-    /// Checks mode, changes, size constraints, sensitive content guard, and profile scoping.
-    /// Returns the number of eligible peers to which the clipboard text was broadcast.
+    /// Hash/sequence state is committed only after all eligible peers accept the
+    /// frame; failed peers retain a bounded retry entry.
     pub async fn poll_clipboard_auto_sync(&self) -> Result<usize, CoreError> {
         let policy = self.clipboard_policy();
         if !policy.mode.can_send() {
             return Ok(0);
         }
+        let _send_guard = self.shared.clipboard_send_lock.lock().await;
+        let now = self.shared.clock.unix_ms();
+        let mut delivered = self.drive_clipboard_delivery(now).await?;
 
-        // Skip the full read + SHA-256 while the OS change counter has not
-        // moved: every 800 ms on both ends otherwise, for an unchanged
-        // clipboard. The token is taken before the read so a change racing
-        // the read is picked up next round.
         let token = self.shared.clip.change_token();
         {
             let mut last = self.shared.last_clip_token.lock().expect("last_clip_token");
             if !clip_read_needed(*last, token) {
-                return Ok(0);
+                return Ok(delivered);
             }
             *last = token;
         }
-
         let text = match self.shared.clip.get_text() {
             Ok(Some(t)) if !t.is_empty() => t,
-            Ok(_) => return Ok(0),
+            Ok(_) => return Ok(delivered),
             Err(e) => {
-                // Unread generation: retry it next round.
                 *self.shared.last_clip_token.lock().expect("last_clip_token") = None;
                 return Err(e);
             }
         };
-
         let hash = tetherly_core::hex_sha256(text.as_bytes());
-
-        // Check against last synced hash
+        {
+            let state = self
+                .shared
+                .clipboard_delivery
+                .lock()
+                .expect("clipboard_delivery");
+            if state.pending.as_ref().is_some_and(|p| p.set.hash == hash)
+                || state.terminal_hash.as_deref() == Some(hash.as_str())
+            {
+                return Ok(delivered);
+            }
+        }
         {
             let last = self
                 .shared
@@ -361,11 +705,9 @@ impl Node {
                 .lock()
                 .expect("last_auto_sync_hash");
             if last.as_deref() == Some(&hash) {
-                return Ok(0);
+                return Ok(delivered);
             }
         }
-
-        // Also check if hub already knows this hash as the latest
         {
             let hubs = self.shared.hubs.lock().expect("hubs");
             if hubs.clip.last_hash() == Some(&hash) {
@@ -373,14 +715,10 @@ impl Node {
                     .shared
                     .last_auto_sync_hash
                     .lock()
-                    .expect("last_auto_sync_hash") = Some(hash.clone());
-                return Ok(0);
+                    .expect("last_auto_sync_hash") = Some(hash);
+                return Ok(delivered);
             }
         }
-
-        let now = self.shared.clock.unix_ms();
-
-        // 1. Max payload ceiling guard
         if text.len() > policy.max_payload_bytes {
             *self
                 .shared
@@ -408,10 +746,8 @@ impl Node {
                 ),
                 false,
             );
-            return Ok(0);
+            return Ok(delivered);
         }
-
-        // 2. Sensitive content leak guard
         if policy.sensitive_guard {
             if let Some(reason) = SensitiveContentGuard::inspect(&text) {
                 *self
@@ -442,93 +778,32 @@ impl Node {
                     ),
                     false,
                 );
-                return Ok(0);
+                return Ok(delivered);
             }
         }
-
-        // 3. Resolve eligible peers based on profile rules
-        let live_peers = self.live_peers();
-        let eligible_peers: Vec<DeviceId> = live_peers
+        let eligible_peers: Vec<DeviceId> = self
+            .live_peers()
             .into_iter()
             .map(|p| p.device_id)
             .filter(|peer_id| {
-                let profile = self.peer_profile(peer_id);
-                policy.is_peer_eligible(&profile)
+                self.clipboard_policy()
+                    .is_peer_eligible(&self.peer_profile(peer_id))
             })
             .collect();
-
-        // Mark current hash as observed so we don't re-process
-        *self
-            .shared
-            .last_auto_sync_hash
-            .lock()
-            .expect("last_auto_sync_hash") = Some(hash.clone());
-
         if eligible_peers.is_empty() {
-            return Ok(0);
+            return Ok(delivered);
         }
-
-        // Prepare frame
         let set = {
-            let mut hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.clip.prepare_local(&text)?
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.preview_local(&text)?
         };
         let Some(set) = set else {
-            return Ok(0);
+            return Ok(delivered);
         };
-
-        let seq = set.clip_seq;
-        let bytes = text.len();
-        let frame = set.to_frame()?;
-        let count = eligible_peers.len();
-
-        for peer in &eligible_peers {
-            let _ = self.send_to(peer, frame.clone()).await;
-        }
-
-        {
-            let mut hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.clip.record_entry(ClipMetaEntry {
-                seq,
-                source: None,
-                direction: ClipDirection::Outbound,
-                bytes,
-                hash: hash.clone(),
-                timestamp_ms: now,
-            });
-        }
-
-        self.shared
-            .clip_auto_synced_out_count
-            .fetch_add(1, Ordering::Relaxed);
-
-        self.emit(UiEvent::ClipboardSynced {
-            seq,
-            source: "local".to_string(),
-            direction: "outbound".to_string(),
-            bytes,
-            hash,
-            timestamp_ms: now,
-            sent_peers: count,
-        });
-
-        // Auto clear local clipboard if requested by policy
-        if let Some(secs) = policy.auto_clear_timeout_secs {
-            if secs > 0 {
-                let clip = self.shared.clip.clone();
-                let expected_text = text.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(secs)).await;
-                    if let Ok(Some(cur)) = clip.get_text() {
-                        if cur == expected_text {
-                            let _ = clip.set_text("");
-                        }
-                    }
-                });
-            }
-        }
-
-        Ok(count)
+        delivered += self
+            .begin_clipboard_delivery(set, eligible_peers, now, true)
+            .await?;
+        Ok(delivered)
     }
 
     pub(super) fn spawn_clipboard_auto_sync(&self) {
@@ -554,7 +829,8 @@ impl Node {
     }
 
     /// Syncs local clipboard to a specific peer or all connected peers.
-    /// Returns the number of peers that were sent the frame (0 if unchanged/echo or no peers).
+    /// Returns the number accepted into peer queues immediately. Failed peers
+    /// stay in the bounded retry state and are never counted as delivered.
     pub async fn send_clipboard_to(
         &self,
         target_peer: Option<&DeviceId>,
@@ -564,52 +840,17 @@ impl Node {
             .clip
             .get_text()?
             .ok_or_else(|| CoreError::Json("empty clipboard".into()))?;
-        if text.len() > tetherly_core::CLIP_TEXT_MAX {
-            return Err(CoreError::ClipboardTooLarge);
-        }
-        let now = self.shared.clock.unix_ms();
-        let bytes = text.len();
+        let targets = self.resolve_clip_targets(target_peer)?;
+        let _send_guard = self.shared.clipboard_send_lock.lock().await;
         let set = {
-            let mut hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.clip.prepare_local(&text)?
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.preview_local(&text)?
         };
         let Some(set) = set else {
             return Ok(0);
         };
-        let seq = set.clip_seq;
-        let hash = set.hash.clone();
-        let frame = set.to_frame()?;
-        let targets = self.resolve_clip_targets(target_peer)?;
-        let count = targets.len();
-        for p in &targets {
-            let _ = self.send_to(p, frame.clone()).await;
-        }
-        {
-            let mut hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.clip.record_entry(ClipMetaEntry {
-                seq,
-                source: None,
-                direction: ClipDirection::Outbound,
-                bytes,
-                hash: hash.clone(),
-                timestamp_ms: now,
-            });
-        }
-        *self
-            .shared
-            .last_auto_sync_hash
-            .lock()
-            .expect("last_auto_sync_hash") = Some(hash.clone());
-        self.emit(UiEvent::ClipboardSynced {
-            seq,
-            source: "local".to_string(),
-            direction: "outbound".to_string(),
-            bytes,
-            hash,
-            timestamp_ms: now,
-            sent_peers: count,
-        });
-        Ok(count)
+        self.begin_clipboard_delivery(set, targets, self.shared.clock.unix_ms(), false)
+            .await
     }
 
     /// Syncs local clipboard to all connected peers.
@@ -618,7 +859,8 @@ impl Node {
     }
 
     /// Explicitly broadcasts `text` to a specific peer or all connected peers.
-    /// Writes `text` to the local clipboard and advances sequence even if previously sent.
+    /// Writes `text` locally, then uses the same bounded per-peer delivery path
+    /// as automatic synchronization.
     pub async fn send_clipboard_text(
         &self,
         text: &str,
@@ -628,46 +870,14 @@ impl Node {
             return Err(CoreError::ClipboardTooLarge);
         }
         self.shared.clip.set_text(text)?;
-        let now = self.shared.clock.unix_ms();
-        let bytes = text.len();
-        let set = {
-            let mut hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.clip.force_prepare_local(text)?
-        };
-        let seq = set.clip_seq;
-        let hash = set.hash.clone();
-        let frame = set.to_frame()?;
         let targets = self.resolve_clip_targets(target_peer)?;
-        let count = targets.len();
-        for p in &targets {
-            let _ = self.send_to(p, frame.clone()).await;
-        }
-        {
-            let mut hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.clip.record_entry(ClipMetaEntry {
-                seq,
-                source: None,
-                direction: ClipDirection::Outbound,
-                bytes,
-                hash: hash.clone(),
-                timestamp_ms: now,
-            });
-        }
-        *self
-            .shared
-            .last_auto_sync_hash
-            .lock()
-            .expect("last_auto_sync_hash") = Some(hash.clone());
-        self.emit(UiEvent::ClipboardSynced {
-            seq,
-            source: "local".to_string(),
-            direction: "outbound".to_string(),
-            bytes,
-            hash,
-            timestamp_ms: now,
-            sent_peers: count,
-        });
-        Ok(count)
+        let _send_guard = self.shared.clipboard_send_lock.lock().await;
+        let set = {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.preview_force_local(text)?
+        };
+        self.begin_clipboard_delivery(set, targets, self.shared.clock.unix_ms(), false)
+            .await
     }
 
     pub(super) fn resolve_clip_targets(
@@ -757,6 +967,11 @@ impl Node {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             hubs.clip.reset_state()
         };
+        self.shared
+            .clipboard_delivery
+            .lock()
+            .expect("clipboard_delivery")
+            .reset();
         let now_ms = self.shared.clock.unix_ms();
         self.emit(UiEvent::ClipboardCleared {
             timestamp_ms: now_ms,
@@ -775,4 +990,94 @@ impl Node {
 /// change token, otherwise only once the token moved since the last read.
 pub(crate) fn clip_read_needed(last: Option<u64>, current: Option<u64>) -> bool {
     current.is_none() || last != current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer(byte: u8) -> DeviceId {
+        DeviceId::from_id_pk(&[byte; 32])
+    }
+
+    #[test]
+    fn delivery_retries_only_failed_peer_and_commits_only_after_all_success() {
+        let first = peer(1);
+        let second = peer(2);
+        let set = ClipSet::text(1, "clipboard").unwrap();
+        let frame = set.to_frame().unwrap();
+        let mut delivery = ClipboardDeliveryState::default();
+        delivery.begin(
+            set.clone(),
+            frame,
+            set.text.as_ref().unwrap().len(),
+            vec![first.clone(), second.clone()],
+            1_000,
+            true,
+        );
+
+        let (_, _, due) = delivery.due(1_000).unwrap();
+        assert_eq!(due.len(), 2);
+        assert!(matches!(
+            delivery.result(&first, true, None, 1_000),
+            Some((ClipboardDeliveryStateKind::Delivered, 1, None, None))
+        ));
+        assert!(matches!(
+            delivery.result(&second, false, Some("queue full".into()), 1_000),
+            Some((
+                ClipboardDeliveryStateKind::Retrying,
+                1,
+                Some(1_800),
+                Some(_)
+            ))
+        ));
+        assert_eq!(delivery.finished(), None);
+
+        let (_, _, not_due) = delivery.due(1_799).unwrap();
+        assert!(not_due.is_empty());
+        let (_, retry_frame, retry_due) = delivery.due(1_800).unwrap();
+        assert_eq!(retry_due, vec![(second.clone(), 2)]);
+        assert_eq!(retry_frame, set.to_frame().unwrap());
+        assert!(matches!(
+            delivery.result(&second, true, None, 1_800),
+            Some((ClipboardDeliveryStateKind::Delivered, 2, None, None))
+        ));
+        assert_eq!(delivery.finished(), Some(true));
+    }
+
+    #[test]
+    fn delivery_stops_after_bounded_attempts_without_success() {
+        let target = peer(3);
+        let set = ClipSet::text(1, "clipboard").unwrap();
+        let frame = set.to_frame().unwrap();
+        let mut delivery = ClipboardDeliveryState::default();
+        delivery.begin(set, frame, 9, vec![target.clone()], 0, true);
+
+        for (now, attempt, next) in [(0, 1, 800), (800, 2, 3_200)] {
+            let (_, _, due) = delivery.due(now).unwrap();
+            assert_eq!(due, vec![(target.clone(), attempt)]);
+            assert!(matches!(
+                delivery.result(&target, false, Some("peer busy".into()), now),
+                Some((ClipboardDeliveryStateKind::Retrying, a, Some(at), Some(_)))
+                    if a == attempt && at == next
+            ));
+        }
+        let (_, _, due) = delivery.due(3_200).unwrap();
+        assert_eq!(due, vec![(target.clone(), 3)]);
+        assert!(matches!(
+            delivery.result(&target, false, Some("peer gone".into()), 3_200),
+            Some((ClipboardDeliveryStateKind::Failed, 3, None, Some(_)))
+        ));
+        assert_eq!(delivery.finished(), Some(false));
+    }
+
+    #[test]
+    fn clip_preview_does_not_commit_hash_until_delivery_finishes() {
+        let mut hub = tetherly_core::ClipHub::default();
+        let set = hub.preview_local("clipboard").unwrap().unwrap();
+        assert_eq!(hub.last_hash(), None);
+        hub.commit_local(&set);
+        assert_eq!(hub.last_hash(), Some(set.hash.as_str()));
+        assert_eq!(hub.last_seq(), set.clip_seq);
+    }
 }
