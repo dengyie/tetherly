@@ -99,11 +99,14 @@ pub fn ensure_private_dir(dir: &Path) -> std::io::Result<PathBuf> {
 #[cfg(windows)]
 fn set_private_directory_acl(path: &Path) -> std::io::Result<()> {
     use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    // ACE inheritance flags live on the Security root, not the Authorization
+    // submodule (windows-sys 0.59).
     use windows_sys::Win32::Security::Authorization::{
         SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SET_ACCESS, SE_FILE_OBJECT,
-        SUB_CONTAINERS_AND_OBJECTS_INHERIT, TRUSTEE_IS_SID, TRUSTEE_W,
+        TRUSTEE_IS_SID, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::ACL;
+    use windows_sys::Win32::Security::SUB_CONTAINERS_AND_OBJECTS_INHERIT;
     use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
     const DACL_SECURITY_INFORMATION: u32 = 4;
