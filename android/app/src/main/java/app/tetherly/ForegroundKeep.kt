@@ -142,6 +142,10 @@ class ForegroundKeep : Service() {
 
     private fun handleTimeout(startId: Int) {
         if (!lifecycle.markTimedOut()) return
+        // Deliberate stop on the Android 15 dataSync timeout path
+        // (SessionOwnershipPolicy: FGS_TIMEOUT -> teardown) — end the native
+        // session now, and RestartCoordinator brings both the service and the
+        // session back within the restart delay.
         TetherlyApp.instance.session.stop()
         stopForeground(STOP_FOREGROUND_REMOVE)
         RestartCoordinator.schedule(applicationContext)
@@ -150,7 +154,13 @@ class ForegroundKeep : Service() {
     }
 
     override fun onDestroy() {
-        TetherlyApp.instance.session.stop()
+        // The service being destroyed (timeout restart, explicit stop, or
+        // system reclaim) does not itself mean the native session should die:
+        // a paired install's session must survive transient service churn so
+        // notification forwarding resumes when the service restarts. The
+        // timeout path already stopped the session deliberately; a plain
+        // system destroy leaves it attached. Only mark state bookkeeping.
+        // (SessionOwnershipPolicy: SERVICE_DESTROYED -> no teardown.)
         if (lifecycle.state != ForegroundKeepState.RESTART_PENDING) lifecycle.markStopped()
         super.onDestroy()
     }
@@ -184,10 +194,13 @@ class ForegroundKeep : Service() {
             }
         }
 
+        /** Explicit stop: tears down both the service and the native session
+         *  (SessionOwnershipPolicy: EXPLICIT_STOP -> teardown). */
         fun stop(ctx: Context) {
             RestartCoordinator.cancel()
             stopRequested.set(true)
             lifecycle.markStopped()
+            TetherlyApp.instance.session.stop()
             ctx.stopService(Intent(ctx, ForegroundKeep::class.java))
         }
     }

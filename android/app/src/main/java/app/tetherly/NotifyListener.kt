@@ -36,20 +36,25 @@ class NotifyListener : NotificationListenerService() {
         handler.removeCallbacksAndMessages(null)
         drainScheduled = false
         pendingReplies.clear()
-        TetherlyApp.instance.session.stop()
-        ForegroundKeep.stop(this)
+        // The native session outlives this service: a ROM rebind (transient
+        // onListenerDisconnected or full destroy) must not tear down the
+        // auto-reconnected session — nothing else would restart it until the
+        // next process cold start. Session ownership stays with
+        // NodeSession/ForegroundKeep; only the listener's own state resets.
+        // (SessionOwnershipPolicy: LISTENER_DESTROYED -> no teardown.)
         super.onDestroy()
     }
 
     override fun onListenerDisconnected() {
-        // Capture the destructive native inbox before stopping the session.
-        // This callback can be transient, so the bounded Kotlin queue survives
-        // until the listener reconnects.
+        // Transient NMS rebinds happen on some ROMs (observed: binding dies
+        // without recovery). Tearing down the session here would leave a
+        // paired install silently dead until the next cold start, so keep the
+        // session and foreground service running; the rebind lands in
+        // onListenerConnected, whose start is idempotent.
+        // (SessionOwnershipPolicy: LISTENER_DISCONNECTED -> no teardown.)
         drainReplies()
         handler.removeCallbacksAndMessages(null)
         drainScheduled = false
-        TetherlyApp.instance.session.stop()
-        ForegroundKeep.stop(this)
         super.onListenerDisconnected()
     }
 
