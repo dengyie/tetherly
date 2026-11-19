@@ -136,6 +136,10 @@ async fn recv_path_flush_stall_yields_write_stalled() {
 
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
+        // Pin the receive window below one filler frame (≈64 KiB): the stall
+        // boundary is then a property of the socket, not of OS autotuning or
+        // runner load.
+        stream.set_recv_buffer_size(16 * 1024).unwrap();
         let _sess = accept_session(stream, peer, &cfg(0x71, "server"))
             .await
             .unwrap();
@@ -143,15 +147,20 @@ async fn recv_path_flush_stall_yields_write_stalled() {
     });
 
     let stream = TcpStream::connect(addr).await.unwrap();
+    stream.set_send_buffer_size(16 * 1024).unwrap();
+    stream.set_recv_buffer_size(16 * 1024).unwrap();
     let mut sess = dial_session(stream, addr, &cfg(0x81, "client"))
         .await
         .unwrap();
 
     // Fill the socket and cancel while send_inner is parked in its write. The
     // frame is already encrypted and committed, so recv_inner must drain it.
+    // A genuinely full buffer parks the write indefinitely; the 5 s budget
+    // only turns that park into a cancel and never misfires on a slow loopback
+    // write the way a 100 ms budget would under CI load.
     let mut cancelled = false;
     for _ in 0..4096 {
-        match tokio::time::timeout(Duration::from_millis(100), sess.send_inner(filler())).await {
+        match tokio::time::timeout(Duration::from_secs(5), sess.send_inner(filler())).await {
             Ok(Ok(())) => continue,
             Ok(Err(error)) => panic!("unexpected send error before cancellation: {error:?}"),
             Err(_) => {
