@@ -1516,3 +1516,11 @@
 - **§169 生效时点勘误**：legacy 删除落在 main 晚于 v0.2.63 tag，故 v0.2.63 产物仍含 legacy 路由（双端实测 /api/peers 200 属预期）；v0.2.64 起 legacy 404 真生效（双端已验证）。hub.legacy 观测从本版起才是有效窗口。
 - 发布链顺利：四文件 bump（28b4f28）→ tag → release 44406288837 全 7 job success → 11 assets（dmg/msi 名 0.2.64 正确）。部署：Mac package-macos-app.sh + Windows deploy.sh 双端 0.2.64，保护进程 3/3、SYSTEM、live_peers 1。
 - **连锁修复（本轮发现）**：deploy.sh / package-macos-app.sh / 三个 verify_*.sh 全部还在打 legacy 端点——deploy.sh 版本门 /api/health→/api/v1/health、restart→/api/v1/system/restart（Admin tier）、package-macos-app shutdown→/api/v1/system/shutdown、ensure→GET /api/v1/input、peers→/api/v1/devices（响应形状 live[]→typed array，jq 断言同步改）、screen/start|allow|twcc→/api/v1/screen/*。本次 Windows 部署版本门是手工绕过验证的，脚本已修，下轮部署即走新链。
+
+## v0.2.65（2026-11-19，§171）input-link 清账 + Android Compose + 缺口核对
+- 837ea2e 代码 / d534f16 文档+bump：4 修（F 滚轮 /120、C 冷启动 edge 镜像、B tb dwell 离边清、D rem 坐标同步 + 2 守护测试）+ 3 取证关闭（A/E/G）+ H 能力缺口；Android Compose 改版（plugin.compose + BOM + M3，MainActivity 重写行为等价）
+- Windows viewer（macOS-only stub 确认）/ Edge Strip / Ghost Overlay / 被动拖拽核对为设计层未实施，todo.md 口径更新
+- 本地验证：rm target → fmt 绿 → clippy -D warnings 0 错 → core 332 + node 300 + phase3 13 全绿
+- CI：ci 44422469814 五作业绿；release 44422469739 首跑 build-android Maven Central 429（网络抖动，同代码 ci android 绿）→ rerun --failed 绿，11 assets
+- 部署：Mac health 0.2.65；Windows 热重启 9076→19764 SYSTEM，受保护三进程不动；Mac /api/v1/input + trace 环 200 正常
+- 遗留观察：真机滚轮一格滚动量验证（F 修复体感）；doc-check 4/4 中 unittest 项红为 agent-fleet 会话的 infra-services.md 重复行，非本轮
