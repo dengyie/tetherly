@@ -601,10 +601,21 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            // Windows sends RST when a socket closes with unread inbound data,
+            // which would mask the response head with os error 10054. Consume
+            // the request head first so the close is a clean FIN.
+            let mut req = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                req.extend_from_slice(&chunk[..n]);
+            }
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
                 .await
                 .unwrap();
+            stream.shutdown().await.unwrap();
         });
 
         let err = match loopback_events_connect_with_deadlines(
