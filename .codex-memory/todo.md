@@ -12,7 +12,8 @@
 - [x] **Batch 3 · 状态原子性与 teardown（GREEN，已随 v0.2.66 上线）**：screen start/stop failure cleanup、camera ownership、offer/accept rollback、duplicate admission、atomic inbox target、multi-peer terminal transition、shutdown outbox/stats cleanup、queue-full 隔离证据（RED→GREEN）。
 - [x] **Batch 4 · 客户端可靠性（GREEN，已随 v0.2.66 上线）**：clipboard partial retry、browser/Tauri SSE、Android reply queue/foreground recovery 已上线；Android Gradle/unit 随 CI 通过（assembleRelease + release 签名 APK）。残余仅 Android 15 真机长稳（Manual-required）。
 - [x] **Batch 5 · CI/release/deploy gate（GREEN，已闭环）**：CI run 44573908834 全绿；release run 44585068559 全绿 → v0.2.66 发布 12 资产（SHA256SUMS + release 签名 APK）；macOS/Windows 双端部署成功（Windows PID 19764→6104、SYSTEM、readiness 通过）；现场冒烟 **19/19 PASS**。发布冻结解除。
-- [ ] Manual-required 残余：Android 15 真机 dataSync timeout/长稳；timeout/shutdown 后 partial/sidecar 长期现场观察；Windows smooth-wheel detent 产品承诺确认（Needs confirmation）。
+- [x] Manual-required 残余：Android 15 真机 dataSync timeout/长稳；timeout/shutdown 后 partial/sidecar 长期现场观察；Windows smooth-wheel detent 产品承诺确认（Needs confirmation）。
+- [x] **v0.2.67 · 配对安装冷启动自动重连（现场缺陷闭环）**：.51/.52 真机发现 force-stop/升级后停在连接表单 → `AutoConnectPolicy`（identity.bin + 非空地址门控）+ `NodeSession.ensureStarted()` 幂等门 + `TetherlyApp.onCreate` 自动启动（commit 2c00c08，CI 44606444671 绿，release 44609260621 绿 13 资产）。.52 真机验收：升级安装 v0.2.67 → force-stop → relaunch 直接「已连接」无需手点，FGS dataSync + NotifyListener 在册。**残留**：开机（boot-time）路径待验证——.52 reboot 后 frpc 隧道未自恢复、.51 亦然，两台均需云控制台侧重启 Termux/frpc 后补验。
 - [x] 不重开 §171 已解决的 input-link/Android Compose 项；Windows viewer、Edge Strip/Ghost Overlay、被动拖拽和多显示器继续作为能力缺口/Manual-required 单列。
 - [x] 详细合同见 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)；发布 checklist 现场证据已全部记录于其 §8。
 

@@ -1,4 +1,12 @@
 # Session log
+## 2026-11-20 · v0.2.67：Android 配对安装自动重连（现场缺陷闭环）
+- 现场缺陷（.51/.52 真机发现）：配对节点 force-stop/升级后冷启动停在连接表单，需手动点「保存并连接」。修复 commit **2c00c08** `feat(android): §172 — auto-reconnect a paired install on process start`。
+- 实现：`AutoConnectPolicy.kt` 冷启动门控（`desktopAddr.isNotBlank() && identity.bin 已持久化` 才自动拨号，全新安装永不自拨默认地址）；`NodeSession.ensureStarted()` 幂等门（替代裸 attach，避免 listener/前台路径与 Application.onCreate 竞争时拆线重拨）；`TetherlyApp.onCreate` 自动启动；`ForegroundKeep` start/onStartCommand 收敛到 ensureStarted。3 个 JVM 单测（paired 自启 / fresh 永不 / 空地址阻断）。
+- CI run **44606444671 全绿**；release run **44609260621 全绿**，v0.2.67 发布 13 资产（SHA256SUMS、release 签名 APK、dmg/msi、三平台 bin+CLI+viewer）；APK SHA256 `67b183c…fc35e0f` 与 SHA256SUMS 一致。
+- .52 真机验收（release v0.2.66→0.2.67 升级安装）：force-stop → relaunch，UI 直接显示 `device_id: tdev_breflgheng3owukz · 已连接`（未点任何按钮），ForegroundKeep FGS dataSync isForeground=true startForegroundCount=1，NotifyListener 在 enabled_notification_listeners —— **自动重连功能验收通过**。
+- 开机自动重连验证中断：`.52 adb reboot` 后 Termux frpc 隧道未自恢复，5555 端口超时（与 .51 重启后同模式）；两台云机均需云控制台侧重启 Termux/frpc 后补验。后台 5 分钟间隔探针挂起等待恢复。
+- 结论：v0.2.67 产品缺陷闭环完成；「paired 节点冷启动不自动重连」观察项销项。残留：boot-time 路径验证（.52 开机 + .51 恢复后）。
+
 ## 2026-11-20 · v0.2.66 Android 云手机真机验收（用户授权云手机测试）
 - 两台三星云手机（SM-F900F / Android 13，10.144.144.51/52:5555）从 debug 签名旧版升级 release 签名 v0.2.66（versionCode 2066，签名密钥 vault Note/Accounts/ai/tetherly-release-signing/）。
 - .52 全链路 GREEN：adb reverse 45717 → UI PIN 配对（Noise）→ tdev_breflgheng3owukz 已连接；Mac devices online+trusted rtt 20–30ms；NotifyListener 被系统绑定；`cmd notification post` 测试通知 → 零明文 candidate（TetherlySmoke/Shell）到达 Mac 活动流；捕获即触发 ForegroundKeep FGS（dataSync，startForegroundCount=1，PROC_STATE_TOP）——§172 FGS 真机生命周期通过（Android 13 无 6h onTimeout 语义，重启路径仍列 Android 15 Manual-required）。
