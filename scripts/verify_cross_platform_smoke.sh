@@ -111,7 +111,7 @@ fi
 # 1.4 Remote Windows daemon integrity: alive and owned by SYSTEM. The console
 # session id is not a stable contract (a hot restart may land in any session),
 # so the invariant we pin is the SYSTEM ownership that carries UIPI injection.
-REMOTE_PROC=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$p=Get-Process tetherly -ErrorAction Stop | Select-Object -First 1; \$o=Get-CimInstance Win32_Process -Filter \"Name='tetherly.exe'\" | Select-Object -First 1; \$owner=if (\$o) { (Invoke-CimMethod -InputObject \$o -MethodName GetOwner).User } else { '' }; [pscustomobject]@{Id=\$p.Id; SessionId=\$p.SessionId; Owner=\$owner} | ConvertTo-Json -Compress\"")
+REMOTE_PROC=$(ssh -o ConnectTimeout=5 "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$p=Get-Process tetherly -ErrorAction Stop | Select-Object -First 1; \$o=Get-CimInstance Win32_Process -Filter \\\"Name='tetherly.exe'\\\" | Select-Object -First 1; \$owner=if (\$o) { (Invoke-CimMethod -InputObject \$o -MethodName GetOwner).User } else { '' }; [pscustomobject]@{Id=\$p.Id; SessionId=\$p.SessionId; Owner=\$owner} | ConvertTo-Json -Compress\"")
 SESSION_OK=0
 WIN_PID="unknown"
 WIN_SESSION="unknown"
