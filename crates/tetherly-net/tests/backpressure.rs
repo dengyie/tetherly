@@ -129,6 +129,18 @@ async fn a_reading_peer_never_reports_write_stalled() {
 /// A cancelled send can leave committed bytes in the outbox. A later receive
 /// must apply the same write budget while finishing those bytes instead of
 /// hanging forever before it reads the peer's next frame.
+/// Pin a connected socket's send/receive windows below one filler frame
+/// (≈64 KiB) before handing it to tokio: the std buffer setters are gone in
+/// the current toolchain, so the pin goes through socket2.
+fn pinned(stream: std::net::TcpStream) -> TcpStream {
+    let socket = socket2::Socket::from(stream);
+    socket.set_send_buffer_size(16 * 1024).unwrap();
+    socket.set_recv_buffer_size(16 * 1024).unwrap();
+    let stream: std::net::TcpStream = socket.into();
+    stream.set_nonblocking(true).unwrap();
+    TcpStream::from_std(stream).unwrap()
+}
+
 #[tokio::test]
 async fn recv_path_flush_stall_yields_write_stalled() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -139,16 +151,14 @@ async fn recv_path_flush_stall_yields_write_stalled() {
         // Pin the receive window below one filler frame (≈64 KiB): the stall
         // boundary is then a property of the socket, not of OS autotuning or
         // runner load.
-        stream.set_recv_buffer_size(16 * 1024).unwrap();
+        let stream = pinned(stream.into_std().unwrap());
         let _sess = accept_session(stream, peer, &cfg(0x71, "server"))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_secs(120)).await;
     });
 
-    let stream = TcpStream::connect(addr).await.unwrap();
-    stream.set_send_buffer_size(16 * 1024).unwrap();
-    stream.set_recv_buffer_size(16 * 1024).unwrap();
+    let stream = pinned(std::net::TcpStream::connect(addr).unwrap());
     let mut sess = dial_session(stream, addr, &cfg(0x81, "client"))
         .await
         .unwrap();

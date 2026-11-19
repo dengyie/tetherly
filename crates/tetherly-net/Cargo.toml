@@ -24,3 +24,7 @@ serde.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Backpressure tests pin SO_SNDBUF/SO_RCVBUF below one frame; the std
+# socket buffer setters are gone in the current toolchain, so the pin
+# goes through socket2 (already in the tree via mio/tokio).
+socket2 = { version = "0.6", default-features = false }
