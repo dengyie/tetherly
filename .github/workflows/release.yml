@@ -306,15 +306,20 @@ jobs:
           EXPECTED_VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
         run: |
           set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "${SDK}" && test -d "${SDK}"
+          APKANALYZER="$SDK/cmdline-tools/latest/bin/apkanalyzer"
+          test -x "$APKANALYZER" || APKANALYZER="$(ls "$SDK"/cmdline-tools/*/bin/apkanalyzer | sort -V | tail -1)"
+          APKSIGNER="$(ls "$SDK"/build-tools/*/apksigner | sort -V | tail -1)"
           apk="app/build/outputs/apk/release/app-release.apk"
           test -s "${apk}"
-          test "$(apkanalyzer manifest version-name "${apk}")" = "${EXPECTED_VERSION}"
-          test "$(apkanalyzer manifest version-code "${apk}")" = "${EXPECTED_VERSION_CODE}"
-          apkanalyzer manifest application-id "${apk}" | grep -Fx 'app.tetherly'
-          apkanalyzer manifest version-name "${apk}" | grep -Fx "${EXPECTED_VERSION}"
-          apkanalyzer manifest version-code "${apk}" | grep -Fx "${EXPECTED_VERSION_CODE}"
-          apksigner verify --verbose "${apk}"
-          if apksigner verify --print-certs "${apk}" | grep -qi 'CN=Android Debug'; then
+          test "$("$APKANALYZER" manifest version-name "${apk}")" = "${EXPECTED_VERSION}"
+          test "$("$APKANALYZER" manifest version-code "${apk}")" = "${EXPECTED_VERSION_CODE}"
+          "$APKANALYZER" manifest application-id "${apk}" | grep -Fx 'app.tetherly'
+          "$APKANALYZER" manifest version-name "${apk}" | grep -Fx "${EXPECTED_VERSION}"
+          "$APKANALYZER" manifest version-code "${apk}" | grep -Fx "${EXPECTED_VERSION_CODE}"
+          "$APKSIGNER" verify --verbose "${apk}"
+          if "$APKSIGNER" verify --print-certs "${apk}" | grep -qi 'CN=Android Debug'; then
             echo 'debug signing certificate is not allowed' >&2
             exit 1
           fi
