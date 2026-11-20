@@ -1657,3 +1657,10 @@
 - 修复：Top/Bottom 改 band_safe_dock_y 泊位 + x=denorm_x(rem_x) 保位置映射；Left/Right 不动。RED（y=1 断言失败）→ GREEN。
 - 验证：core 335（+1）/ node lib 319 回归全绿；clippy 双形态 0 error；fmt 过。
 - 文档：计划 §8 追加；todo.md 增条目。
+
+## 2026-11-21 · §181 core/topology.rs 深审（两处修复）
+- 范围：topology.rs 全 750 行 + wire 取证（dispatch.rs:168 → lifecycle.rs:1885 → receive_topology_state → frame.sanitize；node input.rs:3989 反向 takeover entry）。
+- P2：sanitize 裸 String::truncate(64)——多字节 UTF-8 跨字节 64 边界 panic（独立 rustc 程序证明 is_char_boundary assertion），一个已认证 peer frame 崩 session task。修复：复用 frame.rs truncate_utf8（pub(crate)）。
+- P3：map_edge_exit_to_entry 8 个正交/同边 fallback 截断 vs 主分支 round-to-nearest，正交拓扑每次往返剪切 1px。修复：统一 scale()。
+- 验证：core 337（+2）/ node 319 / net 13 全绿；clippy 双形态 0 error；fmt 过。
+- 文档：计划 §8 追加；todo.md 增条目。

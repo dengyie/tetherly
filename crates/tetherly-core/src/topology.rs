@@ -230,13 +230,13 @@ impl TopologyStateFrame {
     pub fn sanitize(&mut self) {
         self.display.sanitize();
         self.config.sanitize();
-        if self.device_id.len() > 64 {
-            self.device_id.truncate(64);
-        }
+        // §181: fall back to the last char boundary instead of a bare
+        // `String::truncate(64)` — a hostile peer_id whose multi-byte
+        // character spans byte 64 panicked the session task on the
+        // assertion (one authenticated frame killed the session).
+        crate::frame::truncate_utf8(&mut self.device_id, 64);
         for neighbor in self.neighbors.values_mut() {
-            if neighbor.peer_id.len() > 64 {
-                neighbor.peer_id.truncate(64);
-            }
+            crate::frame::truncate_utf8(&mut neighbor.peer_id, 64);
             neighbor.offset = neighbor.offset.clamp(-8192, 8192);
         }
     }
@@ -496,10 +496,13 @@ pub fn map_edge_exit_to_entry(
                 remote_display.height.saturating_sub(1) as i32,
             )
         }
-        // Right to Top/Bottom
+        // Right to Top/Bottom — §181: same round-to-nearest `scale` as the
+        // main branches above; the old `(frac * dim) as i32` truncation
+        // sheared every round trip by one pixel on orthogonal topologies
+        // (the exact drift the basis comment warns about).
         (DisplayEdge::Right, DisplayEdge::Top) => {
             let frac_y = (exit_y as f32 / lh).clamp(0.0, 1.0);
-            let entry_x = (frac_y * rw) as i32 + offset;
+            let entry_x = scale(frac_y, rw) + offset;
             (
                 entry_x.clamp(0, remote_display.width.saturating_sub(1) as i32),
                 0,
@@ -507,7 +510,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Right, DisplayEdge::Bottom) => {
             let frac_y = (exit_y as f32 / lh).clamp(0.0, 1.0);
-            let entry_x = (frac_y * rw) as i32 + offset;
+            let entry_x = scale(frac_y, rw) + offset;
             (
                 entry_x.clamp(0, remote_display.width.saturating_sub(1) as i32),
                 remote_display.height.saturating_sub(1) as i32,
@@ -516,7 +519,7 @@ pub fn map_edge_exit_to_entry(
         // Left to Top/Bottom
         (DisplayEdge::Left, DisplayEdge::Top) => {
             let frac_y = (exit_y as f32 / lh).clamp(0.0, 1.0);
-            let entry_x = (frac_y * rw) as i32 + offset;
+            let entry_x = scale(frac_y, rw) + offset;
             (
                 entry_x.clamp(0, remote_display.width.saturating_sub(1) as i32),
                 0,
@@ -524,7 +527,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Left, DisplayEdge::Bottom) => {
             let frac_y = (exit_y as f32 / lh).clamp(0.0, 1.0);
-            let entry_x = (frac_y * rw) as i32 + offset;
+            let entry_x = scale(frac_y, rw) + offset;
             (
                 entry_x.clamp(0, remote_display.width.saturating_sub(1) as i32),
                 remote_display.height.saturating_sub(1) as i32,
@@ -533,7 +536,7 @@ pub fn map_edge_exit_to_entry(
         // Top to Left/Right
         (DisplayEdge::Top, DisplayEdge::Left) => {
             let frac_x = (exit_x as f32 / lw).clamp(0.0, 1.0);
-            let entry_y = (frac_x * rh) as i32 + offset;
+            let entry_y = scale(frac_x, rh) + offset;
             (
                 0,
                 entry_y.clamp(0, remote_display.height.saturating_sub(1) as i32),
@@ -541,7 +544,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Top, DisplayEdge::Right) => {
             let frac_x = (exit_x as f32 / lw).clamp(0.0, 1.0);
-            let entry_y = (frac_x * rh) as i32 + offset;
+            let entry_y = scale(frac_x, rh) + offset;
             (
                 remote_display.width.saturating_sub(1) as i32,
                 entry_y.clamp(0, remote_display.height.saturating_sub(1) as i32),
@@ -550,7 +553,7 @@ pub fn map_edge_exit_to_entry(
         // Bottom to Left/Right
         (DisplayEdge::Bottom, DisplayEdge::Left) => {
             let frac_x = (exit_x as f32 / lw).clamp(0.0, 1.0);
-            let entry_y = (frac_x * rh) as i32 + offset;
+            let entry_y = scale(frac_x, rh) + offset;
             (
                 0,
                 entry_y.clamp(0, remote_display.height.saturating_sub(1) as i32),
@@ -558,7 +561,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Bottom, DisplayEdge::Right) => {
             let frac_x = (exit_x as f32 / lw).clamp(0.0, 1.0);
-            let entry_y = (frac_x * rh) as i32 + offset;
+            let entry_y = scale(frac_x, rh) + offset;
             (
                 remote_display.width.saturating_sub(1) as i32,
                 entry_y.clamp(0, remote_display.height.saturating_sub(1) as i32),
@@ -746,5 +749,87 @@ mod tests {
         assert_eq!(EdgeCrossingConfig::default().entry_return_grace_ms, 3000);
         let legacy: EdgeCrossingConfig = serde_json::from_str(r#"{"resistance_px":15}"#).unwrap();
         assert_eq!(legacy.entry_return_grace_ms, 3000);
+    }
+
+    /// §181: sanitize must never panic on hostile wire input. A peer_id
+    /// whose multi-byte UTF-8 character spans byte boundary 64 made
+    /// `String::truncate(64)` panic (`is_char_boundary` assertion) inside
+    /// the session task — one frame from an authenticated peer killed the
+    /// session. Truncation must fall back to the last char boundary.
+    #[test]
+    fn sanitize_truncates_multi_byte_ids_without_panic() {
+        let mut frame = TopologyStateFrame {
+            device_id: format!("{}中{}", "a".repeat(63), "文".repeat(10)),
+            display: DisplayRect::default(),
+            neighbors: HashMap::new(),
+            config: EdgeCrossingConfig::default(),
+            timestamp_ms: 0,
+        };
+        frame.neighbors.insert(
+            DisplayEdge::Right,
+            EdgeNeighbor {
+                peer_id: format!("{}中{}", "b".repeat(62), "文".repeat(10)),
+                peer_edge: DisplayEdge::Left,
+                offset: 0,
+            },
+        );
+        frame.sanitize();
+        assert!(frame.device_id.len() <= 64, "device_id must be capped");
+        assert!(frame.device_id.is_char_boundary(frame.device_id.len()));
+        for n in frame.neighbors.values() {
+            assert!(n.peer_id.len() <= 64, "peer_id must be capped");
+            assert!(n.peer_id.is_char_boundary(n.peer_id.len()));
+        }
+    }
+
+    /// §181: the orthogonal / same-edge fallback branches must use the
+    /// same round-to-nearest mapping as the main branches. The truncating
+    /// `(frac * dim) as i32` shears every round trip by one pixel —
+    /// exactly the drift the main-branch comment warns about — so a
+    /// Right->Top topology walked the cursor with each crossing pair.
+    #[test]
+    fn orthogonal_entry_uses_round_to_nearest() {
+        let local = DisplayRect::new(1920, 1080, 1.0);
+        let remote = DisplayRect::new(3840, 2160, 1.0);
+
+        // Right->Top maps the FREE axis exit_y (960/1079) onto the remote
+        // width: (960/1079)*3839 = 3415.6 — truncates to 3415, rounds to
+        // 3416. The old truncating fallback sheared one pixel per trip.
+        let (rx, ry) = map_edge_exit_to_entry(
+            &local,
+            DisplayEdge::Right,
+            (1919, 960),
+            &remote,
+            DisplayEdge::Top,
+            0,
+        );
+        assert_eq!(ry, 0, "Right->Top enters at the top row");
+        assert_eq!(rx, 3416, "orthogonal entry must round to nearest");
+
+        // Top->Right maps exit_x onto the remote height. exit_x=1918:
+        // (1918/1919)*2159 = 2157.875 in f32 — truncates to 2157, rounds
+        // to 2158. The old truncating fallback sheared one pixel per trip.
+        let (rx, ry) = map_edge_exit_to_entry(
+            &local,
+            DisplayEdge::Top,
+            (1918, 0),
+            &remote,
+            DisplayEdge::Right,
+            0,
+        );
+        assert_eq!(rx, 3839, "Top->Right enters at the right column");
+        assert_eq!(ry, 2158, "orthogonal entry must round to nearest");
+
+        // Same-edge fallback (Right->Right) shares the free-axis mapping.
+        let (rx, ry) = map_edge_exit_to_entry(
+            &local,
+            DisplayEdge::Right,
+            (1919, 540),
+            &remote,
+            DisplayEdge::Right,
+            0,
+        );
+        assert_eq!(rx, 3839);
+        assert_eq!(ry, 1081, "same-edge fallback must round to nearest");
     }
 }

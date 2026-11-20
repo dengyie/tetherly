@@ -260,3 +260,10 @@
   - 取证（确认现场可达）：warp-echo gate 有 250ms 时限与 2 次回声配额，错过 gate 的回声/settle 事件正是 v0.2.26 生产日志记录的 stray 来源（`hook_delta_is_bogus` 只挡 >半屏 位移）；band 配置默认 24px 每事件镜像进引擎；既有回归测试 `tb_band_dock_never_recrosses_from_a_stray_quiet_event` 只覆盖 force_local 泊位。
   - RED：新测试 `on_remote_leave_dock_never_recrosses_from_a_stray_quiet_event`（Top/Bottom 双向：泊位必须 band 外 + 泊位处 stray 静默事件不得 re-cross）——修复前 y=1 断言失败。GREEN：core 335 passed（+1）；node lib 319 passed 回归不变；clippy 双形态（lib / lib+tests）0 error；rustfmt 过。
   - 残余：无新增 manual-required。
+- **2026-11-21 §181 core/topology.rs 深审（两处 confirmed 修复：sanitize panic P2 + 正交映射剪切 P3）**：
+  - 范围：`crates/tetherly-core/src/topology.rs` 全 750 行通读（DisplayEdge/DisplayRect/EdgeCrossingConfig/Validator/map_edge_exit_to_entry）+ wire 取证（dispatch.rs 反序列化 → lifecycle.rs:1885 → receive_topology_state:494 `frame.sanitize()`；node input.rs:3989 反向 takeover entry 映射）。
+  - 缺陷 1（P2，confirmed，已修）：`TopologyStateFrame::sanitize` 对 `device_id`/`neighbor.peer_id` 直接 `String::truncate(64)`——已认证 peer 发送一个多字节 UTF-8 字符跨字节 64 边界的 frame 即触发 `is_char_boundary` assertion panic，session task 崩溃（DoS）。frame.rs 既有 `truncate_utf8`（边界回退）是全库规范写法，此处遗漏。修复：`truncate_utf8` 改 `pub(crate)` 复用；RED 测试 `sanitize_truncates_multi_byte_ids_without_panic` 修复前在生产行 panic 复现。
+  - 缺陷 2（P3，confirmed，已修）：`map_edge_exit_to_entry` 主分支用 `scale()` round-to-nearest 且注释明确警告截断剪切，但 8 个正交/同边 fallback 分支仍用 `(frac * dim) as i32` 截断——正交拓扑每次往返剪切 1px（f32 精确验证：Top→Right exit_x=1918 时 trunc 2157 / round 2158）。修复：fallback 全部改 `scale()`；RED 测试 `orthogonal_entry_uses_round_to_nearest` 修复前失败。
+  - 其余 confirmed-design：Validator 边界完备（band/dwell/fast-push/grace/speed 全 clamp）；`offset.clamp(±8192)` 无溢出；`is_in_corner_zone` 语义正确；serde legacy 兼容默认值有 pin 测试。
+  - 验证：core 337（+2）/ node 319 / net 13 回归全绿；clippy 双形态 0 error；fmt 过。
+  - 残余：无新增 manual-required。

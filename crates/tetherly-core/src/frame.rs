@@ -577,7 +577,7 @@ pub fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-fn truncate_utf8(s: &mut String, max_bytes: usize) {
+pub(crate) fn truncate_utf8(s: &mut String, max_bytes: usize) {
     if s.len() <= max_bytes {
         return;
     }
