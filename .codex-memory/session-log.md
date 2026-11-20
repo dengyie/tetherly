@@ -1679,3 +1679,8 @@
 ## 2026-11-21 · §184 core/notify.rs + dedup.rs 深审（零缺陷）
 - 全部 confirmed-design；§182 P4 观察项回访后维持不行动（candidates TTL 驱动 / replies 覆盖式，皆有界）。
 - 无代码变更，core 基线 338 不变。
+
+## 2026-11-21 · §185 core/filexfer.rs 深审（一处 P3 修复）
+- P3：prune 无条件保留 Accepted；auto-accept 下恶意对端 256 个 abandoned accept 饱和 INCOMING_MAX，接收永久瘫痪。修复 accepted_ms + ACCEPTED_TTL_MS=1h。
+- confirmed-design：is_safe_transfer_id 白名单、offer 校验序与所有权锁、resume 链（claim 三重校验→start!=hint 硬拒→HKDF AEAD→sidecar 对账）、发送方本地闭环。
+- 验证：core 339（+1）/ node check / clippy 双形态 0 / fmt 过。

@@ -27,6 +27,10 @@ pub struct IncomingTransfer {
     pub files: Vec<FileMeta>,
     pub status: TransferStatus,
     pub offered_ms: u64,
+    /// When the offer was accepted (0 while still `Offered`). Drives the
+    /// §185 accept TTL in `prune`, so an accepted-then-abandoned offer
+    /// cannot pin its table slot forever.
+    pub accepted_ms: u64,
     /// Chunk-aligned offset this transfer may resume from (if the receiver
     /// already holds a matching persisted partial). Set at offer time.
     pub resume_from: Option<u64>,
@@ -113,6 +117,13 @@ const INCOMING_MAX: usize = 256;
 /// while guarding against integer overflow and unbounded disk exhaustion.
 pub const FILE_MAX: u64 = 64 * 1024 * 1024 * 1024;
 
+/// §185: how long an `Accepted` offer may sit without the peer reporting
+/// `FileDone`. Auto-accept makes `Accepted` reachable without a local click,
+/// so an abandoned accept must not pin its table slot forever. Far beyond the
+/// file channel's 30 min total timeout — a live transfer always completes
+/// (or fails and drops the entry) well inside this window.
+const ACCEPTED_TTL_MS: u64 = 60 * 60 * 1000;
+
 impl FileHub {
     pub fn offer(
         &mut self,
@@ -173,6 +184,7 @@ impl FileHub {
             files,
             status: TransferStatus::Offered,
             offered_ms: now_ms,
+            accepted_ms: 0,
             resume_from,
         };
         self.incoming.insert(offer.transfer_id, t.clone());
@@ -228,6 +240,7 @@ impl FileHub {
             }
         };
         t.status = TransferStatus::Accepted;
+        t.accepted_ms = now_ms;
         Ok(FileDecision {
             transfer_id: transfer_id.to_string(),
             resume_from: resume,
@@ -261,6 +274,7 @@ impl FileHub {
             return Err(CoreError::FileAlreadyDecided);
         }
         t.status = TransferStatus::Offered;
+        t.accepted_ms = 0;
         Ok(())
     }
 
@@ -314,11 +328,14 @@ impl FileHub {
 
     /// Drop decided transfers and offers past their token TTL, so the map holds
     /// at most the live offers instead of every transfer ever seen. `Accepted`
-    /// is kept: it is user-approved and `mark_done` still needs it until the
-    /// peer reports completion.
+    /// is kept while fresh — it is user-approved and `mark_done` still needs it
+    /// until the peer reports completion — but §185 bounds it with its own TTL:
+    /// auto-accept makes `Accepted` reachable without a local click, so an
+    /// accepted-then-abandoned offer (peer never opens the data connection)
+    /// must not pin its slot and eventually starve `INCOMING_MAX`.
     fn prune(&mut self, now_ms: u64) {
         self.incoming.retain(|_, t| match t.status {
-            TransferStatus::Accepted => true,
+            TransferStatus::Accepted => now_ms.saturating_sub(t.accepted_ms) <= ACCEPTED_TTL_MS,
             TransferStatus::Offered => now_ms.saturating_sub(t.offered_ms) <= FILE_TOKEN_TTL_MS,
             TransferStatus::Done | TransferStatus::Rejected => false,
         });
@@ -489,6 +506,37 @@ mod tests {
                 .unwrap_err(),
             CoreError::FileTooLarge(FILE_MAX)
         );
+    }
+
+    /// §185: an Accepted entry whose peer never opens the data connection
+    /// must not pin the table forever. Auto-accept makes `Accepted` reachable
+    /// without a local click, so a flood of accepted-then-abandoned offers
+    /// would otherwise saturate `INCOMING_MAX` and refuse every later offer
+    /// until restart.
+    #[test]
+    fn accepted_offer_is_pruned_after_the_accept_ttl() {
+        let mut hub = FileHub::default();
+        let src = DeviceId::from_id_pk(&[8u8; 32]);
+        let sized = |id: &str| FileOffer {
+            transfer_id: id.into(),
+            files: vec![FileMeta {
+                name: "a.bin".into(),
+                size: 10,
+                sha256: "e".repeat(64),
+            }],
+        };
+        hub.offer(src.clone(), sized("tr_1"), 1).unwrap();
+        hub.accept("tr_1", 2).unwrap();
+        // Still inside the window: kept so mark_done can complete.
+        hub.prune(2 + 60_000);
+        assert!(hub.get("tr_1").is_some(), "kept within the accept TTL");
+        // Abandoned accept (peer never opened the data channel) expires.
+        hub.prune(2 + ACCEPTED_TTL_MS + 1);
+        assert!(hub.get("tr_1").is_none(), "abandoned accept must expire");
+        // The freed slot admits a fresh offer again.
+        assert!(hub
+            .offer(src, sized("tr_2"), 2 + ACCEPTED_TTL_MS + 2)
+            .is_ok());
     }
 
     #[test]

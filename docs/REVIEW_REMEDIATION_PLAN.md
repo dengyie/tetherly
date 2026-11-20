@@ -279,6 +279,13 @@
   - 缺陷（P3，confirmed，已修）：`SensitiveContentGuard::is_aws_key_at` 用裸字节切片 `&remainder[..20]` / `&key_candidate[4..20]` 提取 AWS key 窗口——多字节 UTF-8 字符跨字节 20 边界时 panic（独立 rustc 程序证明）。可达路径非 wire 而是本地系统剪贴板：复制一段含 "AKIA"/"ASIA" + 中文/emoji 的普通文本（日志片段、OCR 输出），周期性 auto-sync 轮询即 panic 崩溃剪贴板同步任务。修复：按字符边界回退取窗口（`is_char_boundary` 循环），短窗口只可能 under-match 不可能误检；20 字节 ASCII 真 key 检测不变（pin 断言）。
   - 其余 confirmed-design：preview/commit 分离（全 peer 入队才提交 hash/seq）；echo 防环 hash 相等即 Echo；apply_remote 检查顺序 limiter→echo→text→size→hash 绑定；seq 单调 max 合并；MAX_CLIP_HISTORY=32 环形有界；其余 guard 检测（PEM/GitHub/OpenAI/Slack/JWT/密码管理器）全部 contains/split 无切片风险。
   - 验证：core 338（+1）/ node 319 回归全绿；clippy 双形态 0 error；fmt 过。
+- **2026-11-21 §185 core/filexfer.rs 深审（一处 P3 修复：Accepted 条目永不过期致表饱和）**：
+  - 范围：`crates/tetherly-core/src/filexfer.rs` 全 543 行（FileHub 状态机、ResumeTable、offer/accept/done/prune 生命周期）+ 全链路取证（node lifecycle.rs FileOffer/FileDone 处理与 auto-accept、files.rs accept_file 数据通道校验、runtime.rs load_resume_table sidecar 对账、filechan.rs header/chunk/total 四级超时、dispatch.rs wire 解码）。
+  - 缺陷（P3，confirmed，已修）：`prune()` 无条件保留 `Accepted` 条目，其注释前提「只有 `Offered` 无需本地点击即可达」被 auto-accept 打破——信任对端 + 宽松策略（`is_eligible` 无过滤器时全通过）下，对端连发 256 个 offer 全自动 `Accepted` 且从不打开数据通道，`INCOMING_MAX=256` 永久饱和，之后所有新 offer（含正常对端）一律 `UnknownTransfer` 拒绝直到进程重启。用户手动 accept 后对端消失同样泄漏（`cancel_transfer` 不触 hub 条目，`forget` 生产仅 peer-reject 路径调用）。修复：`IncomingTransfer` 增加 `accepted_ms`（`accept_at` 落章、`rollback_accept` 清零），`prune` 对 `Accepted` 施加 `ACCEPTED_TTL_MS = 1h`（远超 filechan `FILE_TOTAL_TIMEOUT` 30min，活跃传输必然窗内 `mark_done`；`mark_done` 后转 `Done` 仍被 prune 立即驱逐）。
+  - confirmed-design（不重开）：`is_safe_transfer_id` 字符集白名单防 v0.2.49 路径逃逸回归；offer 校验序 id→文件名 sanitize→sha256 64-hex→FILE_MAX→重复幂等（异源/异载荷拒绝所有权劫持）→INCOMING_MAX；resume 链完整闭环：`ResumeTable::claim` 三重校验（source+total+对齐）→ 数据通道 `start != resume_hint` 硬拒 → HKDF(Noise handshake, transfer_id) 逐块 AEAD → sidecar 与 `.part` 长度对账丢弃撕裂态；发送方完成本地闭环（不依赖对端 FileDone）；接收 `.part` 按 start 截断 + prefix 重哈希防部分伪造。
+  - P4 观察项（不行动，wire 不可达）：`mark_done` 多文件 else 分支为空占位（v1 节点全单文件构造，5 处 `files: vec![...]` 均单元素）；多文件 offer 的 sum/first 口径差仅在 wire 伪造 multi-file 时导致 `accept` 的 resume 校验失败（fail-closed，无内存/越界风险）。
+  - UTF-8 字节切片模式扫描（§181/§183 教训）：本模块无裸字节索引 String 的位置，干净。
+  - 验证：RED 在生产 `prune` 处 panic（`abandoned accept must expire`）→ GREEN；core lib 339（+1）全绿；`state_machines` file 3 项回归绿；`cargo check -p tetherly-node` 过；clippy（lib+tests）0 error；fmt 过。
 - **2026-11-21 §184 core/notify.rs + dedup.rs 深审（纯审查，零缺陷，全部 confirmed-design）**：
   - 范围：`crates/tetherly-core/src/notify.rs` 全 551 行 + `dedup.rs` 全 173 行；回访 §182 P4 观察项。
   - 审查结论（不修，确认为设计）：
