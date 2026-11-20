@@ -1861,6 +1861,61 @@ pub fn screen_size() -> (i32, i32) {
     (1920, 1080)
 }
 
+/// Smooth-wheel sub-detent accumulator (Windows hook, §176).
+///
+/// Product decision 2026-11-20: smooth (high-resolution) wheel scrolling IS
+/// a product promise — a precision wheel / trackpad emits WM_MOUSEWHEEL
+/// events with |raw| < WHEEL_DELTA (120) that the previous per-event
+/// `raw / 120` integer division dropped entirely, so fine scrolling did
+/// nothing until a full detent arrived in ONE event. The accumulator adds
+/// each raw delta into a running remainder and emits whole detents as
+/// wheel lines the moment the running total crosses ±120, preserving the
+/// direction and never inventing a detent from noise in a single event
+/// (the emitted unit count is still an integer; only the TIMING changed —
+/// sub-detent motion now accumulates across events instead of being
+/// discarded). Pure and stateless so it is unit-testable on every
+/// platform; the Windows hook holds the remainder in `hook_wheel_state`
+/// thread-local (LL wheel events all arrive on the one hook thread, same
+/// single-thread discipline as `hook_move_state`).
+pub(crate) const WHEEL_DELTA: i32 = 120;
+
+/// Add `raw` (the WM_MOUSEWHEEL/HWHEEL mouseData high word, in raw
+/// WHEEL_DELTA units) to the axis remainder; return the whole detents that
+/// became deliverable with this event (sign-preserving, may be 0).
+pub(crate) fn wheel_accumulate(remainder: &mut i32, raw: i32) -> i16 {
+    // Saturate against absurd accumulations rather than wrapping: i16
+    // lines out of a single event cannot overflow a i32 remainder, but a
+    // hostile stream of tiny deltas must not drift the remainder toward
+    // INT_MAX either — clamping at one screenful of detents is far beyond
+    // any physical wheel.
+    let next = remainder
+        .saturating_add(raw)
+        .clamp(-32 * WHEEL_DELTA, 32 * WHEEL_DELTA);
+    // Truncated division (not euclid): the remainder must keep the sign of
+    // the pending direction, so a -15 event holds -15 and does NOT emit
+    // (euclid's floor division would emit -1 immediately and park +105).
+    // A line emits exactly when the running total reaches ±120.
+    let lines = next / WHEEL_DELTA;
+    *remainder = next % WHEEL_DELTA;
+    lines.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+#[cfg(windows)]
+mod hook_wheel_state {
+    thread_local! {
+        static REMAINDER_X: std::cell::RefCell<i32> = const { std::cell::RefCell::new(0) };
+        static REMAINDER_Y: std::cell::RefCell<i32> = const { std::cell::RefCell::new(0) };
+    }
+
+    /// One WM_MOUSEWHEEL/HWHEEL raw delta through the accumulator. Returns
+    /// the (dx, dy) wheel lines deliverable with this event.
+    pub(super) fn accumulate(raw_x: i32, raw_y: i32) -> (i16, i16) {
+        let dy = REMAINDER_Y.with(|r| super::wheel_accumulate(&mut r.borrow_mut(), raw_y));
+        let dx = REMAINDER_X.with(|r| super::wheel_accumulate(&mut r.borrow_mut(), raw_x));
+        (dx, dy)
+    }
+}
+
 /// Arm/disarm the keyboard hook on the capture thread. The keyboard hook
 /// records real keystrokes, so it is only armed while the seat is on the
 /// remote machine; mouse capture stays on for edge-crossing detection and
@@ -2164,23 +2219,32 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                                 // Windows inject re-multiplies by 120).
                                 // Capturing `mouseData >> 16` verbatim and
                                 // re-scaling at inject amplified one notch by
-                                // 120x (§171-F). WHEEL_DELTA is fixed at 120;
-                                // finer-resolution wheels (smooth scrolling)
-                                // accumulate below one detent, so use a
-                                // sign-preserving round-down that never
-                                // invents a detent from sub-delta noise.
+                                // 120x (§171-F). §176: smooth (high-res)
+                                // wheels emit sub-detent deltas that a bare
+                                // `raw / 120` per event dropped entirely —
+                                // product decision 2026-11-20 makes smooth
+                                // wheel scrolling a promise, so accumulate
+                                // across events and emit whole detents as
+                                // they complete (never invents a detent from
+                                // one sub-delta event).
                                 let raw = (mi.mouseData >> 16) as i32;
-                                push(RawInput::Wheel {
-                                    dx: 0,
-                                    dy: (raw / 120) as i16,
-                                });
+                                let (dx_lines, dy_lines) = hook_wheel_state::accumulate(0, raw);
+                                if dx_lines != 0 || dy_lines != 0 {
+                                    push(RawInput::Wheel {
+                                        dx: dx_lines,
+                                        dy: dy_lines,
+                                    });
+                                }
                             }
                             WM_MOUSEHWHEEL => {
                                 let raw = (mi.mouseData >> 16) as i32;
-                                push(RawInput::Wheel {
-                                    dx: (raw / 120) as i16,
-                                    dy: 0,
-                                });
+                                let (dx_lines, dy_lines) = hook_wheel_state::accumulate(raw, 0);
+                                if dx_lines != 0 || dy_lines != 0 {
+                                    push(RawInput::Wheel {
+                                        dx: dx_lines,
+                                        dy: dy_lines,
+                                    });
+                                }
                             }
                             _ => {}
                         }
@@ -3891,6 +3955,62 @@ mod input_tests {
         assert_eq!(
             hook_move_state::advance(970, 1060, Some((965, 1070))),
             (5, -10)
+        );
+    }
+
+    /// §176: smooth-wheel sub-detent accumulation. Product decision
+    /// 2026-11-20: high-resolution wheel deltas must cross to the remote
+    /// instead of being dropped by the per-event `raw / 120` division.
+    #[test]
+    fn wheel_accumulator_emits_detents_across_sub_delta_events() {
+        let mut r = 0_i32;
+        // Sub-detent notch deltas (e.g. a precision wheel at 15 per event):
+        // nothing until the running total completes 120, then one line,
+        // remainder carried.
+        let mut lines = Vec::new();
+        for _ in 0..10 {
+            lines.push(wheel_accumulate(&mut r, 15));
+        }
+        assert_eq!(
+            lines.iter().filter(|&&l| l == 1).count(),
+            1,
+            "exactly one detent completes across 10 events of 15 (8*15=120)"
+        );
+        assert_eq!(r, 30, "10*15=150 minus one emitted detent = 30 carried");
+        // The detent completes on the 8th event; the 9th/10th stay
+        // sub-detent.
+        assert!(lines[7] == 1 && lines[8] == 0 && lines[9] == 0);
+
+        // Full-detent event still passes straight through.
+        let mut r = 0;
+        assert_eq!(wheel_accumulate(&mut r, 120), 1);
+        assert_eq!(r, 0);
+        assert_eq!(wheel_accumulate(&mut r, 240), 2);
+        assert_eq!(r, 0);
+
+        // Negative direction: sign-preserving, remainder never flips sign.
+        let mut r = 0;
+        assert_eq!(wheel_accumulate(&mut r, -15), 0);
+        assert_eq!(wheel_accumulate(&mut r, -15), 0);
+        assert_eq!(wheel_accumulate(&mut r, -90), -1, "total -120 completes");
+        assert_eq!(r, 0);
+        assert_eq!(wheel_accumulate(&mut r, -120), -1);
+
+        // Mixed direction unwinds instead of inventing motion: 90 up then
+        // 90 down nets a remainder of 0 with no line emitted.
+        let mut r = 0;
+        assert_eq!(wheel_accumulate(&mut r, 90), 0);
+        assert_eq!(wheel_accumulate(&mut r, -90), 0);
+        assert_eq!(r, 0);
+
+        // Hostile stream saturates instead of drifting/wrapping.
+        let mut r = 0;
+        for _ in 0..100_000 {
+            wheel_accumulate(&mut r, 119);
+        }
+        assert!(
+            r.abs() < WHEEL_DELTA,
+            "remainder stays a bounded fraction of one detent"
         );
     }
 

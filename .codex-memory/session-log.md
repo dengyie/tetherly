@@ -1585,3 +1585,15 @@
 - 验证：新增 `capture_spawn_claim_admits_exactly_one_contenting_caller`（8 线程竞争恰 1 胜者 + 释放可再占）；`cargo test -p tetherly-node --lib --locked` = 318 passed（基线 317+1）；clippy -D 级 0 lint；rustfmt + git diff --check 通过。
 - 文档：REVIEW_REMEDIATION_PLAN.md §5 条目划掉并记录定级 + §8 追加本批；todo.md 增 §175 条目。
 - 残余：随下个 tag 走 CI 三平台 + Android 门禁；无新增 manual-required。
+
+## 2026-11-20 · §176 smooth-wheel 子 detent 治理（本地定向 GREEN）
+- 决策：用户拍板「承诺平滑滚轮（修复）」——修复计划 §5 第 3 条 Needs-confirmation 销项。
+- 取证：Windows hook WM_MOUSEWHEEL/HWHEEL 每事件 `raw/120` 独立整除；精度滚轮单事件 |raw|<120 的增量被整体丢弃且无跨事件累积，远程端滚动无响应直至单事件凑满一格。macOS tap 直发行 delta、wire 协议（i16 行）与目标端注入均不受影响。
+- 修复（platform.rs）：
+  - `WHEEL_DELTA=120` 常量 + `wheel_accumulate` 纯函数：saturating 累积 → truncated `/`/`%`（保号余数）→ ±32 detent 钳制。
+  - `hook_wheel_state` thread-local 双轴余数（LL 滚轮事件单线程纪律同 hook_move_state）；两处 wheel 路径改走累积器，0 行事件不推空帧。
+  - 初版用 div_euclid：负向首事件即溢出 -1（余数 +105）——测试 RED 捕获，改 truncated 除法后负向余数保持待发方向。
+- 验证：`wheel_accumulator_emits_detents_across_sub_delta_events`（8×15 跨事件凑格、整格直通、负向保号、互抵不虚构、100k 敌意流饱和）；node lib 319/319；clippy 0 lint；rustfmt/diff-check 通过。
+- 编辑事故记录：本轮两次 Edit 误锚到相邻同名/相邻块（screen_size stub 撞 Linux cfg 属性、bogus 测试头被挤），均由编译/结构检查当场发现并修复——大文件 Edit 必须紧跟结构验证。
+- 文档：计划 §5 划线 + §8 追加；todo.md 增 §176 条目。
+- 残余：随下个 tag 走 CI；Windows 真机滚轮手感为 manual 观察项。

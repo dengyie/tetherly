@@ -150,7 +150,7 @@
 
 - client token 是否有意允许 daemon 以更高身份读取任意本地路径；若同机低权限进程属于威胁模型，路径发送和导出写入必须按 P1 权限漏洞处理。
 - ~~macOS hook 并发启动、Windows/macOS hook shutdown 是否要求 in-process 生命周期~~：**2026-11-20 已取证并修复**。并发启动竞态为 confirmed：`ensure_input_capture` 原为对 `input_capture_active` 的 check-then-act，而该标志在 `start_input_hooks` 返回（tap 就绪阻塞期间）后才置位——1s link-watcher tick 与 tunnel accept 路径可双双通过门控重复 spawn；macOS 侧第二次 `start_input_hooks` 无任何守卫，会产生孤儿 CGEventTap（持无主 `keyboard_armed` Arc，按陈旧状态吞/放事件），Windows 侧 SENDER OnceLock 会拒绝但此前已执行无谓的 `system_cursor::restore(true)`。修复：`Shared.input_capture_spawning` 原子单飞占坑（`try_claim/release`，失败重试可再占）+ macOS 进程级 `HOOKS_STARTED` 守卫（拒绝时报 "input hooks already started"，Accessibility 未授权路径释放占坑允许后续重试）。Shutdown 定级为 confirmed design：tap 设计为进程生命周期（dock-swipe 注释明示 teardown at process exit），会话拆线只经 `set_keyboard` disarm，不做 in-process 拆除。回归：`capture_spawn_claim_admits_exactly_one_contenting_caller`（8 线程竞争恰 1 胜者 + 释放可再占）；node lib 318/318。
-- Windows smooth-wheel 子 detent 是否属于产品协议承诺；若承诺平滑滚轮，按 P2 correctness 修复。
+- ~~Windows smooth-wheel 子 detent 是否属于产品协议承诺~~：**2026-11-20 已确认并修复**。用户拍板：平滑滚轮是产品承诺。取证：Windows hook `raw / 120` 每事件独立整除，高分辨率滚轮的子 detent 增量（|raw|<120）被整体丢弃且不跨事件累积，精度滚轮/触控板滚动在远程端无响应直至单事件凑满 120。修复：`wheel_accumulate` 纯函数累积器（truncated division 保号、余数携带待发方向、饱和上界防敌意流漂移）+ `hook_wheel_state` thread-local 双轴余数（LL 滚轮事件单线程纪律同 `hook_move_state`），WM_MOUSEWHEEL/HWHEEL 均改走累积路径，零行事件不再推空帧。wire 协议不变（行单位），macOS/目标端注入不动。回归：`wheel_accumulator_emits_detents_across_sub_delta_events`（子 detent 跨事件凑格、整格直通、负向保号、正负互抵不虚构滚动、敌意流饱和）；node lib 319/319。
 
 ### Capability gap，不是本轮 bugfix
 
@@ -217,4 +217,10 @@
   - 修复：`runtime.rs` Shared 增 `input_capture_spawning` 原子占坑；`ensure_input_capture`（input.rs）经 `try_claim_capture_spawn` 单飞 admit，spawn 完成后 `release_capture_spawn_claim`；争用方返回 Ok(true)（armed-pending，等下个 tick 复查）。`platform.rs` macOS 增进程级 `HOOKS_STARTED` 守卫（拒绝 "input hooks already started"；Accessibility 未授权路径先释放占坑）。Windows 侧已有 SENDER OnceLock，不重复设防。Shutdown 定级 confirmed design（tap 进程生命周期，注释已锚定）。
   - RED/GREEN：新增 `capture_spawn_claim_admits_exactly_one_contenting_caller`（8 线程并发 claim 恰 1 胜者；释放后可再占）。`cargo test -p tetherly-node --lib --locked` = **318 passed**（v0.2.68 基线 317 + 1）；`cargo clippy -p tetherly-node --lib --tests --locked` 0 lint；rustfmt / `git diff --check` 通过。
   - 残余：随下个 tag 走 CI 三平台 + Android 门禁后发布；无新增 manual-required 项。
+- **2026-11-20 §176 smooth-wheel 子 detent 治理（本地定向 GREEN，随下个版本发布）**：
+  - 范围：§5 Needs-confirmation 第 3 条。用户拍板（2026-11-20）：平滑滚轮属产品承诺，按 P2 correctness 修复。
+  - 取证：Windows hook `WM_MOUSEWHEEL`/`HWHEEL` 路径每事件 `raw / 120` 独立整除——高分辨率滚轮单事件 |raw|<120 的增量被整体丢弃且无跨事件累积；注释自称「sign-preserving round-down」与实际行为不符（丢弃即非保号语义，是静默丢失）。macOS tap 直发 CGEvent 行 delta 不受影响；wire 协议（i16 行单位）与目标端注入（×120 re-multiply / CG Line 单位）不变。
+  - 修复：`platform.rs` 新增 `WHEEL_DELTA` 常量 + `wheel_accumulate` 纯函数（saturating 累积、truncated `/`/`%` 保号余数、±32 detent 钳制）+ `hook_wheel_state` thread-local 双轴余数模块；Windows hook 两处 wheel 路径改走累积器，0 行事件不推送。初版用 `div_euclid` 在负向立即溢出 -1（RED 断言捕获），改 truncated 除法后负向余数保持待发方向。
+  - RED/GREEN：`wheel_accumulator_emits_detents_across_sub_delta_events` 覆盖子 detent 跨事件凑格（8×15）、整格直通、负向保号、正负互抵不虚构、100k 敌意小增量饱和。`cargo test -p tetherly-node --lib --locked` = **319 passed**（318+1）；clippy 0 lint；rustfmt / `git diff --check` 通过。
+  - 残余：随下个 tag 走 CI（Windows 真机滚轮手感为 Manual-required 观察项）；§5 Needs-confirmation 三项全部销项。
 - 后续每个批次必须在此追加：范围、RED/GREEN、CI run、release artifact、部署 health、回滚证据和 residual/manual 项。
