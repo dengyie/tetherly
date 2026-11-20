@@ -267,3 +267,11 @@
   - 其余 confirmed-design：Validator 边界完备（band/dwell/fast-push/grace/speed 全 clamp）；`offset.clamp(±8192)` 无溢出；`is_in_corner_zone` 语义正确；serde legacy 兼容默认值有 pin 测试。
   - 验证：core 337（+2）/ node 319 / net 13 回归全绿；clippy 双形态 0 error；fmt 过。
   - 残余：无新增 manual-required。
+- **2026-11-21 §182 core/frame.rs 深审（纯审查，零缺陷修复，全部 confirmed-design）**：
+  - 范围：`crates/tetherly-core/src/frame.rs` 全 710 行 + 下游取证（clip.rs `apply_remote`、filexfer.rs `offer_resumable`、notify.rs `ingest_push`、dedup.rs limiter/deduper、node notify/files/lifecycle 接收路径）。
+  - 审查结论（不修，确认为设计）：
+    - `INNER_PAYLOAD_MAX`（65535-16-12）是唯一预算源，crypto `tests/limits.rs` 钉死；`decode` 在 payload 分配后但加密前校验上限；MUST_UNDERSTAND fail-closed 且覆盖 input/screen 两命名空间；未知类型不带旗标保留（前向兼容）。
+    - `truncate_utf8` 字节边界回退是全库 String 截断规范（§181 已让 topology 复用）；`NotifyPush::truncate` cap title/body 各 4KiB + 剥离 URL actions，多字节 pin 测试在位。
+    - wire 层无 cap 的结构下游防线完备：`ClipSet` → `apply_remote`（CLIP_TEXT_MAX + sha256 绑定 + 4/s limiter）；`FileOffer` → `offer_resumable`（transfer_id 字符集 + 每文件 FILE_MAX 64GiB + sha256 格式 + INCOMING_MAX=256 表上限）；`TextMessage`/`ResourceHandoffFrame` from_payload 自带 cap。
+  - P4 观察项（不行动，登记备查）：`NotifyPush` 的 `uid`/`app_id`/`app_name` 无长度 cap，且 notify hub 的 `evict_expired` 仅在 UI 拉 activity/candidates 时触发（无周期任务）。Rate limiter（2/s 持续 + burst 10，per source）与 120s candidate TTL / 10min dedup 窗口约束下增长有界；正常 peer 字段为真实通知标识符（几十字节），仅理论最坏受 64KiB 帧上限。
+  - 残余：无新增 manual-required。

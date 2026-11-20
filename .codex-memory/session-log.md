@@ -1664,3 +1664,9 @@
 - P3：map_edge_exit_to_entry 8 个正交/同边 fallback 截断 vs 主分支 round-to-nearest，正交拓扑每次往返剪切 1px。修复：统一 scale()。
 - 验证：core 337（+2）/ node 319 / net 13 全绿；clippy 双形态 0 error；fmt 过。
 - 文档：计划 §8 追加；todo.md 增条目。
+
+## 2026-11-21 · §182 core/frame.rs 深审（零缺陷，全部 confirmed-design）
+- 范围：frame.rs 全 710 行 + 下游取证（clip.rs apply_remote、filexfer.rs offer_resumable、notify.rs ingest_push、dedup.rs、node notify/files/lifecycle 接收路径、前端 activity 轮询）。
+- 结论：帧层预算/校验/truncate 规范全闭环；各 wire 结构的下游防线完备。
+- P4 观察项（不行动）：NotifyPush uid/app_id/app_name 无 cap；notify hub evict_expired 仅 UI 拉取触发（无周期任务）。rate limiter + TTL 下增长有界，备查。
+- 文档：todo.md 增条目。
