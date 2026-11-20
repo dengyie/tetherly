@@ -223,4 +223,11 @@
   - 修复：`platform.rs` 新增 `WHEEL_DELTA` 常量 + `wheel_accumulate` 纯函数（saturating 累积、truncated `/`/`%` 保号余数、±32 detent 钳制）+ `hook_wheel_state` thread-local 双轴余数模块；Windows hook 两处 wheel 路径改走累积器，0 行事件不推送。初版用 `div_euclid` 在负向立即溢出 -1（RED 断言捕获），改 truncated 除法后负向余数保持待发方向。
   - RED/GREEN：`wheel_accumulator_emits_detents_across_sub_delta_events` 覆盖子 detent 跨事件凑格（8×15）、整格直通、负向保号、正负互抵不虚构、100k 敌意小增量饱和。`cargo test -p tetherly-node --lib --locked` = **319 passed**（318+1）；clippy 0 lint；rustfmt / `git diff --check` 通过。
   - 残余：随下个 tag 走 CI（Windows 真机滚轮手感为 Manual-required 观察项）；§5 Needs-confirmation 三项全部销项。
+- **2026-11-20 §177 前端/Tauri 层深审 + activity 通知风暴治理（本地定向 GREEN，随下个版本发布）**：
+  - 范围：`client/src-tauri/src`（events/proxy/token/tray/trayui/trayowner/lib）与 `client/src/lib`（transport/stores/App.svelte）全量通读。
+  - 审查结论（不修，确认为设计）：Tauri SSE 握手校验/idle 超时/last_event_id 续传/seq 去重完整（8 测试锚定）；http.ts SSE idle watchdog（reader.cancel）与 handshake timeout 正确；proxy read-to-EOF 有 daemon Content-Length+close 契约锚定；token 不进 WebView 边界干净；lib.rs ExitRequested 的同步 block_on 为退出一次性路径（2s 超时兜底）。
+  - 缺陷（confirmed）：`activity.changed` 通知风暴。daemon 在任一 Activity 主题事件（消息收发/handoff 更新/candidate 过期）上都整段重发全量 Activity 资源（hub.rs `Topic::Activity → ActivityChanged{activity}`），而 tray.rs `notice_for` 对每帧无状态重算 unread——用户不读消息就每次相关变更都弹同一条系统通知，handoff 未打开同理。
+  - 修复：`tray.rs` 新增 `NoticeSeen` 身份去重（HashSet：`msg:<id>` / `hand:<id>`，id 缺失时回退内容身份）；`notice_for` 增 `&mut NoticeSeen` 参数，只有**从未出现过**的 unread/un-opened 身份才计入通知正文（正文计数改为 fresh 数）；`lib.rs` SSE 转发 listener 持有跨帧 `Mutex<NoticeSeen>`。
+  - RED/GREEN：新增 `activity_republish_does_not_rebuzz_known_items`（同身份重发静默、新消息只报新增数、handoff 打开后新 handoff 报新增）；旧 `unread_activity_notifies_only_when_new` 迁移到新签名。`cargo test -p tetherly-shell --lib --locked` = **33 passed**（31+2）；clippy 0 lint；`pnpm test` 36 passed；`pnpm check` 0 errors。
+  - 残余：随下个 tag 走 CI（frontend/Tauri job + 三平台）。
 - 后续每个批次必须在此追加：范围、RED/GREEN、CI run、release artifact、部署 health、回滚证据和 residual/manual 项。

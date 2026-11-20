@@ -1597,3 +1597,19 @@
 - 编辑事故记录：本轮两次 Edit 误锚到相邻同名/相邻块（screen_size stub 撞 Linux cfg 属性、bogus 测试头被挤），均由编译/结构检查当场发现并修复——大文件 Edit 必须紧跟结构验证。
 - 文档：计划 §5 划线 + §8 追加；todo.md 增 §176 条目。
 - 残余：随下个 tag 走 CI；Windows 真机滚轮手感为 manual 观察项。
+
+## 2026-11-20 · §177 前端/Tauri 层深审 + activity 通知风暴治理（本地定向 GREEN）
+- 范围：client/src-tauri/src（events 613 行/proxy/token/tray/trayui/trayowner/lib）+ client/src/lib（transport/stores/App.svelte）全量通读。
+- 审查结论（确认为设计，不修）：
+  - Tauri SSE（events.rs）：握手 status+Content-Type 校验、idle 45s、last_event_id 续传、seq 去重/rewind 拒绝全部在位，8 个 loopback 测试锚定。
+  - http.ts SSE：handshake timeout + per-read idle watchdog（reader.cancel 后走既有 reconnect），正确。
+  - proxy.rs read-to-EOF：依赖 daemon Content-Length + Connection: close 契约，有 mock-daemon 回环测试锚定；path/method 白名单在位。
+  - token.rs：token 只在 Rust 进程，WebView 只见 invoke；client.token 优先级与 §4.4 一致。
+  - lib.rs ExitRequested 同步 block_on：退出一次性路径，2s 超时兜底，低风险记录。
+- 缺陷（confirmed）§177：activity.changed 通知风暴。daemon 侧任一 Activity 主题事件（MessageSent/Received、HandoffInboxUpdated、Candidate* 等）都整段重发全量 Activity 资源（hub.rs Topic::Activity → ActivityChanged）；tray.rs notice_for 每帧无状态重数 unread/opened_ms==null → 用户不读消息/不点开接续，每次相关变更都弹同一条通知（风暴）。
+- 修复：
+  - tray.rs：`NoticeSeen`（HashSet<String> 身份集）+ `notice_for(..., &mut NoticeSeen)`；unread message / un-opened handoff 按 `msg:<id>`/`hand:<id>` 记身份（缺 id 回退内容字段），只有本帧**新出现**的身份进正文计数；未重复身份静默。
+  - lib.rs：SSE EVENT_CHANNEL listener 持有跨帧 `Mutex<NoticeSeen>`（去重状态必须活过帧，不能放 notice_for 内部）。
+- 验证：新增 `activity_republish_does_not_rebuzz_known_items`（同身份重发静默 / 新消息只报 1 条新 / handoff 打开后新 handoff 报 1 个）；旧测试迁移新签名。shell tests 33 passed（31+2）；clippy 0 lint；pnpm test 36 passed；pnpm check 0 errors。
+- 文档：计划 §8 追加本批；todo.md 增 §177 条目。
+- 残余：随下个 tag 走 CI（frontend/Tauri job + 三平台）；§175/§176/§177 三批一起发版。

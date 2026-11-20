@@ -217,13 +217,39 @@ pub struct Notice {
     pub body: String,
 }
 
+/// Identity-based notification dedup for `activity.changed` (§177).
+///
+/// The daemon publishes the FULL Activity resource on every Activity-topic
+/// change (message sent/received, handoff dispatched, candidate expiry …),
+/// so a plain "unread > 0" test re-buzzes the SAME unread message on every
+/// unrelated frame for as long as the user leaves it unread. The gate
+/// remembers which item identities have already been surfaced; only a
+/// never-seen-before unread message / un-opened handoff notifies again.
+/// Reconnecting resets nothing deliberately: identities are stable.
+#[derive(Debug, Default)]
+pub struct NoticeSeen {
+    seen: std::collections::HashSet<String>,
+}
+
+impl NoticeSeen {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Decide whether a forwarded frame deserves a system notification.
 /// Rules (§6.2 acceptance: 系统通知):
 /// - seat → remote: a peer took over the keyboard/mouse NOW;
 /// - seat → local after remote: the wheel came back;
-/// - `activity.changed`: new unread inbound messages / handoffs (the
-///   snapshot resource carries everything, so count by arrival here).
-pub fn notice_for(seat_was_remote: bool, ty: &str, data: &serde_json::Value) -> Option<Notice> {
+/// - `activity.changed`: new unread inbound messages / handoffs — gated by
+///   [`NoticeSeen`] so a full-section republication never re-buzzes items
+///   the user already had surfaced (§177).
+pub fn notice_for(
+    seat_was_remote: bool,
+    ty: &str,
+    data: &serde_json::Value,
+    seen: &mut NoticeSeen,
+) -> Option<Notice> {
     match ty {
         "input.changed" => {
             let seat = data.get("seat").and_then(|v| v.as_str())?;
@@ -240,24 +266,50 @@ pub fn notice_for(seat_was_remote: bool, ty: &str, data: &serde_json::Value) -> 
             }
         }
         "activity.changed" => {
-            let unread_msgs = data["messages"]
+            // Collect identities of items worth surfacing THIS frame. Ids
+            // may be absent in degenerate payloads: fall back to content
+            // identity (text/url) so malformed entries still dedup by value.
+            let id_of = |x: &serde_json::Value, alt: &str| -> String {
+                match x["id"].as_str() {
+                    Some(id) => format!("{alt}:{id}"),
+                    None => format!("{alt}:~{}", x[alt]),
+                }
+            };
+            let mut fresh_msgs: Vec<&serde_json::Value> = Vec::new();
+            for m in data["messages"]
                 .as_array()
-                .map(|m| m.iter().filter(|x| x["read"] == false).count())
-                .unwrap_or(0);
-            let pending_handoffs = data["handoffs"]
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                if m["read"] == false {
+                    let key = id_of(m, "msg");
+                    if seen.seen.insert(key) {
+                        fresh_msgs.push(m);
+                    }
+                }
+            }
+            let mut fresh_handoffs: Vec<&serde_json::Value> = Vec::new();
+            for h in data["handoffs"]
                 .as_array()
-                .map(|h| h.iter().filter(|x| x["opened_ms"].is_null()).count())
-                .unwrap_or(0);
-            let total = unread_msgs + pending_handoffs;
-            if total == 0 {
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                if h["opened_ms"].is_null() {
+                    let key = id_of(h, "hand");
+                    if seen.seen.insert(key) {
+                        fresh_handoffs.push(h);
+                    }
+                }
+            }
+            if fresh_msgs.is_empty() && fresh_handoffs.is_empty() {
                 return None;
             }
             let mut parts = Vec::new();
-            if unread_msgs > 0 {
-                parts.push(format!("{unread_msgs} 条新消息"));
+            if !fresh_msgs.is_empty() {
+                parts.push(format!("{} 条新消息", fresh_msgs.len()));
             }
-            if pending_handoffs > 0 {
-                parts.push(format!("{pending_handoffs} 个待打开的接续"));
+            if !fresh_handoffs.is_empty() {
+                parts.push(format!("{} 个待打开的接续", fresh_handoffs.len()));
             }
             Some(Notice {
                 title: "Tetherly".into(),
@@ -412,10 +464,12 @@ mod tests {
 
     #[test]
     fn takeover_and_return_seat_changes_notify() {
+        let mut seen = NoticeSeen::new();
         let n = notice_for(
             false,
             "input.changed",
             &json!({"seat": "remote", "peer": "d1"}),
+            &mut seen,
         )
         .expect("takeover must notify");
         assert_eq!(n.body, "键鼠已被远端接管");
@@ -423,6 +477,7 @@ mod tests {
             true,
             "input.changed",
             &json!({"seat": "local", "peer": null}),
+            &mut seen,
         )
         .expect("return must notify");
         assert_eq!(n.body, "键鼠已回到本机");
@@ -430,16 +485,19 @@ mod tests {
 
     #[test]
     fn local_seat_transitions_do_not_notify() {
+        let mut seen = NoticeSeen::new();
         assert!(notice_for(
             false,
             "input.changed",
-            &json!({"seat": "local", "peer": null})
+            &json!({"seat": "local", "peer": null}),
+            &mut seen
         )
         .is_none());
         assert!(notice_for(
             true,
             "input.changed",
-            &json!({"seat": "remote", "peer": "d"})
+            &json!({"seat": "remote", "peer": "d"}),
+            &mut seen
         )
         .is_none());
     }
@@ -453,15 +511,89 @@ mod tests {
             ],
             "handoffs": [{"id": "h1", "opened_ms": null, "url": "https://x"}]
         });
-        let n = notice_for(false, "activity.changed", &data).expect("unread exists");
+        let mut seen = NoticeSeen::new();
+        let n = notice_for(false, "activity.changed", &data, &mut seen).expect("unread exists");
         assert_eq!(n.body, "1 条新消息，1 个待打开的接续");
         // Everything read/opened: silent.
         let quiet = json!({
             "messages": [{"id": "m1", "read": true}],
             "handoffs": [{"id": "h1", "opened_ms": 123}]
         });
-        assert!(notice_for(false, "activity.changed", &quiet).is_none());
+        assert!(notice_for(false, "activity.changed", &quiet, &mut seen).is_none());
         // Unrelated events never notify.
-        assert!(notice_for(false, "transfers.changed", &data).is_none());
+        assert!(notice_for(false, "transfers.changed", &data, &mut seen).is_none());
+    }
+
+    /// §177: the daemon republishes the FULL Activity resource on every
+    /// Activity-topic change. Without identity dedup, an unread message the
+    /// user leaves alone re-buzzed on each unrelated frame (per-frame count
+    /// was stateless). The seen-set must collapse the republish to silence
+    /// and surface only genuinely NEW identities.
+    #[test]
+    fn activity_republish_does_not_rebuzz_known_items() {
+        let frame = |extra: serde_json::Value| {
+            json!({
+                "messages": [
+                    {"id": "m1", "read": false, "text": "hi"},
+                    extra
+                ],
+                "handoffs": [{"id": "h1", "opened_ms": null, "url": "https://x"}]
+            })
+        };
+        let mut seen = NoticeSeen::new();
+        // First frame: both items surface.
+        let n = notice_for(
+            false,
+            "activity.changed",
+            &frame(json!({"id": "mX", "read": true})),
+            &mut seen,
+        )
+        .expect("first frame notifies");
+        assert_eq!(n.body, "1 条新消息，1 个待打开的接续");
+        // Same identities republished on an unrelated topic change (e.g. a
+        // message SENT elsewhere): silent.
+        assert!(
+            notice_for(
+                false,
+                "activity.changed",
+                &frame(json!({"id": "mX", "read": true})),
+                &mut seen
+            )
+            .is_none(),
+            "republished identical unread identities must not re-buzz"
+        );
+        // A genuinely NEW unread message notifies — with only the new count.
+        let n = notice_for(
+            false,
+            "activity.changed",
+            &frame(json!({"id": "m2", "read": false})),
+            &mut seen,
+        )
+        .expect("new message notifies");
+        assert_eq!(n.body, "1 条新消息");
+        // And it too stays silent from then on.
+        assert!(notice_for(
+            false,
+            "activity.changed",
+            &frame(json!({"id": "m2", "read": false})),
+            &mut seen
+        )
+        .is_none());
+        // A handoff opened then a NEW one arriving: only the new one counts.
+        let open1 = json!({
+            "messages": [{"id": "m1", "read": false}],
+            "handoffs": [{"id": "h1", "opened_ms": 999, "url": "u"}]
+        });
+        assert!(notice_for(false, "activity.changed", &open1, &mut seen).is_none());
+        let new_hand = json!({
+            "messages": [{"id": "m1", "read": false}],
+            "handoffs": [
+                {"id": "h1", "opened_ms": 999, "url": "u"},
+                {"id": "h2", "opened_ms": null, "url": "u2"}
+            ]
+        });
+        let n = notice_for(false, "activity.changed", &new_hand, &mut seen)
+            .expect("new handoff notifies");
+        assert_eq!(n.body, "1 个待打开的接续");
     }
 }

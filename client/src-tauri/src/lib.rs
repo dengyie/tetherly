@@ -97,6 +97,11 @@ pub fn run() {
             // connection never reconnects) the shell would never claim the
             // tray (production 2026-11-17).
             let fwd = handle.clone();
+            // §177: identity dedup for activity notifications — the daemon
+            // republishes the full Activity section on every related change,
+            // so the seen-set must live ACROSS frames (owned by this
+            // listener), not inside notice_for.
+            let notice_seen = std::sync::Mutex::new(tray::NoticeSeen::new());
             handle.listen(events::EVENT_CHANNEL, move |ev| {
                 if let Ok(frame) = serde_json::from_str::<events::WireEvent>(ev.payload()) {
                     // Desktop notifications (§6.2): seat takeover/return and
@@ -106,7 +111,20 @@ pub fn run() {
                         .try_state::<TrayUi<tauri::Wry>>()
                         .map(|ui| ui.on_event(true, &frame.ty, &frame.data))
                         .unwrap_or(false);
-                    if let Some(notice) = tray::notice_for(was_remote, &frame.ty, &frame.data) {
+                    let notice = notice_seen
+                        .lock()
+                        .map(|mut seen| {
+                            tray::notice_for(was_remote, &frame.ty, &frame.data, &mut seen)
+                        })
+                        .unwrap_or_else(|_| {
+                            tray::notice_for(
+                                was_remote,
+                                &frame.ty,
+                                &frame.data,
+                                &mut tray::NoticeSeen::new(),
+                            )
+                        });
+                    if let Some(notice) = notice {
                         use tauri_plugin_notification::NotificationExt;
                         let _ = fwd
                             .notification()
