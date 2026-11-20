@@ -1649,3 +1649,11 @@
 - 修复（P3）：FILE_CHUNK(core)↔CHUNK(net) 独立常量隐式耦合——const assert 编译期钉死 + 注释说明 fail-closed 后果。
 - 验证：net 28 / core 334 tests 全绿，clippy 0 error，fmt/diff-check 过。
 - 文档：计划 §8 追加；todo.md 增条目。
+
+## 2026-11-21 · §180 core/input.rs 深审（一处 P2 修复）
+- 范围：crates/tetherly-core/src/input.rs 全 2886 行（协议、InputServer/InputClient 状态机、band gate、far-push 回落、30+ 测试）+ 调用方取证（node runtime/input.rs:4414 Leave handler、platform.rs warp-echo gate）。
+- confirmed-design 要点：round-to-nearest norm/denorm 无剪切；band_safe_dock_y 泊 band 外（v0.2.26 教训）；wire economy 不发冗余 Move；InputClient seq 窗口去重 + release_all_inputs。
+- 缺陷（P2）：`on_remote_leave`（target Leave → controller 收回本地座位的唯一引擎路径）Top/Bottom 泊 y=1/height-1——band 内 + y≤8 into-edge 区；Leave handler 仅 disarm 键盘 hook，鼠标 hook 继续喂 drive_input_delta，stray dy≤0 事件 arm dwell → 120ms 后 re-cross（v0.2.26 ghost-controller 同机制）。force_local/far-push 回落已修，唯此路径遗漏。
+- 修复：Top/Bottom 改 band_safe_dock_y 泊位 + x=denorm_x(rem_x) 保位置映射；Left/Right 不动。RED（y=1 断言失败）→ GREEN。
+- 验证：core 335（+1）/ node lib 319 回归全绿；clippy 双形态 0 error；fmt 过。
+- 文档：计划 §8 追加；todo.md 增条目。

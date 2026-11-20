@@ -1365,11 +1365,28 @@ impl InputServer {
         self.buttons_down = 0;
         self.rem_frac_x = 0;
         self.rem_frac_y = 0;
+        // §180: dock Top/Bottom outside the redundancy band, same as
+        // `force_local` and the far-push return (v0.2.26 lesson). The old
+        // y=1 / height-1 park sat inside the band AND inside the y<=8
+        // into-edge zone, while the Leave handler only disarms the keyboard
+        // — the mouse hook keeps feeding `drive_input_delta`, so a stray
+        // dy<=0 event at the dock armed the band dwell and the next one
+        // re-crossed (ghost-controller class). Left/Right keep parking ON
+        // the edge: the horizontal edge has no band gate.
         match self.last_crossed_edge {
             ScreenEdge::Right => self.x = self.width.saturating_sub(1),
             ScreenEdge::Left => self.x = 1.min(self.width.saturating_sub(1)),
-            ScreenEdge::Top => self.y = 1.min(self.height.saturating_sub(1)),
-            ScreenEdge::Bottom => self.y = self.height.saturating_sub(1),
+            ScreenEdge::Top => {
+                self.y = self.band_safe_dock_y();
+                self.x = self.denorm_x(self.rem_x);
+            }
+            ScreenEdge::Bottom => {
+                self.y = self
+                    .height
+                    .saturating_sub(1)
+                    .saturating_sub(self.band_safe_dock_y());
+                self.x = self.denorm_x(self.rem_x);
+            }
         }
     }
 
@@ -2528,6 +2545,64 @@ mod tests {
             "real sustained edge push still crosses after the dwell"
         );
         assert_eq!(srv.seat(), CursorSeat::Remote);
+    }
+
+    #[test]
+    fn on_remote_leave_dock_never_recrosses_from_a_stray_quiet_event() {
+        // §180 twin of the v0.2.26 regression above, for the OTHER return
+        // path: when the target reports the cursor left through its entry
+        // edge, `on_remote_leave` parks the controller-side engine on the
+        // crossed edge. The old park put Top at y=1 / Bottom at height-1 —
+        // INSIDE the redundancy band AND inside the y<=8 into-edge zone —
+        // while the Leave handler only disarms the keyboard (the mouse hook
+        // keeps feeding drive_input_delta). Any stray dy<=0 event at that
+        // dock (warp echo missing the echo gate, window-server stray) armed
+        // the band dwell, and the next stray event 120ms later re-crossed —
+        // the same ghost-controller bounce the force_local / far-push
+        // returns already dock outside the band for.
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+        srv.set_tb_redundancy_band(24, 120, 6);
+
+        // Enter remote at Top, then have the target report the leave.
+        assert_eq!(srv.local_move_delta(960, 4, 0, -10), Some(ScreenEdge::Top));
+        let _ = srv.drain();
+        srv.on_remote_leave();
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let (lx, ly) = srv.local_pos();
+        assert!(ly > 24, "leave dock y={ly} must sit outside the 24px band");
+
+        // Stray quiet event at the leave dock must not re-cross.
+        assert_eq!(
+            srv.local_move_delta(lx, ly, 0, -2),
+            None,
+            "stray quiet event at the on_remote_leave dock must not re-cross"
+        );
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let _ = srv.drain();
+
+        // Bottom twin.
+        let mut bot = InputServer::new(1920, 1080);
+        bot.set_edge(ScreenEdge::Bottom);
+        bot.set_tb_redundancy_band(24, 120, 6);
+        assert_eq!(
+            bot.local_move_delta(960, 1076, 0, 10),
+            Some(ScreenEdge::Bottom)
+        );
+        let _ = bot.drain();
+        bot.on_remote_leave();
+        assert_eq!(bot.seat(), CursorSeat::Local);
+        let (bx, by) = bot.local_pos();
+        assert!(
+            by < 1080 - 24,
+            "leave dock y={by} must sit outside the bottom band"
+        );
+        assert_eq!(
+            bot.local_move_delta(bx, by, 0, 2),
+            None,
+            "stray quiet event at the bottom leave dock must not re-cross"
+        );
+        assert_eq!(bot.seat(), CursorSeat::Local);
     }
 
     #[test]

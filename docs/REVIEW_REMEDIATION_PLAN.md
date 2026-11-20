@@ -254,3 +254,9 @@
   - 缺陷（P3，confirmed，已修）：`tetherly_core::FILE_CHUNK`（frame.rs）与 `tetherly_net::filechan::CHUNK` 是两个独立定义的 64×1024 常量——节点 resume 用前者算 `.part` 对齐，wire 层用后者算 nonce counter 与 AAD 位置，属隐式耦合。漂移不会写坏数据（receiver `start % CHUNK != 0` fail-closed 拒绝），但会造成对等方互相 Handshake 拒绝的难排查现场。修复：filechan.rs 编译期 `const _: () = assert!(CHUNK == tetherly_core::FILE_CHUNK)` + 注释锚定（零运行时开销）。
   - 验证：net crate 28 tests 全绿（13+3+7+4+1）；clippy 0 error；rustfmt / `git diff --check` 过；core 334 passed 回归不变。
   - 残余：无新增 manual-required。
+- **2026-11-21 §180 core/input.rs 深审（一处 P2 修复：on_remote_leave band 内泊位）**：
+  - 范围：`crates/tetherly-core/src/input.rs` 全 2886 行通读（协议常量、InputServer/InputClient 状态机、band gate、far-push 回落、30+ 测试）+ 调用方取证（node `runtime/input.rs` Leave handler、`platform.rs` warp-echo gate）。
+  - 缺陷（P2，confirmed，已修）：`on_remote_leave`（target 发 Leave、controller 泵收回本地座位的唯一引擎回落路径）Top/Bottom 泊位在 y=1 / height-1——默认 24px 冗余 band 内部且在 `y<=8` into-edge 区；而 Leave handler 只 `disarm_input_capture`（仅键盘 hook），鼠标 hook 继续喂 `drive_input_delta`。泊位处任何 stray dy≤0 事件 arm 慢速 dwell，静默 120ms 后下一个 stray 事件即 re-cross——与 v0.2.26 ghost-controller 生产事故同机制。`force_local` 与 far-push 回落早已用 `band_safe_dock_y()` 泊到 band 外，唯独此路径遗漏。修复：Top/Bottom 改用 `band_safe_dock_y()` 泊位（与 force_local 完全一致），x 轴用 `denorm_x(rem_x)` 保持跨屏位置映射；Left/Right 泊位不动（水平边无 band gate）。
+  - 取证（确认现场可达）：warp-echo gate 有 250ms 时限与 2 次回声配额，错过 gate 的回声/settle 事件正是 v0.2.26 生产日志记录的 stray 来源（`hook_delta_is_bogus` 只挡 >半屏 位移）；band 配置默认 24px 每事件镜像进引擎；既有回归测试 `tb_band_dock_never_recrosses_from_a_stray_quiet_event` 只覆盖 force_local 泊位。
+  - RED：新测试 `on_remote_leave_dock_never_recrosses_from_a_stray_quiet_event`（Top/Bottom 双向：泊位必须 band 外 + 泊位处 stray 静默事件不得 re-cross）——修复前 y=1 断言失败。GREEN：core 335 passed（+1）；node lib 319 passed 回归不变；clippy 双形态（lib / lib+tests）0 error；rustfmt 过。
+  - 残余：无新增 manual-required。
