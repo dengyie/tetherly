@@ -1710,3 +1710,8 @@
 - P3：media command/state 无入口限流（同层 clip/notify/handoff 均有），每帧状态机+事件+audit。修复 MediaLimiter 5/s+burst10。
 - confirmed-design：media char_boundary 回退、RS handler §187 peer 绑定、camera chunk 双匹配、drag wire 预算。
 - 验证：RED→GREEN；node 324（+1）/ core 339 / clippy 0 / fmt 过。
+
+## 2026-11-21 · §191 core/ancs.rs 深审（纯审查，零缺陷）
+- DataAssembler 重组边界全安全；有界性 cap 全测试锚定；协议不变量（订阅序/串行 CP/重试 reset/PreExisting/Removed 清理）锚定。
+- P4 不行动：pending/events deadline 约束、received 含重复 attr、write 失败丢请求。
+- 无代码变更；不需要 CI（无 diff）。
