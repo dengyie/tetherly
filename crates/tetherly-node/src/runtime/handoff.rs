@@ -334,6 +334,23 @@ impl Node {
         let peer_str = peer.to_string();
         let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
 
+        // 0. §186: per-source rate limit ahead of any validation or disk work.
+        // Every accepted frame ends in an fsync'd atomic rewrite of the whole
+        // inbox, and the session pump is sequential — an unthrottled flood
+        // would stall every other frame type on the control session. Handoff
+        // is a low-frequency human action; clip (4/s) and notify (2/s) are
+        // already limited, this path must not be the exception.
+        if !self
+            .shared
+            .handoff_limiter
+            .lock()
+            .expect("handoff_limiter")
+            .allow(peer, now_ms)
+        {
+            debug!(peer = %peer, "inbound resource handoff rate-limited");
+            return;
+        }
+
         // 1. Strict URL validator firewall check
         let sanitized = {
             let allowlist = self.shared.allowlist.lock().expect("allowlist");

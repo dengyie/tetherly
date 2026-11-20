@@ -897,6 +897,8 @@ struct Shared {
     clipboard_delivery: Mutex<clipboard::ClipboardDeliveryState>,
     handoff_policy: Mutex<HandoffPolicy>,
     handoff_inbox: Mutex<HandoffInboxTable>,
+    /// §186: per-source rate limit ahead of the fsync'd inbox rewrite.
+    handoff_limiter: Mutex<tetherly_core::HandoffLimiter>,
     handoff_seq: AtomicU64,
     media_policy: Mutex<MediaControlPolicy>,
     local_media_state: Mutex<MediaStateFrame>,
@@ -2327,6 +2329,49 @@ mod handoff_engine_tests {
         let cleared = node.handoff_inbox_clear().unwrap();
         assert_eq!(cleared, 1);
         assert_eq!(node.handoff_inbox_list(None).len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §186: an inbound handoff flood must be rate-limited ahead of the fsync'd
+    /// inbox rewrite — the session pump is sequential, so every accepted frame
+    /// costs real disk latency against all other frame types. Burst 5 then 2/s.
+    #[test]
+    fn handoff_receive_flood_is_rate_limited() {
+        let (node, dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "handoff-flood",
+                5000,
+            );
+        let opener = Arc::new(crate::platform::MemoryOpener::new());
+        node.set_opener(opener);
+        let peer = DeviceId::from_id_pk(&[11u8; 32]);
+        let frame = |n: u32| ResourceHandoffFrame {
+            id: format!("ho_flood_{n}"),
+            url: "https://example.com/x".to_string(),
+            title: String::new(),
+            auto_open_requested: false,
+            timestamp_ms: 5000,
+        };
+        // Same clock tick: burst 5 admitted, the rest of a tight loop refused.
+        for n in 0..20u32 {
+            node.receive_resource_handoff(&peer, frame(n));
+        }
+        let listed = node.handoff_inbox_list(None).len();
+        assert!(
+            listed <= 5,
+            "burst cap must bound same-tick ingest, got {listed}"
+        );
+        // A later tick refills to the sustained rate (2 tokens/s).
+        clock.set(6000);
+        node.receive_resource_handoff(&peer, frame(99));
+        node.receive_resource_handoff(&peer, frame(100));
+        node.receive_resource_handoff(&peer, frame(101));
+        let listed = node.handoff_inbox_list(None).len();
+        assert!(
+            listed <= 5 + 2,
+            "sustained rate must stay 2/s, got {listed}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

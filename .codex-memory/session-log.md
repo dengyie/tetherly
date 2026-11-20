@@ -1684,3 +1684,8 @@
 - P3：prune 无条件保留 Accepted；auto-accept 下恶意对端 256 个 abandoned accept 饱和 INCOMING_MAX，接收永久瘫痪。修复 accepted_ms + ACCEPTED_TTL_MS=1h。
 - confirmed-design：is_safe_transfer_id 白名单、offer 校验序与所有权锁、resume 链（claim 三重校验→start!=hint 硬拒→HKDF AEAD→sidecar 对账）、发送方本地闭环。
 - 验证：core 339（+1）/ node check / clippy 双形态 0 / fmt 过。
+
+## 2026-11-21 · §186 core/handoff.rs 深审（一处 P3 修复）
+- P3：receive_resource_handoff 无限流 + 每帧 fsync 全 inbox 重写，session 泵可被对端洪水独占。修复 HandoffLimiter 2/s+burst5 入口前置。
+- confirmed-design：validator 切片安全（ASCII 分隔符论证）、allowlist fail-closed、SystemOpener 无 shell。
+- 验证：core 339 / node 320（+1）/ clippy 0 / fmt 过。

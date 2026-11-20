@@ -571,6 +571,7 @@ impl Node {
             ),
             handoff_policy: Mutex::new(initial_handoff_policy),
             handoff_inbox: Mutex::new(initial_handoff_inbox),
+            handoff_limiter: Mutex::new(tetherly_core::HandoffLimiter::default()),
             handoff_seq: AtomicU64::new(0),
             media_policy: Mutex::new(initial_media_policy),
             local_media_state: Mutex::new(MediaStateFrame {

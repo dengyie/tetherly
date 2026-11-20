@@ -129,6 +129,24 @@ impl ClipLimiter {
     }
 }
 
+/// §186: resource handoff 2/s, burst 5. Low-frequency human action; every
+/// accepted frame ends in an fsync'd inbox rewrite, so the ingest path must
+/// not be unthrottled (clip/notify are limited the same way).
+#[derive(Debug, Default)]
+pub struct HandoffLimiter {
+    per_source: HashMap<DeviceId, TokenBucket>,
+}
+
+impl HandoffLimiter {
+    pub fn allow(&mut self, source: &DeviceId, now_ms: u64) -> bool {
+        let bucket = self
+            .per_source
+            .entry(source.clone())
+            .or_insert_with(|| TokenBucket::new(2.0, 5.0, now_ms));
+        bucket.try_take(now_ms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

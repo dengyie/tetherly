@@ -83,7 +83,7 @@ pub use clip::{
     ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ClipSyncMode, SensitiveContentGuard,
     SensitiveLeakReason, MAX_CLIP_HISTORY,
 };
-pub use dedup::{ClipLimiter, NotifyLimiter, TcpLimiter, TokenBucket};
+pub use dedup::{ClipLimiter, HandoffLimiter, NotifyLimiter, TcpLimiter, TokenBucket};
 pub use device_id::DeviceId;
 pub use drag::{
     denormalize_coord, normalize_coord, DragCancelReason, DragControlMsg, DragPhase, DragSession,
