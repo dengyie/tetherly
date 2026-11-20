@@ -2560,6 +2560,8 @@ impl Node {
 
     /// §175 single-flight admission for the hook spawn. `true` = this
     /// caller owns the spawn; `false` = another spawn is in flight.
+    // Linux builds never call these (no hooks); the claim test still runs.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     fn try_claim_capture_spawn(&self) -> bool {
         self.shared
             .input_capture_spawning
@@ -2574,6 +2576,7 @@ impl Node {
 
     /// Release the spawn claim after the spawn completed (success or
     /// failure), so a later retry can claim it.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     fn release_capture_spawn_claim(&self) {
         self.shared
             .input_capture_spawning

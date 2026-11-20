@@ -478,7 +478,12 @@ struct Shared {
     /// returns (the tap thread blocks on tap readiness), so gating on the
     /// flag alone let two concurrent callers (link-watcher tick vs tunnel
     /// accept) both spawn hooks. The claim is taken atomically before the
-    /// spawn and released on completion/failure.
+    /// spawn and released on completion/failure. Only read/written on
+    /// Windows/macOS (Linux has no hooks), hence the lint carve-out.
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        allow(dead_code) // single-flight claim test still exercises it
+    )]
     input_capture_spawning: std::sync::atomic::AtomicBool,
     pub(crate) input_hook_control: Mutex<Option<crate::platform::HookControl>>,
     /// Frames outbound to the screen controller on 45720. None until attached.

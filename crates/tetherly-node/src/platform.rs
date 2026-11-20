@@ -1877,11 +1877,14 @@ pub fn screen_size() -> (i32, i32) {
 /// platform; the Windows hook holds the remainder in `hook_wheel_state`
 /// thread-local (LL wheel events all arrive on the one hook thread, same
 /// single-thread discipline as `hook_move_state`).
+// Non-Windows builds reference these only from the unit tests.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const WHEEL_DELTA: i32 = 120;
 
 /// Add `raw` (the WM_MOUSEWHEEL/HWHEEL mouseData high word, in raw
 /// WHEEL_DELTA units) to the axis remainder; return the whole detents that
 /// became deliverable with this event (sign-preserving, may be 0).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn wheel_accumulate(remainder: &mut i32, raw: i32) -> i16 {
     // Saturate against absurd accumulations rather than wrapping: i16
     // lines out of a single event cannot overflow a i32 remainder, but a
