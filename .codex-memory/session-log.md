@@ -1642,3 +1642,10 @@
 - main CI（44755121390）success。
 - Obsidian 速记已落 `00.MOC/生产变更速记.md`；doc-check PASS 4/4。
 - Manual-required 残余（不随本发布阻塞）：Windows 真机滚轮手感（§176 观察项）、Android 15 dataSync timeout/长稳、partial/sidecar 现场观察、双端部署（待用户安排 deploy 窗口）。
+
+## 2026-11-20 · §179 net 层深审（一处 P3 修复）
+- 范围：crates/tetherly-net 全 5 模块（filechan 869 / session 750 / dispatch 269 / codec 133 / mdns 125）。
+- confirmed-design 要点：session rekey 取消安全 + outbox 进度跨 cancel；pairing trust 后置提交失败回滚；codec TaggedReader 敌意长度不预分配；filechan 三级显式 deadline + AAD 通道位置绑定 + header 即拒 cap；mdns 精确实例匹配。
+- 修复（P3）：FILE_CHUNK(core)↔CHUNK(net) 独立常量隐式耦合——const assert 编译期钉死 + 注释说明 fail-closed 后果。
+- 验证：net 28 / core 334 tests 全绿，clippy 0 error，fmt/diff-check 过。
+- 文档：计划 §8 追加；todo.md 增条目。

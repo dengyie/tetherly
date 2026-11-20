@@ -24,6 +24,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub const FILE_MAGIC: [u8; 4] = *b"TFL1";
 pub const FILE_MAGIC_V2: [u8; 4] = *b"TFL2";
 pub const CHUNK: usize = 64 * 1024;
+// The node's resume logic aligns `.part` lengths with `tetherly_core::FILE_CHUNK`
+// while the wire layer below computes nonce counters and chunk AADs from this
+// `CHUNK`. The two constants are defined independently, so pin their equality
+// at compile time: a drift would make every resumed transfer fail closed at the
+// `start % CHUNK` guard instead of corrupting data, but also silently wedge
+// both peers into mutual refusals that are painful to diagnose.
+const _: () = assert!(CHUNK == tetherly_core::FILE_CHUNK);
 /// Maximum idle time allowed while an unauthenticated file peer sends its
 /// framing header. The listener admission permit remains held for this entire
 /// attempt, so this must stay short and explicit.

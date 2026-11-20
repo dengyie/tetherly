@@ -243,3 +243,14 @@
   - 定级：本批无 RED/GREEN（零代码变更）；node lib 测试基线维持 319。
   - 残余：无新增 manual-required。§175/§176/§177 三批随 v0.2.69 发布。
 - 后续每个批次必须在此追加：范围、RED/GREEN、CI run、release artifact、部署 health、回滚证据和 residual/manual 项。
+- **2026-11-20 §179 net 层深审（filechan/session/codec/dispatch/mdns，一处 P3 修复）**：
+  - 范围：`crates/tetherly-net/src` 全 5 模块通读——`filechan.rs`（869 行）、`session.rs`（750 行）、`dispatch.rs`（269 行）、`codec.rs`（133 行）、`mdns.rs`（125 行）。
+  - 审查结论（不修，确认为设计）：
+    - `session.rs`：Batch 2d `flush_outbox_bounded` 覆盖 send/recv/rekey 全路径；rekey 取消安全（m1 先入 outbox、`rekey_state` 停车跨 await 恢复、responder m2+换 transport 同步原子步）；pairing fail_lock / trust 在 Noise 成功后才提交 / Noise 失败回滚 trust 全闭环；`TaggedReader` 会话侧 outbox 进度跨 cancel 保留。
+    - `codec.rs`：`TaggedReader` 取消安全（header/body 部分读状态跨 select! cancel 保留）；MAX_OUTER 在 body 分配前拒绝（敌意长度不预分配）。
+    - `filechan.rs`：Batch 2b/2c 上界全在位（HEADER 3s / CHUNK 15s / TOTAL 30min，均为显式 deadline）；AAD `id||chan_offset` 绑定通道位置防跨 resume 重放；`total > max_size` 在 header 即拒绝（不读不缓冲）；截断流报错而非静默短文件；`recv_chunks_to_sink` O(1) 内存 + 增量 sha256。
+    - `dispatch.rs`：纯 from_payload 映射表，Unknown 透传不炸。
+    - `mdns.rs`：instance 精确匹配防前缀误删（有测试）；LAN 地址过滤复用 `should_listen`。
+  - 缺陷（P3，confirmed，已修）：`tetherly_core::FILE_CHUNK`（frame.rs）与 `tetherly_net::filechan::CHUNK` 是两个独立定义的 64×1024 常量——节点 resume 用前者算 `.part` 对齐，wire 层用后者算 nonce counter 与 AAD 位置，属隐式耦合。漂移不会写坏数据（receiver `start % CHUNK != 0` fail-closed 拒绝），但会造成对等方互相 Handshake 拒绝的难排查现场。修复：filechan.rs 编译期 `const _: () = assert!(CHUNK == tetherly_core::FILE_CHUNK)` + 注释锚定（零运行时开销）。
+  - 验证：net crate 28 tests 全绿（13+3+7+4+1）；clippy 0 error；rustfmt / `git diff --check` 过；core 334 passed 回归不变。
+  - 残余：无新增 manual-required。
