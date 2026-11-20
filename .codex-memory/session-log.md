@@ -1675,3 +1675,7 @@
 - P3：SensitiveContentGuard::is_aws_key_at 字节切片 panic——本地剪贴板含 AKIA/ASIA+多字节文本即崩 auto-sync 轮询（node clipboard.rs:754）。修复：字符边界回退。
 - 其余 confirmed-design：preview/commit 分离、echo 防环、apply_remote 顺序、环形历史、guard 其余检测无切片。
 - 验证：core 338（+1）/ node 319；clippy 双形态 0；fmt 过。
+
+## 2026-11-21 · §184 core/notify.rs + dedup.rs 深审（零缺陷）
+- 全部 confirmed-design；§182 P4 观察项回访后维持不行动（candidates TTL 驱动 / replies 覆盖式，皆有界）。
+- 无代码变更，core 基线 338 不变。

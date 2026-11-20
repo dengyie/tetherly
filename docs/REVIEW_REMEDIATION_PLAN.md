@@ -279,4 +279,12 @@
   - 缺陷（P3，confirmed，已修）：`SensitiveContentGuard::is_aws_key_at` 用裸字节切片 `&remainder[..20]` / `&key_candidate[4..20]` 提取 AWS key 窗口——多字节 UTF-8 字符跨字节 20 边界时 panic（独立 rustc 程序证明）。可达路径非 wire 而是本地系统剪贴板：复制一段含 "AKIA"/"ASIA" + 中文/emoji 的普通文本（日志片段、OCR 输出），周期性 auto-sync 轮询即 panic 崩溃剪贴板同步任务。修复：按字符边界回退取窗口（`is_char_boundary` 循环），短窗口只可能 under-match 不可能误检；20 字节 ASCII 真 key 检测不变（pin 断言）。
   - 其余 confirmed-design：preview/commit 分离（全 peer 入队才提交 hash/seq）；echo 防环 hash 相等即 Echo；apply_remote 检查顺序 limiter→echo→text→size→hash 绑定；seq 单调 max 合并；MAX_CLIP_HISTORY=32 环形有界；其余 guard 检测（PEM/GitHub/OpenAI/Slack/JWT/密码管理器）全部 contains/split 无切片风险。
   - 验证：core 338（+1）/ node 319 回归全绿；clippy 双形态 0 error；fmt 过。
+- **2026-11-21 §184 core/notify.rs + dedup.rs 深审（纯审查，零缺陷，全部 confirmed-design）**：
+  - 范围：`crates/tetherly-core/src/notify.rs` 全 551 行 + `dedup.rs` 全 173 行；回访 §182 P4 观察项。
+  - 审查结论（不修，确认为设计）：
+    - `ingest_push` 检查序正确：truncate → rate limit（2/s+burst10 per source）→ dedup（10min 窗口 retain 驱逐）→ OTP 本地提取 → insert；`candidate_id` 含 ts 的 sha256 无碰撞注入面。
+    - `TokenBucket` 数学正确（elapsed 饱和减法防时钟回拨、token 封顶 burst）；三个 limiter 的 map key 为强类型 `DeviceId`/`IpAddr`，按已认证源数有界。
+    - Reply 队列无 TTL 但有界性成立：wire 路径 `NotifyReply::from_payload` 强制 truncate（text ≤ 4KiB）；`replies` keyed by `reply_id(source, app_id, uid)` 覆盖式 last-write-wins（同通知重复 reply 不增长）；take-once 语义有 pin 测试。§182 P4 观察项维持「不行动」：candidates（TTL 驱动）与 replies（覆盖式）皆有界。
+    - 零明文纪律全链路：text/title/OTP 不入 tracing/Debug/ReplyView；`copy_otp` 三分支（unknown/expired/live）语义完整。
+  - 无代码变更；core 测试基线 338 不变。
   - 残余：无新增 manual-required。
