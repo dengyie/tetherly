@@ -1715,3 +1715,10 @@
 - DataAssembler 重组边界全安全；有界性 cap 全测试锚定；协议不变量（订阅序/串行 CP/重试 reset/PreExisting/Removed 清理）锚定。
 - P4 不行动：pending/events deadline 约束、received 含重复 attr、write 失败丢请求。
 - 无代码变更；不需要 CI（无 diff）。
+
+## 2026-11-21 · §192 core 根目录收尾三模块深审（gesture_map/microphone/audio_routing，两处修复）
+- 调用链取证：platform 源自 peer hello / std::env::consts::OS（input_peer_platform → live peer 表；"darwin" 可达 sequence_for，且 "darwin".contains("win")==true）；audio detach 哨兵直接参与 session_id == 比较。
+- 修复①（P2）：sequence_for mac/darwin/ios 判断前置 + to_ascii_lowercase；RED（旧逻辑 darwin 得 Alt+Tab）→ GREEN（darwin_platform_routes_to_macos_backend）。
+- 修复②（P3）：audio_routing Attach/Detach sanitize 哨兵 "invalid_audio_session" 改 blank 模式（clear()），对齐 remote_session.rs no-sentinel 不变量；RED → GREEN（sanitize_blanks_invalid_session_id_not_sentinel）。
+- 验证：core 341（+2）/ node gesture 8 + audio_routing 2 回归绿；clippy 双形态 0 error；fmt 过；CI 提交后权威门禁。
+- microphone.rs 全 confirmed-design；core 根目录全部审毕，下一批 screen/（~26k 行分批）。

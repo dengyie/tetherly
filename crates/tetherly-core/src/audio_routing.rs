@@ -201,9 +201,14 @@ fn default_volume_gain() -> f32 {
 }
 
 impl AudioRoutingAttachFrame {
+    /// §192: an invalid session id is blanked, not aliased to a sentinel.
+    /// The empty string fails `validate_session_id`, so validate-first guards
+    /// downstream stay reachable, and no two malformed peers can ever share
+    /// the synthetic `"invalid_audio_session"` id.
     pub fn sanitize(&mut self) {
-        self.session_id = AudioRoutingValidator::validate_session_id(&self.session_id)
-            .unwrap_or_else(|_| "invalid_audio_session".to_string());
+        if AudioRoutingValidator::validate_session_id(&self.session_id).is_err() {
+            self.session_id.clear();
+        }
         if self.volume_gain < 0.0 || self.volume_gain > 2.0 || self.volume_gain.is_nan() {
             self.volume_gain = 1.0;
         }
@@ -237,9 +242,13 @@ pub struct AudioRoutingDetachFrame {
 }
 
 impl AudioRoutingDetachFrame {
+    /// §192: blank-not-sentinel, mirroring `AudioRoutingAttachFrame::sanitize`
+    /// and the remote_session invariant — a blanked id still matches nothing,
+    /// so teardown falls back to the peer-only half-open match at the caller.
     pub fn sanitize(&mut self) {
-        self.session_id = AudioRoutingValidator::validate_session_id(&self.session_id)
-            .unwrap_or_else(|_| "invalid_audio_session".to_string());
+        if AudioRoutingValidator::validate_session_id(&self.session_id).is_err() {
+            self.session_id.clear();
+        }
         if let Some(ref r) = self.reason {
             self.reason = Some(AudioRoutingValidator::sanitize_reason(r));
         }
@@ -485,5 +494,52 @@ mod tests {
 
         let clean_reason = AudioRoutingValidator::sanitize_reason("normal \x00reason\t");
         assert_eq!(clean_reason, "normal reason");
+    }
+
+    /// §192: sanitize must blank an invalid session id, not alias it to the
+    /// `"invalid_audio_session"` sentinel — two malformed peers must never
+    /// share a synthetic id, and the blank id must fail `validate_session_id`
+    /// so validate-first guards stay reachable.
+    #[test]
+    fn sanitize_blanks_invalid_session_id_not_sentinel() {
+        let mut att = AudioRoutingAttachFrame {
+            session_id: "bad id;drop-table".into(),
+            source_id: "host".into(),
+            sink_id: "speaker".into(),
+            layout: AudioChannelLayout::Stereo,
+            sample_rate: 48000,
+            channels: 2,
+            format: AudioSampleFormat::S16Le,
+            codec: AudioStreamCodec::RawPcm,
+            spatial_pos: None,
+            volume_gain: 1.0,
+            timestamp_ms: 0,
+        };
+        att.sanitize();
+        assert_eq!(att.session_id, "");
+        assert!(AudioRoutingValidator::validate_session_id(&att.session_id).is_err());
+        // The valid range clamp still applies alongside the blank rule.
+        att.volume_gain = 9.0;
+        att.sanitize();
+        assert_eq!(att.volume_gain, 1.0);
+
+        let mut det = AudioRoutingDetachFrame {
+            session_id: "bad\0id".into(),
+            reason: Some("peer left".into()),
+            timestamp_ms: 0,
+        };
+        det.sanitize();
+        assert_eq!(det.session_id, "");
+        assert!(AudioRoutingValidator::validate_session_id(&det.session_id).is_err());
+        assert_eq!(det.reason.as_deref(), Some("peer left"));
+
+        // A valid id passes through sanitize unchanged.
+        let mut ok = AudioRoutingDetachFrame {
+            session_id: "audio-sess-001".into(),
+            reason: None,
+            timestamp_ms: 0,
+        };
+        ok.sanitize();
+        assert_eq!(ok.session_id, "audio-sess-001");
     }
 }

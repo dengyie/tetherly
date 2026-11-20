@@ -347,12 +347,20 @@ impl GestureMap {
 
     /// Full sequence for a gesture on a target platform, honoring the map.
     /// `None` steps produce an empty vec — callers treat that as "no-op".
+    ///
+    /// §192: platform matching must test "mac"/"darwin" BEFORE "win" — the
+    /// wire platform string is `std::env::consts::OS`, so a macOS peer
+    /// announces "macos" (or "darwin" via the hello override), and
+    /// `"darwin".contains("win")` is true: matching "win" first would
+    /// misroute every such peer to the Windows backend, whose Alt+Tab shape
+    /// has no macOS meaning.
     pub fn sequence_for(&self, gesture: GestureId, target_platform: &str) -> Vec<GestureKeyStep> {
         let action = self.action_for(gesture);
-        if target_platform.contains("win") {
-            windows_backend(action)
-        } else if target_platform.contains("mac") {
+        let p = target_platform.to_ascii_lowercase();
+        if p.contains("mac") || p.contains("darwin") || p.contains("ios") {
             macos_backend(action)
+        } else if p.contains("win") {
+            windows_backend(action)
         } else {
             // Unknown platform: Windows-style is the wire default.
             windows_backend(action)
@@ -585,5 +593,33 @@ mod tests {
         assert_eq!(m, back);
         // serde renames are the storage format — snake_case strings.
         assert!(s.contains("app_switch_next"));
+    }
+
+    /// §192: the wire platform string is `std::env::consts::OS` ("macos"),
+    /// but the peer table can also carry "darwin" (hello override / mDNS
+    /// text records). "dar**win**" contains "win", so testing "win" before
+    /// "mac" misrouted macOS peers to the Windows backend — whose Alt+Tab
+    /// shape has no macOS meaning and ships no Cmd+` shortcut.
+    #[test]
+    fn darwin_platform_routes_to_macos_backend() {
+        let m = GestureMap::default();
+        // Cmd+` shape (LWIN down, grave tap, LWIN up) — NOT Windows Alt+Tab.
+        assert_eq!(
+            m.sequence_for(GestureId::Swipe4Left, "darwin"),
+            vec![
+                step(0x5B, true),
+                step(0xC0, true),
+                step(0xC0, false),
+                step(0x5B, false)
+            ]
+        );
+        // ShowDesktop stays honestly unmapped on macOS for darwin too.
+        let remapped = GestureMap {
+            swipe4_down: GestureAction::ShowDesktop,
+            ..GestureMap::default()
+        };
+        assert!(remapped
+            .sequence_for(GestureId::Swipe4Down, "darwin")
+            .is_empty());
     }
 }
