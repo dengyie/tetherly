@@ -1627,3 +1627,18 @@
 - 定级：本批无 RED/GREEN（零代码变更）；node lib 基线 319。
 - 文档：计划 §8 追加；todo.md 增 §178 条目。
 - 下一步：v0.2.69 发布（§175/§176/§177 攒批 + §178 审查结论）——版本四文件 bump、tag、CI 门禁。
+
+## 2026-11-20 · v0.2.69 发布 + CI 死代码 lint 热修
+- 版本 bump：Cargo.toml workspace / Cargo.lock（cargo update 同步）/ client/package.json / client/src-tauri/tauri.conf.json → 0.2.69；release workflow 校验 tag==三文件版本。
+- 首发 tag v0.2.69（1e30c07）触发 CI 后发现：上一轮 main CI 已红——clippy 的 lib-only（无 --tests）构建把 §176 WHEEL_DELTA/wheel_accumulate 与 §175 spawn-claim 判死代码（这些符号只被 Windows hook / windows+macOS cfg 路径引用，测试引用让本地 --tests 检查漏掉了）。macOS/Ubuntu check 双红，Windows 不红（符号真被引用）。
+- 热修 73f2721：cfg_attr(not(windows)/not(any(windows,macOS))) allow(dead_code) + 注释锚定原因；本地复核 cargo clippy -p tetherly-node --lib（rc=0，仅遗留 2 个 workspace-manifest 旧 warning）与 --tests（0 error）双过；319 tests GREEN；fmt/diff-check 过。
+- tag 重打：取消首发 release run（44753838397，防陈旧 artifact），远端删 tag → 重指 73f2721 → push。
+- 教训：本地定向门禁必须包含与 CI 相同形态的检查（lib-only clippy），不能只用 --tests 形态；「测试引用掩盖非测试目标死代码」属系统性盲区。
+
+## 2026-11-20 · v0.2.69 发布完成
+- CI v0.2.69（44755134354）六 job 全绿：mac/ubuntu/win check + android + frontend + deny。
+- release（44755134347）九 job 全绿：prepare/frontend/build-android/bundle-desktop×2/build-linux/build-desktop×2/publish。
+- 正式发布 **Tetherly v0.2.69**（isDraft=false）：12 assets — Tetherly_0.2.69_aarch64.dmg / Tetherly_0.2.69_x64_en-US.msi / tetherly-{macos-arm64,windows-x86_64.exe,linux-x86_64} / tetherly-cli-{三平台} / tetherly-viewer-macos-arm64 / tetherly-android-arm64-v8a.apk / libtetherly_android-arm64-v8a.so / SHA256SUMS。
+- main CI（44755121390）success。
+- Obsidian 速记已落 `00.MOC/生产变更速记.md`；doc-check PASS 4/4。
+- Manual-required 残余（不随本发布阻塞）：Windows 真机滚轮手感（§176 观察项）、Android 15 dataSync timeout/长稳、partial/sidecar 现场观察、双端部署（待用户安排 deploy 窗口）。
