@@ -149,7 +149,7 @@
 ### Needs confirmation
 
 - client token 是否有意允许 daemon 以更高身份读取任意本地路径；若同机低权限进程属于威胁模型，路径发送和导出写入必须按 P1 权限漏洞处理。
-- macOS hook 并发启动、Windows/macOS hook shutdown 是否要求 in-process 生命周期；先补并发启动、重复 Node、shutdown 后 worker/tap 存活测试再定级。
+- ~~macOS hook 并发启动、Windows/macOS hook shutdown 是否要求 in-process 生命周期~~：**2026-11-20 已取证并修复**。并发启动竞态为 confirmed：`ensure_input_capture` 原为对 `input_capture_active` 的 check-then-act，而该标志在 `start_input_hooks` 返回（tap 就绪阻塞期间）后才置位——1s link-watcher tick 与 tunnel accept 路径可双双通过门控重复 spawn；macOS 侧第二次 `start_input_hooks` 无任何守卫，会产生孤儿 CGEventTap（持无主 `keyboard_armed` Arc，按陈旧状态吞/放事件），Windows 侧 SENDER OnceLock 会拒绝但此前已执行无谓的 `system_cursor::restore(true)`。修复：`Shared.input_capture_spawning` 原子单飞占坑（`try_claim/release`，失败重试可再占）+ macOS 进程级 `HOOKS_STARTED` 守卫（拒绝时报 "input hooks already started"，Accessibility 未授权路径释放占坑允许后续重试）。Shutdown 定级为 confirmed design：tap 设计为进程生命周期（dock-swipe 注释明示 teardown at process exit），会话拆线只经 `set_keyboard` disarm，不做 in-process 拆除。回归：`capture_spawn_claim_admits_exactly_one_contenting_caller`（8 线程竞争恰 1 胜者 + 释放可再占）；node lib 318/318。
 - Windows smooth-wheel 子 detent 是否属于产品协议承诺；若承诺平滑滚轮，按 P2 correctness 修复。
 
 ### Capability gap，不是本轮 bugfix
@@ -212,4 +212,9 @@
   - 文档治理：Obsidian `doc-check` PASS 4/4；canonical 速读基线更新至 v0.2.66 双端部署。
   - Manual-required 残余（不阻塞本发布）：Android 15 真机 dataSync timeout/长稳、timeout/shutdown 后 partial/sidecar 策略长期现场观察、Windows smooth-wheel detent 产品承诺确认。
 - **发布结论**：v0.2.66 已发布并双端部署，P1/P2 修复全量上线；后续回归按常规批次记录，不再适用本路线图的发布冻结（该冻结随本次发布解除）。
+- **2026-11-20 §175 hook 并发启动治理（本地定向 GREEN，随下个版本发布）**：
+  - 范围：§5 Needs-confirmation 第 2 条（hook 并发启动 / 生命周期）。取证：`ensure_input_capture` check-then-act 竞态（标志在 `start_input_hooks` 就绪阻塞返回后才置位）；macOS 二次启动无守卫 → 孤儿 CGEventTap；Windows 二次启动拒绝前已有 `system_cursor::restore(true)` 副作用。
+  - 修复：`runtime.rs` Shared 增 `input_capture_spawning` 原子占坑；`ensure_input_capture`（input.rs）经 `try_claim_capture_spawn` 单飞 admit，spawn 完成后 `release_capture_spawn_claim`；争用方返回 Ok(true)（armed-pending，等下个 tick 复查）。`platform.rs` macOS 增进程级 `HOOKS_STARTED` 守卫（拒绝 "input hooks already started"；Accessibility 未授权路径先释放占坑）。Windows 侧已有 SENDER OnceLock，不重复设防。Shutdown 定级 confirmed design（tap 进程生命周期，注释已锚定）。
+  - RED/GREEN：新增 `capture_spawn_claim_admits_exactly_one_contenting_caller`（8 线程并发 claim 恰 1 胜者；释放后可再占）。`cargo test -p tetherly-node --lib --locked` = **318 passed**（v0.2.68 基线 317 + 1）；`cargo clippy -p tetherly-node --lib --tests --locked` 0 lint；rustfmt / `git diff --check` 通过。
+  - 残余：随下个 tag 走 CI 三平台 + Android 门禁后发布；无新增 manual-required 项。
 - 后续每个批次必须在此追加：范围、RED/GREEN、CI run、release artifact、部署 health、回滚证据和 residual/manual 项。

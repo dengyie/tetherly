@@ -1572,3 +1572,16 @@
 - CI：ci 44422469814 五作业绿；release 44422469739 首跑 build-android Maven Central 429（网络抖动，同代码 ci android 绿）→ rerun --failed 绿，11 assets
 - 部署：Mac health 0.2.65；Windows 热重启 9076→19764 SYSTEM，受保护三进程不动；Mac /api/v1/input + trace 环 200 正常
 - 遗留观察：真机滚轮一格滚动量验证（F 修复体感）；doc-check 4/4 中 unittest 项红为 agent-fleet 会话的 infra-services.md 重复行，非本轮
+
+## 2026-11-20 · §175 hook 并发启动治理（本地定向 GREEN）
+- 取证（修复计划 §5 Needs-confirmation 第 2 条）：
+  - `ensure_input_capture`（input.rs）为对 `input_capture_active` 的 check-then-act；该标志在 `spawn_input_capture` 返回后才置位，而 `start_input_hooks` 的 tap 线程要阻塞等就绪 → 1s link-watcher tick 与 tunnel accept 路径可同时过门重复 spawn。
+  - macOS `start_input_hooks` 二次调用无任何守卫：会产生第二个 CGEventTap + 第二消费线程；运行层只持第一份 HookControl，孤儿 tap 按无主 `keyboard_armed` Arc 陈旧状态吞/放事件。
+  - Windows 有 SENDER OnceLock 拒绝二次启动，但拒绝前已执行 `system_cursor::restore(true)`（无谓副作用，未修，风险低）。
+- 修复：
+  - `runtime.rs` Shared 增 `input_capture_spawning: AtomicBool`；`ensure_input_capture` 改经 `try_claim_capture_spawn`（compare_exchange 单飞）admit，spawn 完成/失败后释放；争用方返回 Ok(true)（armed-pending，等下个 tick 复查）。
+  - `platform.rs` macOS 增进程级 `HOOKS_STARTED` AtomicBool 守卫，二次启动报 "input hooks already started"；Accessibility 未授权路径先释放守卫允许后续重试。
+  - shutdown 定级 confirmed design：tap 设计为进程生命周期（dock-swipe 注释锚定），会话拆线只 disarm 不拆 tap，不做 in-process 拆除。
+- 验证：新增 `capture_spawn_claim_admits_exactly_one_contenting_caller`（8 线程竞争恰 1 胜者 + 释放可再占）；`cargo test -p tetherly-node --lib --locked` = 318 passed（基线 317+1）；clippy -D 级 0 lint；rustfmt + git diff --check 通过。
+- 文档：REVIEW_REMEDIATION_PLAN.md §5 条目划掉并记录定级 + §8 追加本批；todo.md 增 §175 条目。
+- 残余：随下个 tag 走 CI 三平台 + Android 门禁；无新增 manual-required。

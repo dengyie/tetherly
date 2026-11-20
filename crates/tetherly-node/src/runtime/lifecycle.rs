@@ -233,6 +233,7 @@ impl Node {
             input_engine: Mutex::new(InputServer::new(1, 1)),
             input_peer: Mutex::new(None),
             input_capture_active: AtomicBool::new(false),
+            input_capture_spawning: AtomicBool::new(false),
             input_hook_control: Mutex::new(None),
             screen_out: AsyncMutex::new(None),
             screen_peer: Mutex::new(None),

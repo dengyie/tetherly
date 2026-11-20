@@ -473,6 +473,13 @@ struct Shared {
     input_peer: Mutex<Option<DeviceId>>,
     /// Whether OS-level input capture hooks have been successfully armed.
     input_capture_active: std::sync::atomic::AtomicBool,
+    /// §175: single-flight claim for `spawn_input_capture`. The
+    /// `input_capture_active` flag only flips AFTER `start_input_hooks`
+    /// returns (the tap thread blocks on tap readiness), so gating on the
+    /// flag alone let two concurrent callers (link-watcher tick vs tunnel
+    /// accept) both spawn hooks. The claim is taken atomically before the
+    /// spawn and released on completion/failure.
+    input_capture_spawning: std::sync::atomic::AtomicBool,
     pub(crate) input_hook_control: Mutex<Option<crate::platform::HookControl>>,
     /// Frames outbound to the screen controller on 45720. None until attached.
     screen_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,

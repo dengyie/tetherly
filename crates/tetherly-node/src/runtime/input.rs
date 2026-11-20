@@ -2521,13 +2521,27 @@ impl Node {
 
     /// Dynamically check and arm low-level input capture hooks if not yet active.
     /// Idempotent: returns Ok(true) if already running, or attempts to spawn it.
+    ///
+    /// §175: the `input_capture_active` flag flips only after
+    /// `start_input_hooks` returns (the tap thread blocks on tap
+    /// readiness), so the flag alone cannot serialize concurrent callers.
+    /// The spawn is admitted by an atomic single-flight claim
+    /// (`try_claim_capture_spawn`): exactly one caller spawns; the others
+    /// skip and rely on a later tick to re-check.
     pub fn ensure_input_capture(&self) -> Result<bool, CoreError> {
         #[cfg(any(windows, target_os = "macos"))]
         {
             if self.shared.input_capture_active.load(Ordering::SeqCst) {
                 return Ok(true);
             }
-            match self.spawn_input_capture() {
+            if !self.try_claim_capture_spawn() {
+                // Another caller's spawn is in flight; it will publish the
+                // flag on success. Treat as armed-pending.
+                return Ok(true);
+            }
+            let result = self.spawn_input_capture();
+            self.release_capture_spawn_claim();
+            match result {
                 Ok(()) => {
                     tracing::info!("ensure_input_capture: input capture hooks successfully armed");
                     Ok(true)
@@ -2542,6 +2556,28 @@ impl Node {
         {
             Ok(false)
         }
+    }
+
+    /// §175 single-flight admission for the hook spawn. `true` = this
+    /// caller owns the spawn; `false` = another spawn is in flight.
+    fn try_claim_capture_spawn(&self) -> bool {
+        self.shared
+            .input_capture_spawning
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// Release the spawn claim after the spawn completed (success or
+    /// failure), so a later retry can claim it.
+    fn release_capture_spawn_claim(&self) {
+        self.shared
+            .input_capture_spawning
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Non-Windows and non-macOS builds have no low-level input hooks: report an honest
@@ -4973,7 +5009,55 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use tetherly_core::InputKind;
+
+    /// §175 (remediation plan §5 Needs-confirmation): `ensure_input_capture`
+    /// used a plain check-then-act on `input_capture_active`. Between the
+    /// check and the flag set (which only happens AFTER `start_input_hooks`
+    /// returns — the tap thread blocks on tap readiness), a second
+    /// concurrent caller (1s link-watcher tick racing a tunnel accept)
+    /// passed the same gate and spawned hooks again. On macOS the second
+    /// tap had no guard at all: an orphan CGEventTap fed a stale
+    /// `keyboard_armed` Arc. The gate is now an atomic claim; the test
+    /// proves exactly one claimant wins under contention and the slot
+    /// frees on release.
+    #[test]
+    fn capture_spawn_claim_admits_exactly_one_contenting_caller() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("ensure-race");
+        const CALLERS: usize = 8;
+        let winners = std::sync::Arc::new(AtomicUsize::new(0));
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for _ in 0..CALLERS {
+                let node = &node;
+                let winners = std::sync::Arc::clone(&winners);
+                handles.push(s.spawn(move || {
+                    if node.try_claim_capture_spawn() {
+                        winners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+        assert_eq!(
+            winners.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one caller may hold the spawn claim under contention"
+        );
+        // A failed spawn attempt releases the slot so a later retry (link
+        // watcher's next tick) can claim it again.
+        node.release_capture_spawn_claim();
+        assert!(
+            node.try_claim_capture_spawn(),
+            "released slot must be re-claimable"
+        );
+        node.release_capture_spawn_claim();
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// §120 P2: a full send queue used to deliver a batch's head and then
     /// error out — e.g. a key-down sent with its key-up lost (stuck key). A

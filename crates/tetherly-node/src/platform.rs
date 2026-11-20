@@ -2999,7 +2999,6 @@ pub fn start_dock_swipe_tap(
 }
 
 #[cfg(target_os = "macos")]
-#[cfg(target_os = "macos")]
 pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookControl, CoreError> {
     use objc2_core_foundation::{kCFRunLoopCommonModes, CFMachPort, CFRunLoop};
     use objc2_core_graphics::{
@@ -3008,7 +3007,30 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     };
     use std::sync::atomic::Ordering;
 
+    // §175: process-level single-start guard, twin of the Windows SENDER
+    // OnceLock. A second spawn would create a SECOND CGEventTap plus a
+    // second consumer thread; the runtime only holds the first
+    // HookControl, so the orphan tap would keep swallowing/passing events
+    // from a `keyboard_armed` Arc nobody can disarm. Hooks live for the
+    // whole process (see dock-swipe note) — a re-arm goes through
+    // `HookControl::set_keyboard`, never a re-spawn.
+    static HOOKS_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if HOOKS_STARTED
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(CoreError::Json("input hooks already started".into()));
+    }
+
     if !is_accessibility_trusted() {
+        // Release the §175 claim: the watcher retries every tick and must
+        // be able to start once the user grants Accessibility.
+        HOOKS_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
         return Err(CoreError::Json(
             "macOS Accessibility permission is required for global input capture (System Settings > Privacy & Security > Accessibility)".into(),
         ));

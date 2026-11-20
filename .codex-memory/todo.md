@@ -17,6 +17,7 @@
 - [x] **v0.2.68 · 会话所有权治理（GREEN，已发布）**：NotifyListener/ForegroundKeep 暂态回收曾无条件 `session.stop()`，ROM 重绑通知监听即静默拆线且无重启路径——与 v0.2.67 自动重连目标直接矛盾。修复 commit eed4612：`SessionOwnershipPolicy` 决策表收敛拆线权（仅显式 stop + FGS timeout），暂态 disconnect/destroy 不动会话。CI 44629841213 六作业绿（含 android unit + assemble）；release 44631506377 绿 → **v0.2.68 发布 12 资产**（APK SHA256 `45a2873d…`）。
 - [x] **v0.2.68 真机验收（2026-11-20 用户人工恢复云机后补验）**：两台升级 0.2.68 → force-stop→relaunch 自动重连均「已连接」（tdev_4kcq/tdev_brefl）；Mac devices **4 节点全 online**；`.51` 升级前「本机库未加载」为 0.2.66 遗留、升级自愈。云机恢复操作确认：开屏 + Termux keepalive 自动拉起 easytier 即可，reverse 45717 需重下。boot-time 路径验证按红线「严禁整机重启」永久搁置（应用级冷启动已双机覆盖）。
 - [x] 不重开 §171 已解决的 input-link/Android Compose 项；Windows viewer、Edge Strip/Ghost Overlay、被动拖拽和多显示器继续作为能力缺口/Manual-required 单列。
+- [x] **§175 hook 并发启动治理（本地 GREEN，待随下个版本 CI/发布）**：修复计划 §5 Needs-confirmation 第 2 条取证定级——`ensure_input_capture` 对 `input_capture_active` 的 check-then-act 存在并发 spawn 竞态（标志在 tap 就绪后才置位，1s watcher tick 与 tunnel accept 可双过门）；macOS 二次 `start_input_hooks` 无守卫 → 孤儿 CGEventTap 按陈旧 `keyboard_armed` 吞/放事件；Windows OnceLock 拒绝但此前有无谓 cursor restore 副作用。修复：Shared `input_capture_spawning` 原子单飞占坑 + macOS 进程级 `HOOKS_STARTED` 守卫（Accessibility 未授权路径释放占坑可重试）；shutdown 定级 confirmed design（tap 进程生命周期）。回归 `capture_spawn_claim_admits_exactly_one_contenting_caller`；node lib **318/318**，clippy 0 lint。
 - [x] 详细合同见 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)；发布 checklist 现场证据已全部记录于其 §8。
 
 ## v0.2.37 Mac 漫游被接管后 Windows 光标在 Mac 不可见、反复弹回（2026-11-14，DEVELOPMENT.md §109）
