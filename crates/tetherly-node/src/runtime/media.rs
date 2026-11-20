@@ -450,6 +450,21 @@ impl Node {
         let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
         let policy = self.media_policy();
 
+        // 0. §190 rate limit: every accepted frame runs the local playback
+        //    state machine, two UiEvents and an audit entry, so the ingest
+        //    path must not be unthrottled (clip/notify/handoff are limited
+        //    the same way).
+        if !self
+            .shared
+            .media_limiter
+            .lock()
+            .expect("media_limiter")
+            .allow(peer, now_ms)
+        {
+            debug!(peer = %peer, "inbound media command rate-limited");
+            return;
+        }
+
         // 1. Ingress mode gate
         if !policy.mode.is_enabled() {
             debug!(peer = %peer, "inbound media command ignored: policy is disabled");
@@ -616,6 +631,19 @@ impl Node {
         let now_ms = self.shared.clock.unix_ms();
         let peer_str = peer.to_string();
         let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        // §190 rate limit: same ingest-path parity as receive_media_command —
+        // every accepted frame ends in a peer_media_states rewrite + UiEvent.
+        if !self
+            .shared
+            .media_limiter
+            .lock()
+            .expect("media_limiter")
+            .allow(peer, now_ms)
+        {
+            debug!(peer = %peer, "inbound media state rate-limited");
+            return;
+        }
 
         frame.title =
             MediaValidator::sanitize_text(&frame.title, tetherly_core::MAX_MEDIA_TITLE_LEN);

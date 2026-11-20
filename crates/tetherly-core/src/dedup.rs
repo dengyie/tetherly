@@ -147,6 +147,25 @@ impl HandoffLimiter {
     }
 }
 
+/// §190: media command/state 5/s, burst 10. Every accepted command frame runs
+/// the local playback state machine, two UiEvents and an audit entry, so the
+/// ingest path must not be unthrottled (clip/notify/handoff are limited the
+/// same way).
+#[derive(Debug, Default)]
+pub struct MediaLimiter {
+    per_source: HashMap<DeviceId, TokenBucket>,
+}
+
+impl MediaLimiter {
+    pub fn allow(&mut self, source: &DeviceId, now_ms: u64) -> bool {
+        let bucket = self
+            .per_source
+            .entry(source.clone())
+            .or_insert_with(|| TokenBucket::new(5.0, 10.0, now_ms));
+        bucket.try_take(now_ms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

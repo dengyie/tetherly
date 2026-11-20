@@ -1693,3 +1693,20 @@
 ## 2026-11-21 · §187 core/input_tunnel.rs 深审（一处 P2 修复）
 - P2：resp/release/close 三处缺 sender 绑定 + 可猜 session_id → 跨 peer 拆除/劫持隧道。修复：resp 双匹配、release/close 仅 peer 授权。
 - 验证：3 测试 RED→GREEN；node 323（+3）/ core 339 / clippy 0 / fmt 过。
+
+## 2026-11-21 · §188 core 批量审查（otp/insertion/liveness/keymap，纯审查，零缺陷）
+- otp.rs：字节索引安全 by construction；输入由 notify truncate 钳制；打分规则按模块头冻结。
+- insertion.rs：plan() 保守语义，无 panic 型操作；reason 静态标签零明文。
+- liveness.rs：saturating_sub 防时钟回拨；15s/45s 常量与三连 ping 设计一致。
+- keymap.rs：u16 查表闭合；Meta+Any→VK_LWIN 惯例代表值；serde/preset 测试锚定。
+- 无代码变更，core 基线 339 不变；不需要 CI 门禁（无 diff）。
+
+## 2026-11-21 · §189 core 支撑模块批量审查（16 模块，纯审查，零缺陷）
+- overlay 字节扫描 ASCII 边界 by construction；pin 三级校验后索引；focus 显式 char_boundary 回退；replay wrap-safe；recommend fail-closed 复验；bind classify 单一决策源。
+- P4 不行动：locate 注释 bytes=chars；action 多字节单字符超限 ≤3B。
+- 无代码变更；不需要 CI（无 diff）。
+
+## 2026-11-21 · §190 core 大模块深审（media/remote_session/camera/drag，一处 P3 修复）
+- P3：media command/state 无入口限流（同层 clip/notify/handoff 均有），每帧状态机+事件+audit。修复 MediaLimiter 5/s+burst10。
+- confirmed-design：media char_boundary 回退、RS handler §187 peer 绑定、camera chunk 双匹配、drag wire 预算。
+- 验证：RED→GREEN；node 324（+1）/ core 339 / clippy 0 / fmt 过。

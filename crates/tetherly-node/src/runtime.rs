@@ -899,6 +899,8 @@ struct Shared {
     handoff_inbox: Mutex<HandoffInboxTable>,
     /// §186: per-source rate limit ahead of the fsync'd inbox rewrite.
     handoff_limiter: Mutex<tetherly_core::HandoffLimiter>,
+    /// §190: per-source rate limit ahead of the media state machine + events.
+    media_limiter: Mutex<tetherly_core::MediaLimiter>,
     handoff_seq: AtomicU64,
     media_policy: Mutex<MediaControlPolicy>,
     local_media_state: Mutex<MediaStateFrame>,
@@ -2371,6 +2373,59 @@ mod handoff_engine_tests {
         assert!(
             listed <= 5 + 2,
             "sustained rate must stay 2/s, got {listed}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §190: an inbound media command flood must be rate-limited ahead of the
+    /// local playback state machine + two UiEvents + audit entry per frame —
+    /// same ingest-path parity as clip/notify/handoff (§186). Burst 10 then 5/s.
+    #[test]
+    fn media_command_flood_is_rate_limited() {
+        let (node, dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "media-flood",
+                5000,
+            );
+        let peer = DeviceId::from_id_pk(&[12u8; 32]);
+        let frame = |n: u32| MediaCommandFrame {
+            id: format!("mc_flood_{n}"),
+            command: MediaCommand::Next,
+            target_player: None,
+            timestamp_ms: 5000,
+        };
+        // Same clock tick: burst 10 admitted, the rest of a tight loop refused.
+        for n in 0..40u32 {
+            node.receive_media_command(&peer, frame(n));
+        }
+        let accepted = node
+            .shared
+            .local_media_state
+            .lock()
+            .expect("local_media_state")
+            .timestamp_ms;
+        assert_eq!(
+            accepted, 5000,
+            "state machine must have run for the burst only (last write at t=5000)"
+        );
+        // A later tick refills to the sustained rate (5 tokens/s).
+        clock.set(6000);
+        for n in 40..46u32 {
+            node.receive_media_command(&peer, frame(n));
+        }
+        let writes_after_tick = {
+            // Count how many commands actually mutated state by observing the
+            // audit ring: every executed command records "media_command_executed".
+            node.audit_report(Some(AuditCategory::Peer), None, None, None)
+                .entries
+                .iter()
+                .filter(|e| e.action == "media_command_executed")
+                .count()
+        };
+        assert!(
+            writes_after_tick <= 10 + 5,
+            "sustained rate must stay 5/s, got {writes_after_tick} executed commands"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
