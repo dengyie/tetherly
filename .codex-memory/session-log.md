@@ -1670,3 +1670,8 @@
 - 结论：帧层预算/校验/truncate 规范全闭环；各 wire 结构的下游防线完备。
 - P4 观察项（不行动）：NotifyPush uid/app_id/app_name 无 cap；notify hub evict_expired 仅 UI 拉取触发（无周期任务）。rate limiter + TTL 下增长有界，备查。
 - 文档：todo.md 增条目。
+
+## 2026-11-21 · §183 core/clip.rs 深审（一处 P3 修复）
+- P3：SensitiveContentGuard::is_aws_key_at 字节切片 panic——本地剪贴板含 AKIA/ASIA+多字节文本即崩 auto-sync 轮询（node clipboard.rs:754）。修复：字符边界回退。
+- 其余 confirmed-design：preview/commit 分离、echo 防环、apply_remote 顺序、环形历史、guard 其余检测无切片。
+- 验证：core 338（+1）/ node 319；clippy 双形态 0；fmt 过。

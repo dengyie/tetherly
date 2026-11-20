@@ -183,9 +183,22 @@ impl SensitiveContentGuard {
 
     fn is_aws_key_at(text: &str, pos: usize) -> bool {
         let remainder = &text[pos..];
-        if remainder.len() >= 20 {
-            let key_candidate = &remainder[..20];
-            let rest = &key_candidate[4..20];
+        // §183: slice by CHAR boundary, not byte index — the old bare
+        // `&remainder[..20]` panicked the clipboard auto-sync poll task when
+        // a multi-byte character straddled byte 20 (ordinary CJK text with
+        // an AKIA/ASIA fragment inside, e.g. a pasted log line). Fall back
+        // to the last char boundary; a shorter window can only under-match,
+        // never mis-detect.
+        let key_end = {
+            let mut end = 20.min(remainder.len());
+            while end > 4 && !remainder.is_char_boundary(end) {
+                end -= 1;
+            }
+            end
+        };
+        if remainder.len() >= key_end && key_end > 4 {
+            let key_candidate = &remainder[..key_end];
+            let rest = &key_candidate[4..];
             if rest
                 .chars()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
@@ -196,8 +209,8 @@ impl SensitiveContentGuard {
                         .last()
                         .map(|c| c.is_ascii_alphanumeric())
                         .unwrap_or(false);
-                let after_ok = remainder.len() == 20
-                    || !remainder[20..]
+                let after_ok = remainder.len() == key_end
+                    || !remainder[key_end..]
                         .chars()
                         .next()
                         .map(|c| c.is_ascii_alphanumeric())
@@ -584,6 +597,37 @@ mod tests {
         assert!(m4.can_receive());
 
         assert!(ClipSyncMode::from_str("invalid_mode").is_err());
+    }
+
+    #[test]
+    fn aws_key_scan_never_panics_on_multibyte_text() {
+        // §183: is_aws_key_at sliced &remainder[..20] by BYTE index. A local
+        // clipboard holding "AKIA" followed by multi-byte characters that
+        // straddle byte 20 panicked the auto-sync poll task — ordinary
+        // Chinese/Japanese text pasted with an AKIA/ASIA fragment inside
+        // (log snippets, OCR output) killed clipboard sync entirely.
+        let texts = [
+            "AKIA中中中中中中",
+            "ASIA😀😀😀😀😀😀😀😀",
+            "密钥AKIAIOSFODNN7EXAMPLE尾部中文",
+            "AKIA",
+            "AKIAABCDEFGHIJKLMNOP",            // 20 ASCII: the true positive
+            "see AKIAIOSFODNN7EXAMPLE in log", // bounded by word chars
+        ];
+        for t in texts {
+            // Must not panic; true positive still detected.
+            let _ = SensitiveContentGuard::inspect(t);
+        }
+        assert_eq!(
+            SensitiveContentGuard::inspect("AKIAIOSFODNN7EXAMPLE"),
+            Some(SensitiveLeakReason::ApiToken),
+            "20-ASCII AWS key must still be detected"
+        );
+        assert_eq!(
+            SensitiveContentGuard::inspect("AKIA中中中中中中"),
+            None,
+            "multibyte text without a real key must scan clean"
+        );
     }
 
     #[test]

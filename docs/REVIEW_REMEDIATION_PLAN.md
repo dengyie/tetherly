@@ -274,4 +274,9 @@
     - `truncate_utf8` 字节边界回退是全库 String 截断规范（§181 已让 topology 复用）；`NotifyPush::truncate` cap title/body 各 4KiB + 剥离 URL actions，多字节 pin 测试在位。
     - wire 层无 cap 的结构下游防线完备：`ClipSet` → `apply_remote`（CLIP_TEXT_MAX + sha256 绑定 + 4/s limiter）；`FileOffer` → `offer_resumable`（transfer_id 字符集 + 每文件 FILE_MAX 64GiB + sha256 格式 + INCOMING_MAX=256 表上限）；`TextMessage`/`ResourceHandoffFrame` from_payload 自带 cap。
   - P4 观察项（不行动，登记备查）：`NotifyPush` 的 `uid`/`app_id`/`app_name` 无长度 cap，且 notify hub 的 `evict_expired` 仅在 UI 拉 activity/candidates 时触发（无周期任务）。Rate limiter（2/s 持续 + burst 10，per source）与 120s candidate TTL / 10min dedup 窗口约束下增长有界；正常 peer 字段为真实通知标识符（几十字节），仅理论最坏受 64KiB 帧上限。
+- **2026-11-21 §183 core/clip.rs 深审（一处 P3 修复：AWS key 扫描字节切片 panic）**：
+  - 范围：`crates/tetherly-core/src/clip.rs` 全 668 行（ClipHub 状态机、ClipSyncMode、SensitiveContentGuard、历史环）+ 可达性取证（node clipboard.rs:754 inspect 调用点在 poll_clipboard_auto_sync 自动同步路径）。
+  - 缺陷（P3，confirmed，已修）：`SensitiveContentGuard::is_aws_key_at` 用裸字节切片 `&remainder[..20]` / `&key_candidate[4..20]` 提取 AWS key 窗口——多字节 UTF-8 字符跨字节 20 边界时 panic（独立 rustc 程序证明）。可达路径非 wire 而是本地系统剪贴板：复制一段含 "AKIA"/"ASIA" + 中文/emoji 的普通文本（日志片段、OCR 输出），周期性 auto-sync 轮询即 panic 崩溃剪贴板同步任务。修复：按字符边界回退取窗口（`is_char_boundary` 循环），短窗口只可能 under-match 不可能误检；20 字节 ASCII 真 key 检测不变（pin 断言）。
+  - 其余 confirmed-design：preview/commit 分离（全 peer 入队才提交 hash/seq）；echo 防环 hash 相等即 Echo；apply_remote 检查顺序 limiter→echo→text→size→hash 绑定；seq 单调 max 合并；MAX_CLIP_HISTORY=32 环形有界；其余 guard 检测（PEM/GitHub/OpenAI/Slack/JWT/密码管理器）全部 contains/split 无切片风险。
+  - 验证：core 338（+1）/ node 319 回归全绿；clippy 双形态 0 error；fmt 过。
   - 残余：无新增 manual-required。
