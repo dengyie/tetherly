@@ -1689,3 +1689,7 @@
 - P3：receive_resource_handoff 无限流 + 每帧 fsync 全 inbox 重写，session 泵可被对端洪水独占。修复 HandoffLimiter 2/s+burst5 入口前置。
 - confirmed-design：validator 切片安全（ASCII 分隔符论证）、allowlist fail-closed、SystemOpener 无 shell。
 - 验证：core 339 / node 320（+1）/ clippy 0 / fmt 过。
+
+## 2026-11-21 · §187 core/input_tunnel.rs 深审（一处 P2 修复）
+- P2：resp/release/close 三处缺 sender 绑定 + 可猜 session_id → 跨 peer 拆除/劫持隧道。修复：resp 双匹配、release/close 仅 peer 授权。
+- 验证：3 测试 RED→GREEN；node 323（+3）/ core 339 / clippy 0 / fmt 过。

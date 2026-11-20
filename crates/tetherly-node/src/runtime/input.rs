@@ -588,8 +588,8 @@ impl Node {
                 tracing::info!(session_id = %frame.session_id, peer = %peer_str, "input tunnel resp: no armed session; dropping stale resp");
                 return;
             };
-            if session.session_id != frame.session_id {
-                tracing::info!(session_id = %frame.session_id, armed = %session.session_id, "input tunnel resp: session id mismatch; dropping stale resp");
+            if session.session_id != frame.session_id || session.peer_id != peer_str {
+                tracing::info!(session_id = %frame.session_id, armed = %session.session_id, peer = %peer_str, "input tunnel resp: session/peer mismatch; dropping stale resp");
                 return;
             }
             if frame.accepted {
@@ -723,9 +723,17 @@ impl Node {
                 .expect("active_input_tunnel");
             // Match BEFORE taking: a stale/foreign release (other peer,
             // other session) must leave the live grant untouched.
-            let matches = guard.as_ref().is_some_and(|session| {
-                session.session_id == frame.session_id || session.peer_id == peer_str
-            });
+            // §187: only the session's OWN peer may release. session_id alone
+            // was the other authorization arm (`tun_<now_ms>` is guessable),
+            // so a third authenticated peer forging a release with the live
+            // id could tear down someone else's tunnel. The peer match keeps
+            // the half-open teardown semantic (the session's peer may release
+            // even with a stale id, mirroring the remote-session release at
+            // the `session_id OR peer` convention) while closing the
+            // cross-peer kill.
+            let matches = guard
+                .as_ref()
+                .is_some_and(|session| session.peer_id == peer_str);
             if matches {
                 guard.take();
             } else if guard.is_some() {
@@ -1165,8 +1173,12 @@ impl Node {
         let Some(state) = current else {
             return;
         };
-        // Match on session_id OR peer so a half-open peer may still tear down.
-        if state.session_id != frame.session_id && state.peer_id != peer_str {
+        // §187: only the session's OWN peer may close it. The OR let any peer
+        // match one arm alone — with `rs_<now_ms>` guessable, a third
+        // authenticated peer forging a Close with the live id could tear down
+        // someone else's session. Peer match keeps the half-open teardown
+        // semantic (its own peer may close even with a stale id).
+        if state.peer_id != peer_str {
             return;
         }
         *self.shared.remote_session.lock().expect("remote_session") = None;
@@ -7588,6 +7600,133 @@ mod tests {
             node.active_tunnel_role(),
             Some(InputTunnelRole::Controller),
             "a foreign release must leave the live grant in place"
+        );
+    }
+
+    /// §187: session_id alone must not authorize a release. The controller
+    /// mints `tun_<now_ms>` — guessable — so a third authenticated peer that
+    /// forges a release with the LIVE session id must not tear down the
+    /// grant that belongs to another peer. (v0.2.49 covered the
+    /// stranger+different-id arm; this pins the stranger+same-id arm.)
+    #[tokio::test]
+    async fn foreign_release_with_guessed_session_id_keeps_the_live_grant() {
+        let (node, _dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("foreign-release-same-id");
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_1700000000000".to_string(),
+            peer_id: "tdev_aaaaaaaaaaaaaaaa".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        let stranger = DeviceId::parse("tdev_bbbbbbbbbbbbbbbb").unwrap();
+        node.receive_input_tunnel_release(
+            &stranger,
+            InputTunnelReleaseFrame {
+                session_id: "tun_1700000000000".to_string(),
+                exit_edge: None,
+                return_x: None,
+                return_y: None,
+                reason: "forged".to_string(),
+                timestamp_ms: 0,
+            },
+        )
+        .await;
+        assert_eq!(
+            node.active_tunnel_role(),
+            Some(InputTunnelRole::Controller),
+            "a foreign release must not kill the grant even with the live session id"
+        );
+    }
+
+    /// §187: same pin on the resp arm — a forged ACCEPTED resp with the live
+    /// session id must not commit capture size or drive the accept chain
+    /// toward the forger's own channel.
+    #[tokio::test]
+    async fn foreign_resp_with_guessed_session_id_is_dropped() {
+        let (node, _dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "foreign-resp-same-id",
+                10_000,
+            );
+        node.shared
+            .input_capture_active
+            .store(true, Ordering::SeqCst);
+        let peer = DeviceId::from_id_pk(&[44u8; 32]);
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_10000".to_string(),
+            peer_id: peer.to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: clock.unix_ms(),
+            last_activity_ms: clock.unix_ms(),
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        let stranger = DeviceId::parse("tdev_bbbbbbbbbbbbbbbb").unwrap();
+        node.receive_input_tunnel_resp(
+            &stranger,
+            InputTunnelRespFrame {
+                session_id: "tun_10000".to_string(),
+                accepted: true,
+                reject_reason: None,
+                capture_width: Some(1234),
+                capture_height: Some(567),
+                timestamp_ms: clock.unix_ms(),
+            },
+        )
+        .await;
+        let session = node.shared.active_input_tunnel.lock().unwrap();
+        assert!(
+            session.as_ref().is_some_and(|s| s.capture_width.is_none()),
+            "a foreign resp must not commit capture size onto the live grant"
+        );
+    }
+
+    /// §187: same pin on the ADR-138 remote-session Close — the OR match let
+    /// any peer in through one arm alone, and `rs_<now_ms>` is guessable.
+    #[tokio::test]
+    async fn foreign_remote_session_close_with_guessed_id_keeps_the_session() {
+        let (node, _dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("foreign-rs-close");
+        let peer = DeviceId::from_id_pk(&[44u8; 32]);
+        let mut sm = RemoteSessionStateMachine::new();
+        let _ = sm.request_received();
+        let _ = sm.accepted();
+        *node.shared.remote_session.lock().unwrap() = Some(RemoteSessionState {
+            state: ActiveRemoteSessionState {
+                session_id: "rs_10000".to_string(),
+                peer_id: peer.to_string(),
+                role: InputTunnelRole::SessionTarget,
+                screen_width: 1920,
+                screen_height: 1080,
+                started_at_ms: 0,
+                last_activity_ms: 0,
+            },
+            machine: sm,
+        });
+        let stranger = DeviceId::parse("tdev_bbbbbbbbbbbbbbbb").unwrap();
+        node.receive_remote_session_close(
+            &stranger,
+            RemoteSessionCloseFrame {
+                session_id: "rs_10000".to_string(),
+                reason: "forged".into(),
+                timestamp_ms: 0,
+            },
+        )
+        .await;
+        assert!(
+            node.shared.remote_session.lock().unwrap().is_some(),
+            "a foreign close must not tear down the live session"
         );
     }
 
