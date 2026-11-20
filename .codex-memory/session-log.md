@@ -1613,3 +1613,17 @@
 - 验证：新增 `activity_republish_does_not_rebuzz_known_items`（同身份重发静默 / 新消息只报 1 条新 / handoff 打开后新 handoff 报 1 个）；旧测试迁移新签名。shell tests 33 passed（31+2）；clippy 0 lint；pnpm test 36 passed；pnpm check 0 errors。
 - 文档：计划 §8 追加本批；todo.md 增 §177 条目。
 - 残余：随下个 tag 走 CI（frontend/Tauri job + 三平台）；§175/§176/§177 三批一起发版。
+
+## 2026-11-20 · §178 node 支撑模块深审（纯审查，零缺陷）
+- 范围：crates/tetherly-node/src 支撑层 7 模块全量通读——cred.rs(520)/apitoken.rs(641)/telemetry.rs(307)/sidecar.rs(263)/logsink.rs(261)/lan.rs(223)/ancs.rs(88)。
+- 结论：零确认缺陷，全部 confirmed-design。要点：
+  - apitoken：tier 数学闭环（client Write < Admin 路径）、V1_ADMIN_PATHS.len()==8 pin 测试、token_matches 空 expected fail-closed、api.token 每启动轮换 + CREATE_NEW + protected DACL、read_client Unix >0600 拒绝。
+  - logsink：rename 失败 → 原地截断兜底，硬上限 2×cap；blocked-rename 测试钉死；Windows set_len 陷阱走独立写句柄（注释+测试）。
+  - lan：诊断报告与 binder 共用 classify（测试断言 report==bind set）；5s 缓存防 syscall 风暴；bind 拒 0.0.0.0/非 LAN。
+  - telemetry：AtomicU64 计数器 + 零负载红线；snapshot saturating 求和；文件通道按设计 tx/rx=0。
+  - cred：vault+identity.bin 双权威幂等修复；macOS 默认文件存储；Windows SYSTEM 不进 vault。
+  - sidecar：RPC/CLI 双发现均带 probe 超时。
+  - ancs：装配层，真机 iPhone 配对 Manual-required 如实标注。
+- 定级：本批无 RED/GREEN（零代码变更）；node lib 基线 319。
+- 文档：计划 §8 追加；todo.md 增 §178 条目。
+- 下一步：v0.2.69 发布（§175/§176/§177 攒批 + §178 审查结论）——版本四文件 bump、tag、CI 门禁。

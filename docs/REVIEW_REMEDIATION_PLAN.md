@@ -230,4 +230,16 @@
   - 修复：`tray.rs` 新增 `NoticeSeen` 身份去重（HashSet：`msg:<id>` / `hand:<id>`，id 缺失时回退内容身份）；`notice_for` 增 `&mut NoticeSeen` 参数，只有**从未出现过**的 unread/un-opened 身份才计入通知正文（正文计数改为 fresh 数）；`lib.rs` SSE 转发 listener 持有跨帧 `Mutex<NoticeSeen>`。
   - RED/GREEN：新增 `activity_republish_does_not_rebuzz_known_items`（同身份重发静默、新消息只报新增数、handoff 打开后新 handoff 报新增）；旧 `unread_activity_notifies_only_when_new` 迁移到新签名。`cargo test -p tetherly-shell --lib --locked` = **33 passed**（31+2）；clippy 0 lint；`pnpm test` 36 passed；`pnpm check` 0 errors。
   - 残余：随下个 tag 走 CI（frontend/Tauri job + 三平台）。
+- **2026-11-20 §178 node 支撑模块深审（纯审查，零缺陷，全部 confirmed-design）**：
+  - 范围：`crates/tetherly-node/src` 支撑层 7 模块全量通读——`cred.rs`（520 行）、`apitoken.rs`（641 行）、`telemetry.rs`（307 行）、`sidecar.rs`（263 行）、`logsink.rs`（261 行）、`lan.rs`（223 行）、`ancs.rs`（88 行）。
+  - 审查结论（不修，确认为设计）：
+    - `cred.rs`：vault + identity.bin 双存储互为权威，缺侧幂等修复；macOS 默认文件存储（TETHERLY_VAULT=1 才进 keychain）规避弹窗；Windows SYSTEM 上下文不进 vault——均有测试锚定。
+    - `apitoken.rs`：tier 数学闭环（client token Write < Admin 路径门槛）；`V1_ADMIN_PATHS.len()==8` pin 测试防新路由静默降级；`token_matches` 空 expected 永不匹配（fail closed）；api.token 每次启动轮换 + `CREATE_NEW` + protected DACL（无继承窗口）；`read_client` Unix 权限宽于 0600 即拒绝。
+    - `telemetry.rs`：纯 AtomicU64 计数器，零负载红线在位；`snapshot()` 通道求和 saturating；文件通道按设计报 tx/rx 0。
+    - `logsink.rs`：rename 失败原地截断兜底，硬上限 2×cap 不可无界增长；blocked-rename 场景有测试；Windows 追加句柄缺 FILE_WRITE_DATA 的 set_len 陷阱经独立写句柄绕开（注释+测试钉死）。
+    - `lan.rs`：诊断报告与 binder 共用同一 `classify`（不可漂移，测试断言 report==bind set）；5s 缓存防 UI 轮询 syscall 风暴；`bind_many_optional` 拒绝 0.0.0.0 与非 LAN 地址。
+    - `sidecar.rs`：EasyTier RPC/CLI 双发现路径均带 probe 超时，无阻塞探测。
+    - `ancs.rs`：纯装配层，三平台 stack 编译验证；真机 iPhone 配对如实标注 Manual-required（无虚假测试声明）。
+  - 定级：本批无 RED/GREEN（零代码变更）；node lib 测试基线维持 319。
+  - 残余：无新增 manual-required。§175/§176/§177 三批随 v0.2.69 发布。
 - 后续每个批次必须在此追加：范围、RED/GREEN、CI run、release artifact、部署 health、回滚证据和 residual/manual 项。
