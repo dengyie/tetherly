@@ -1,4 +1,10 @@
 # Session log
+## 2026-11-20 · 云手机人工恢复 + v0.2.68 真机验收全绿（4 节点 online）
+- 用户开屏恢复两台云机：Termux keepalive 自动拉起 easytier（验证手册机内恢复路径有效）。mesh 实测：cloudphone-1 p2p 19.6ms / cloudphone-2 p2p 28ms，`no_tun=true` UDP 模式；adb 5555 双机 device。注意 .52 ping 不通 mesh 对端（ICMP 被 easytier UDP 隧道丢弃属正常），TCP 才是真实链路。
+- tetherly 验收补全：两台 reverse tcp:45717 重下后，`.51` 升 0.2.68 → force-stop→relaunch `tdev_4kcq2woqljktkk6y · 已连接`；`.52` 升 0.2.68 → `tdev_breflgheng3owukz · 已连接`。Mac `/api/v1/devices` **4 节点全 online**（Mac/Win/两 Android）。v0.2.67/68 自动重连双机验收通过。
+- `.51` 升级前出现的「device_id: unavailable · 本机库未加载」为 v0.2.66 遗留（lib/arm64 空目录 + extractNativeLibs=false 的加载路径问题），升级 0.2.68 后自愈——若复现按「重装最新 APK」处置。
+- 教训固化：云机 VM 恢复后 adb reverse 表清空，45717 reverse 必须重下（与 5173/8000 同类）；本机库未加载不一定是 lib 缺失，先看 UI 是否 PIN 未配对。
+
 ## 2026-11-20 · v0.2.68：会话所有权治理（暂态回收不再拆线）
 - 深审 v0.2.67 自动重连链路发现矛盾：`NotifyListener.onDestroy/onListenerDisconnected` 与 `ForegroundKeep.onDestroy` 无条件 `session.stop()`——ROM 暂态重绑通知监听（.51/.52 现场实证的模式）即拆线，且无任何路径重启（TetherlyApp 自动启动只在进程冷启动跑一次），配对安装从此静默失联直至下次冷启动。前台服务同理被一并停掉。
 - 修复（commit **eed4612**）：所有权决策收敛到新 `SessionOwnershipPolicy`（5 事件决策表，JVM 单测锁定）：仅 `EXPLICIT_STOP`（ForegroundKeep.stop，现显式补 session.stop）与 `FGS_TIMEOUT`（已含 RestartCoordinator 立即重拨）拆线；`LISTENER_DISCONNECTED/LISTENER_DESTROYED/SERVICE_DESTROYED` 不动会话，重绑落入幂等 `onListenerConnected`。
