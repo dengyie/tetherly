@@ -183,8 +183,20 @@ impl MediaCommandFrame {
     }
 
     pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
-        let frame: Self = serde_json::from_slice(payload)?;
+        let mut frame: Self = serde_json::from_slice(payload)?;
+        frame.sanitize();
         Ok(frame)
+    }
+
+    /// Wire-hygiene pass: strips control characters and caps identifier strings
+    /// so a hostile peer cannot smuggle unbounded or control-char payloads into
+    /// UI events and audit logs via the legacy SSE feed (`id` / `target_player`
+    /// are echoed verbatim by `receive_media_command`).
+    pub fn sanitize(&mut self) {
+        self.id = MediaValidator::sanitize_text(&self.id, MAX_MEDIA_PLAYER_ID_LEN);
+        if let Some(p) = &self.target_player {
+            self.target_player = Some(MediaValidator::sanitize_text(p, MAX_MEDIA_PLAYER_ID_LEN));
+        }
     }
 }
 
@@ -425,5 +437,35 @@ mod tests {
         let dec_state = MediaStateFrame::from_payload(&wire_state.payload).unwrap();
         assert_eq!(dec_state.volume_percent, 100);
         assert_eq!(dec_state.title, "Track 1");
+    }
+
+    #[test]
+    fn test_media_command_frame_decode_sanitizes_hostile_fields() {
+        // §200: a hostile peer must not be able to smuggle control characters
+        // or an unbounded id/target_player into UI events via the command
+        // frame decode path (MediaStateFrame already sanitizes; command path
+        // must match).
+        let hostile = r#"{"id":"cmd_\u0000\u0007x","command":{"action":"play","param":null},"target_player":"player\u001fbad","timestamp_ms":1}"#;
+        let decoded = MediaCommandFrame::from_payload(hostile.as_bytes()).unwrap();
+        assert_eq!(decoded.id, "cmd_x");
+        assert_eq!(decoded.target_player.as_deref(), Some("playerbad"));
+
+        // Oversized id is capped to MAX_MEDIA_PLAYER_ID_LEN.
+        let big_id = format!("cmd_{}", "x".repeat(512));
+        let big = format!(
+            r#"{{"id":"{}","command":{{"action":"play","param":null}},"timestamp_ms":1}}"#,
+            big_id
+        );
+        let decoded_big = MediaCommandFrame::from_payload(big.as_bytes()).unwrap();
+        assert!(decoded_big.id.len() <= MAX_MEDIA_PLAYER_ID_LEN);
+
+        // Legitimate frames survive the hygiene pass unchanged.
+        let legit =
+            MediaCommandFrame::new("cmd_1_0", MediaCommand::Play, Some("spotify".into()), 1)
+                .unwrap();
+        let decoded_legit =
+            MediaCommandFrame::from_payload(serde_json::to_vec(&legit).unwrap().as_slice())
+                .unwrap();
+        assert_eq!(decoded_legit, legit);
     }
 }

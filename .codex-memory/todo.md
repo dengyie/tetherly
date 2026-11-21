@@ -270,3 +270,8 @@
 - §198 playback/qoe/audio_sync/annotation/cursor（~1980 行）：零缺陷。回放等待 cap 5s、QoE 抗振荡 cooldown、skew 补偿 clamp ±20ms 且除 2、白板容量前置拒绝、cursor 位图严格等长 + cap。
 - §199 recording/motion/resilience/squelch/damage/watermark/color/roi/delta + overlay 复核（~1830 行）：零缺陷。TREC 干净 EOF vs 截断区分、damage 三重前置 fail-safe、ROI 偶数尺寸防色度撕裂、blend_pixel 全路径边界守卫。
 - 收官状态：core/src/screen/ 33 模块 25,904 行全部审毕（§185–§199 跨 15 个审计节点），目录级零未修缺陷；全程纯审查无 diff，无需 CI 门禁（基准：§193 CI 44845004879 6/6 绿）。
+
+## 2026-11-21 §200 core/ 交互与 AV 控制面深审（一处 P3 修复）
+- §200 drag/action/camera/media（~1980 行）：一处 P3 confirmed 修复——MediaCommandFrame::from_payload 裸 serde 直通，id/target_player 未消毒进入 UiEvent → legacy /api/events SSE 广播；修复为解码即 sanitize + 回归测试。
+- drag/action/camera 三模块零缺陷：1KiB 帧预算、ADR-008 命令不上 wire、camera validate 双道门、FSM 严格 id+phase 匹配。
+- 验证：core 342（+1）全绿；clippy 双形态 0 error；fmt 过。待提交 CI。

@@ -1742,3 +1742,7 @@
 - 补读 overlay.rs（§193 已审，本轮复核确认 blend/disk/annotation_text 边界完备）。
 - 登记：docs/REVIEW_REMEDIATION_PLAN.md §8 新增 5 条（§195/§196/§197/§198/§199）；todo.md 同步。
 - screen/ 目录 33 模块 25,904 行全部审毕，等待用户验收。
+
+## 2026-11-21 §200 media.rs P3 修复
+- RED 证据固定于 git HEAD 原文；GREEN：test_media_command_frame_decode_sanitizes_hostile_fields + core 342 全绿。
+- 登记 plan §8 §200 条目；待 CI 门禁后闭环。
