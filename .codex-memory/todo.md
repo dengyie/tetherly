@@ -310,3 +310,11 @@
 - [x] §206 lifecycle/discovery/audio/routes/topology/locate/focus/remote_session/drag×3/shell_reveal/overlay ~10k 行全读，零缺陷收官
 - [x] 登记 plan §8（§206 条目，含 3 条 P4 观察项）
 - 待办：node runtime/ 35 模块深审全部完成（§204/§205/§206）；下一步等待用户验收或指派新审计面（如 node 非 runtime 模块、client/Android 面）
+
+## 2026-11-21 §207 node 非 runtime 模块深审（完成，2×P3 修复）
+- 范围：小模块面 ≈6.4k / store.rs 4615 / platform.rs 4704 / tray 927 / cursor_shield 228 / screen 2379 / screen macos+x11 899 / ancs 三平台 1678 / apiv1 全家 1143 / model.rs 4078 / uihttp 全家 9772 / bin viewer 286，全读 ~15.8k 行。tetherly-node crate 全模块深审收官。
+- P3-1：platform.rs applescript 通知字符串反斜杠转义缺失（先转引号后转反斜杠顺序错）——已修 commit 76c28fb，CI 44874306386 success。
+- P3-2a：uihttp/v1.rs whiteboard import `file` 分支先 fs::read 后校验且绝对路径不拒——已修 9899e50（校验前置 + is_absolute + 回归测试）。
+- P3-2b：model.rs 4 处 `.expect("validated ... policy")`——持久化真可 Err（save_action_policy → CoreError::File），旧码 panic handler task；已修 9899e50（签名改 Result，调用点 map_err(core_error)?）。
+- P4 观察项：screen.rs AdbSource raw 模式 w*h*4 不可信分配（opt-in + 管理员信任域，接受）；model.rs expect 原观察项已升级修复。
+- 待办：CI 9899e50 确认绿；等待用户验收或指派新审计面（client/Android/脚本面）。

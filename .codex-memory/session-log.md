@@ -1766,3 +1766,10 @@
 - lifecycle.rs 3001 行全读完毕（700-2100 run/attach/handle_event，2100-3001 restart_daemon/preflight/cleanup + 测试）。确认 attach/release channel-identity ownership、keepalive weak sender、peer-down drag 清扫、restart staging 门 + preflight、lan promotion 身份核验全链在位。
 - §206 全 13 模块（~10k 行）纯审查零缺陷；plan §8 登记（old_string 用 §205 完整标题行，lesson 复用成功）；.codex-memory 双文件更新。
 - node runtime/ 层 35 模块深审至此全部收官：§204（会话面，零缺陷）、§205（屏幕面，1×P3 修复 11525b7 + CI 44869937409）、§206（收尾，零缺陷，3×P4 观察项）。
+
+## 2026-11-21 §207 node 非 runtime 模块深审收官（2×P3 修复）
+- 全读 ~15.8k 行：小模块面/store/platform/tray/cursor_shield/screen 两平台/ancs 三平台/apiv1 全家/model/uihttp 全家/viewer。tetherly-node crate 深审全部完成。
+- P3-1 applescript 转义（platform.rs）：commit 76c28fb，CI run 44874306386 SUCCESS。
+- P3-2 whiteboard import 先读后校验 + model.rs 4×expect panic：commit 9899e50。修复中发现 `?` 不能直接作用于 CoreError（Handled 错误侧是 UiResponse，无 From<CoreError>），改 `.map_err(core_error)?`——新增教训：v1.rs handler 内 CoreError 传播一律走 core_error 映射，勿裸 `?`。新增回归测试 v1_whiteboard_import_rejects_bad_paths_before_read。
+- 门禁：clippy 双形态 0 error；uihttp 25 + model 4 + 新增 1 全绿；fmt 过。plan §8 登记（§207 条目置顶于 §206 完整标题行前，lesson 第三次复用成功）；.codex-memory 双文件更新。
+- CI 补录：44877084905（9899e50）windows 失败——回归测试用 "/etc/passwd" 当绝对路径，但 Windows 无盘符路径不算 is_absolute()；改为 temp_dir 平台无关绝对路径后 6c81f02 推送，44878772315 首跑 windows phase3 m3_5 "session did not register in time" 时序 flake（与改动无关），rerun success。教训：路径守卫回归测试的绝对路径用例必须用 temp_dir 构造，裸 "/..." 在 Windows 不成立。
