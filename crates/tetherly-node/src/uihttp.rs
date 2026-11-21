@@ -1248,7 +1248,11 @@ mod tests {
         let token = crate::apitoken::read(&dir).expect("daemon token");
         let auth = format!("Authorization: Bearer {token}");
 
-        for evil in ["/etc/passwd", "../escape.json", "sub/../../escape.json"] {
+        // Absolute on every platform (temp_dir carries the drive letter on
+        // Windows, where a bare "/etc/passwd" is NOT is_absolute).
+        let abs = std::env::temp_dir().join("tetherly_wb_evil.json");
+        let abs = abs.to_string_lossy().replace('\\', "/");
+        for evil in [abs.as_str(), "../escape.json", "sub/../../escape.json"] {
             let payload = format!(r#"{{"file":"{evil}"}}"#);
             let (code, resp) = raw_request(
                 port,
