@@ -12,6 +12,7 @@
   import { applyEvent as layoutEvent, initialLayout, type LayoutState } from "./lib/stores/layout";
   import { applyEvent as settingsEvent, initialSettings, type SettingsState } from "./lib/stores/settings";
   import { applyEvent as activityEvent, initialActivity, type ActivityState } from "./lib/stores/activity";
+  import { hydrateSections, sectionOf, type HydratedSection } from "./lib/stores/hydrate";
   import type { Snapshot } from "./lib/api/gen/api";
   import { Api } from "./lib/api/client";
   import type { Transport } from "./lib/transport/transport";
@@ -99,7 +100,8 @@
     // In the Tauri shell the Rust side owns the token and the SSE
     // connection; the browser build keeps same-origin fetch + fragment auth.
     const t: Transport = transport ?? (isTauri() ? new TauriTransport() : new HttpTransport());
-    api = new Api(t);
+    const client = new Api(t);
+    api = client;
     // Reducer mirrors: mutated inside the event callback, assigned to the
     // $state variables so Svelte 5 picks up the change.
     let d = initialDevices();
@@ -111,40 +113,63 @@
     let la = initialLayout();
     let se = initialSettings();
     let ac = initialActivity();
+    // Per-section count of real `*.changed` frames: hydration compares it
+    // before/after its fetch and drops a result the stream has outrun.
+    const changed: Record<HydratedSection, number> = { layout: 0, settings: 0, transfers: 0, inbox: 0, activity: 0 };
+    const apply = (ev: { id: number; type: string; data: unknown }) => {
+      if (ev.type === "snapshot") {
+        const snap = ev.data as Snapshot;
+        d = applySnapshot(d, snap);
+        s = sysSnapshot(s, snap);
+        p = pairSnapshot(p, snap);
+        i = inputSnapshot(i, snap);
+      } else {
+        d = applyEvent(d, ev);
+        s = sysEvent(s, ev);
+        p = pairEvent(p, ev);
+        i = inputEvent(i, ev);
+        tr = transfersEvent(tr, ev);
+        ib = inboxEvent(ib, ev);
+        la = layoutEvent(la, ev);
+        se = settingsEvent(se, ev);
+        ac = activityEvent(ac, ev);
+      }
+      devices = d;
+      system = s;
+      pairing = p;
+      input = i;
+      transfers = tr;
+      inbox = ib;
+      layout = la;
+      settings = se;
+      activity = ac;
+    };
+    let stopped = false;
     const unsubscribe = t.subscribe(
       null,
       (ev) => {
         lastSeq.set(ev.id);
+        const sec = sectionOf(ev.type);
+        if (sec) changed[sec] += 1;
+        apply(ev);
         if (ev.type === "snapshot") {
-          const snap = ev.data as Snapshot;
-          d = applySnapshot(d, snap);
-          s = sysSnapshot(s, snap);
-          p = pairSnapshot(p, snap);
-          i = inputSnapshot(i, snap);
-        } else {
-          d = applyEvent(d, ev);
-          s = sysEvent(s, ev);
-          p = pairEvent(p, ev);
-          i = inputEvent(i, ev);
-          tr = transfersEvent(tr, ev);
-          ib = inboxEvent(ib, ev);
-          la = layoutEvent(la, ev);
-          se = settingsEvent(se, ev);
-          ac = activityEvent(ac, ev);
+          // The daemon's burst is the Snapshot only (§220): pull the five
+          // event-fed sections over REST once per (re)connection.
+          const before = { ...changed };
+          void hydrateSections(
+            client,
+            (section) => stopped || changed[section] !== before[section],
+            apply,
+            ev.id,
+          );
         }
-        devices = d;
-        system = s;
-        pairing = p;
-        input = i;
-        transfers = tr;
-        inbox = ib;
-        layout = la;
-        settings = se;
-        activity = ac;
       },
       (st) => linkState.set(st),
     );
-    return unsubscribe;
+    return () => {
+      stopped = true;
+      unsubscribe();
+    };
   });
 
   // Wording contract shared with the e2e suite: empty while live.

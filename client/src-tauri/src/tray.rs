@@ -73,7 +73,9 @@ impl TrayFold {
             "snapshot" => {
                 if let Ok(v) = serde_json::from_value::<SnapshotSlice>(data.clone()) {
                     self.seat = Some(v.input.seat);
-                    self.advertise = Some(v.general.advertise);
+                    if let Some(g) = v.general {
+                        self.advertise = Some(g.advertise);
+                    }
                     self.peer = v.input.peer;
                 }
             }
@@ -116,7 +118,13 @@ impl TrayFold {
 #[derive(Deserialize)]
 struct SnapshotSlice {
     input: InputSlice,
-    general: GeneralSlice,
+    /// The v1 `Snapshot` is `{system, devices, pairing, input}` — it carries
+    /// no settings section, so this is absent on the real wire and only
+    /// present on richer mock payloads. Requiring it made the whole snapshot
+    /// fail to deserialize and left the tray fold empty until the first
+    /// `input.changed`.
+    #[serde(default)]
+    general: Option<GeneralSlice>,
 }
 
 #[derive(Deserialize)]
@@ -330,6 +338,23 @@ mod tests {
         f.apply("input.changed", &json!({"seat": "remote", "peer": "d1"}));
         assert_eq!(f.state(true), TrayState::Remote);
         assert_eq!(f.peer(), Some("d1"));
+    }
+
+    #[test]
+    fn real_snapshot_without_general_still_folds_the_seat() {
+        // Live v1 snapshot shape: no `general` section at all.
+        let mut f = TrayFold::default();
+        f.apply(
+            "snapshot",
+            &json!({
+                "system": {"name": "mac"},
+                "devices": [],
+                "pairing": {"mode": "idle"},
+                "input": {"seat": "remote", "channel_open": true, "peer": "d9"}
+            }),
+        );
+        assert_eq!(f.state(true), TrayState::Remote);
+        assert_eq!(f.peer(), Some("d9"));
     }
 
     #[test]

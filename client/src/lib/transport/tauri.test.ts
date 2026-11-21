@@ -75,11 +75,13 @@ describe("TauriTransport", () => {
     const states: string[] = [];
     t.subscribe(null, (e) => events.push(e), (s) => states.push(s));
     // Simulate the Rust emits; a payload without seq/type is ignored.
-    emit("tetherly://event", { seq: 3, type: "activity.changed", data: { k: 1 } });
+    // Rust forwards the envelope's `data` untouched → `{activity: {…}}`.
+    emit("tetherly://event", { seq: 3, type: "activity.changed", data: { activity: { k: 1 } } });
     emit("tetherly://link", "offline");
     emit("tetherly://event", { bogus: true });
     emit("tetherly://link", "sideways");
-    expect(events).toEqual([{ seq: 3, type: "activity.changed", data: { k: 1 } }]);
+    // …and the SPA sees a ServerEvent: `id` (fed to lastSeq) + bare payload.
+    expect(events).toEqual([{ id: 3, type: "activity.changed", data: { k: 1 } }]);
     expect(states).toEqual(["offline"]);
   });
 

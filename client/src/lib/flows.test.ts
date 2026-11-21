@@ -2,7 +2,7 @@
 // component tier): script snapshot + events through the same interface the
 // daemon drives, then assert on what the real pages rendered. Browser-tier
 // Playwright runs land once the remaining pages exist.
-import { render, screen, waitFor } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { describe, expect, it } from "vitest";
 import App from "../App.svelte";
 import { MockTransport } from "../lib/transport/mock";
@@ -65,6 +65,51 @@ describe("app flows over MockTransport", () => {
     expect(screen.getByText("mac")).toBeTruthy();
     // input seat starts local
     expect(screen.getAllByText("本机").length).toBeGreaterThan(0);
+  });
+
+  it("flow: snapshot triggers REST hydration of the event-fed sections", async () => {
+    // Real daemon: the burst is the Snapshot alone, so 设置/布局 would stay on
+    // "等待…" forever without the GET fallback (§220).
+    const settings = {
+      general: { name: "hydrated-node", advertise: true, reconnect: true, loopback_only: false, overlay_enabled: false, tray_owner: "client" },
+      transfer: { auto_accept: false },
+    };
+    const layout = {
+      display: { width: 2560, height: 1664, scale_factor: 2 },
+      edges: [
+        { edge: "left", peer: null },
+        { edge: "right", peer: "d1" },
+        { edge: "top", peer: null },
+        { edge: "bottom", peer: null },
+      ],
+      config: {},
+      policy: { enabled: true, allow_inbound_control: true, auto_link_paired_peers: false },
+    };
+    const t = new MockTransport((method, path) => {
+      if (method !== "GET") return {};
+      if (path === "/api/v1/settings") return settings;
+      if (path === "/api/v1/layout") return layout;
+      if (path === "/api/v1/transfers") return { active_count: 0, terminal_count: 0, transfers: [], stats: {} };
+      if (path === "/api/v1/inbox") return { count: 0, total_bytes: 0, files: [] };
+      if (path === "/api/v1/activity") return { candidates: [], replies: [], messages: [], handoffs: [] };
+      return {};
+    });
+    render(App, { transport: t });
+    t.emit({ id: 1, type: "snapshot", data: snapshot([device("d1", "DESKTOP")]) });
+    await waitFor(() =>
+      expect(t.calls.filter((c) => c.method === "GET").map((c) => c.path).sort()).toEqual([
+        "/api/v1/activity",
+        "/api/v1/inbox",
+        "/api/v1/layout",
+        "/api/v1/settings",
+        "/api/v1/transfers",
+      ]),
+    );
+    await fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    await waitFor(() => expect(screen.getByDisplayValue("hydrated-node")).toBeTruthy());
+    expect(screen.queryByText("等待设置数据…")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "布局" }));
+    await waitFor(() => expect(screen.getByRole("group", { name: "右侧" }).textContent).toContain("DESKTOP"));
   });
 
   it("flow: device.updated and device.removed update the live list", async () => {

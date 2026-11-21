@@ -139,22 +139,28 @@ const server = http.createServer((req, res) => {
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
-    // Scripted stream: the full-state burst a fresh session receives. Frames
-    // use the real EventEnvelope wire shape: {"seq","type","data"} (§4.3).
-    const frames = [
-      { type: "snapshot", data: snapshot },
-      { type: "activity.changed", data: activity },
-      { type: "layout.changed", data: layout },
-      { type: "settings.changed", data: settings },
-      { type: "transfers.changed", data: transfers },
-      { type: "inbox.changed", data: inbox },
-    ];
+    // Scripted stream, mirroring the real daemon (§220): the subscribe burst
+    // is the Snapshot ONLY — layout/settings/transfers/inbox/activity are
+    // served by the GET routes below and pushed as `*.changed` only on
+    // change. Frames use the real EventEnvelope wire shape
+    // {"seq","type","data"} (§4.3), where `data` is the serde-tagged event
+    // minus `type`, so the payload sits under its wrapper key
+    // (`{snapshot: …}`, `{activity: …}` …), exactly as the daemon emits it.
+    const frames = [{ type: "snapshot", data: { snapshot } }];
     for (const f of frames) {
       res.write(`id: ${seq}\nevent: ${f.type}\ndata: ${JSON.stringify({ seq, type: f.type, data: f.data })}\n\n`);
       seq += 1;
     }
     const keep = setInterval(() => res.write(": ping\n\n"), 5000);
     req.on("close", () => clearInterval(keep));
+    return;
+  }
+
+  const sections = { layout, settings, transfers, inbox, activity };
+  const sec = p.match(/^\/api\/v1\/(layout|settings|transfers|inbox|activity)$/);
+  if (sec && req.method === "GET") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(sections[sec[1]]));
     return;
   }
 

@@ -22,8 +22,27 @@ function streamResponse(reader: { read: () => Promise<unknown>; cancel: () => Pr
   });
 }
 
-function frame(seq: number, type: string, data: unknown) {
-  return `id: ${seq}\nevent: ${type}\ndata: ${JSON.stringify({ seq, type, data })}\n\n`;
+// Real wire shape (tetherly-api `EventEnvelope`): the envelope's `data` is the
+// `#[serde(tag = "type")]` event minus `type`, i.e. `{snapshot: {…}}`,
+// `{device: {…}}`, `{activity: {…}}` … `wrap` mirrors that for a type.
+const WRAP: Record<string, string> = {
+  snapshot: "snapshot",
+  "device.updated": "device",
+  "pairing.changed": "pairing",
+  "input.changed": "input",
+  "system.changed": "system",
+  "transfers.changed": "transfers",
+  "inbox.changed": "inbox",
+  "layout.changed": "layout",
+  "settings.changed": "settings",
+  "activity.changed": "activity",
+};
+function wrap(type: string, bare: unknown): unknown {
+  const k = WRAP[type];
+  return k ? { [k]: bare } : bare;
+}
+function frame(seq: number, type: string, bare: unknown) {
+  return `id: ${seq}\nevent: ${type}\ndata: ${JSON.stringify({ seq, type, data: wrap(type, bare) })}\n\n`;
 }
 
 async function flush() {
@@ -56,6 +75,32 @@ describe("parseFrame", () => {
     });
   });
 
+  it("unwraps the daemon's wrapper key for every state-bearing event", () => {
+    // Captured from a live v0.2.71 daemon (`GET /api/v1/events`): the snapshot
+    // arrives as `{"seq":…,"type":"snapshot","data":{"snapshot":{…}}}`. The
+    // v0.2.71 SPA handed `{snapshot: …}` to the stores → `t.devices is not
+    // iterable`, empty overview. Regression guard for that.
+    const real =
+      'id: 1795300619328017\nevent: snapshot\ndata: {"seq":1795300619328017,"type":"snapshot","data":{"snapshot":{"system":{"version":"0.2.71"},"devices":[{"id":"d1","alias":"home-win"}],"pairing":{"mode":"idle"},"input":{"seat":"local"}}}}\n\n';
+    const ev = parseFrame(real);
+    expect(ev?.type).toBe("snapshot");
+    expect(ev?.id).toBe(1795300619328017);
+    expect((ev?.data as { devices: unknown[] }).devices).toHaveLength(1);
+    expect(parseFrame(frame(2, "device.updated", { id: "d1" }))?.data).toEqual({ id: "d1" });
+    expect(parseFrame(frame(3, "layout.changed", { display: { width: 1 } }))?.data).toEqual({
+      display: { width: 1 },
+    });
+    expect(parseFrame(frame(4, "activity.changed", { items: [] }))?.data).toEqual({ items: [] });
+    // Non-wrapped events keep their object: `{id}` / `{topic}` / `{kind,payload}`.
+    expect(parseFrame(frame(5, "device.removed", { id: "d1" }))?.data).toEqual({ id: "d1" });
+    expect(parseFrame(frame(6, "invalidated", { topic: "layout" }))?.data).toEqual({ topic: "layout" });
+    expect(parseFrame(frame(7, "diagnostic", { kind: "k", payload: 1 }))?.data).toEqual({ kind: "k", payload: 1 });
+    // A bare payload (legacy/mock) passes through untouched.
+    expect(parseFrame('id: 8\nevent: snapshot\ndata: {"seq":8,"type":"snapshot","data":{"devices":[]}}\n\n')?.data).toEqual({
+      devices: [],
+    });
+  });
+
   it("rejects malformed or mismatched v1 sequence/type envelopes", () => {
     expect(parseFrame("id: 4\nevent: x\ndata: {not-json}\n\n")).toBeNull();
     expect(
@@ -63,6 +108,19 @@ describe("parseFrame", () => {
         "id: 4\nevent: x\ndata: {\"seq\":5,\"type\":\"x\",\"data\":null}\n\n",
       ),
     ).toBeNull();
+  });
+});
+
+describe("HttpTransport request", () => {
+  afterEach(() => vi.restoreAllMocks());
+  it("fetches the given /api/v1 path verbatim (no doubled prefix)", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const t = new HttpTransport();
+    await t.request("GET", "/api/v1/diagnostics/logs?lines=200");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/api/v1/diagnostics/logs?lines=200");
   });
 });
 

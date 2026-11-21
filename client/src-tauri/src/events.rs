@@ -78,11 +78,38 @@ pub fn parse_frame(lines: &[&str]) -> Option<WireEvent> {
         // Legacy event streams carry bare JSON payloads; retain that shape.
         parsed
     };
-    Some(WireEvent {
-        seq,
-        ty,
-        data: bare,
-    })
+    let data = unwrap_payload(&ty, bare);
+    Some(WireEvent { seq, ty, data })
+}
+
+/// The daemon serializes `Event` with `#[serde(tag = "type")]` and named
+/// fields, so the envelope's `data` is `{"snapshot": {…}}`, `{"device": {…}}`,
+/// `{"layout": {…}}` … — one wrapper key per state-bearing event. The tray
+/// fold, the notification matcher and the SPA all speak in bare payloads
+/// (`Snapshot`, `Input`, `Activity` …), so strip that key here, once.
+/// `device.removed` (`{id}`), `invalidated` (`{topic}`) and `diagnostic`
+/// (`{kind, payload}`, flattened) are handed through unchanged, as is any
+/// legacy/mock payload that is already bare.
+fn unwrap_payload(ty: &str, data: serde_json::Value) -> serde_json::Value {
+    let key = match ty {
+        "snapshot" => "snapshot",
+        "device.updated" => "device",
+        "pairing.changed" => "pairing",
+        "input.changed" => "input",
+        "system.changed" => "system",
+        "transfers.changed" => "transfers",
+        "inbox.changed" => "inbox",
+        "layout.changed" => "layout",
+        "settings.changed" => "settings",
+        "activity.changed" => "activity",
+        _ => return data,
+    };
+    match data {
+        serde_json::Value::Object(mut map) if map.len() == 1 && map.contains_key(key) => {
+            map.remove(key).unwrap_or(serde_json::Value::Null)
+        }
+        other => other,
+    }
 }
 
 const BACKOFF_MS: [u64; 4] = [1000, 2000, 5000, 10000];
@@ -326,6 +353,48 @@ mod tests {
         assert_eq!(ev.seq, 7);
         assert_eq!(ev.ty, "snapshot");
         assert_eq!(ev.data["a"], 1, "envelope unwrapped to the bare payload");
+    }
+
+    #[test]
+    fn parse_frame_strips_the_serde_wrapper_key() {
+        // Real v0.2.71 wire shape: `data` is the tagged event minus `type`,
+        // so the snapshot sits under `data.snapshot`. Feeding that wrapper to
+        // TrayFold/the SPA left the tray stuck on "local" and the overview
+        // empty; the wrapper must be stripped exactly once.
+        let lines = [
+            "id: 9",
+            "event: snapshot",
+            "data: {\"seq\":9,\"type\":\"snapshot\",\"data\":{\"snapshot\":{\"devices\":[{\"id\":\"d1\"}],\"input\":{\"seat\":\"local\"}}}}",
+        ];
+        let ev = parse_frame(&lines).unwrap();
+        assert_eq!(ev.data["devices"][0]["id"], "d1");
+        assert_eq!(ev.data["input"]["seat"], "local");
+        assert!(ev.data.get("snapshot").is_none());
+
+        let act = parse_frame(&[
+            "id: 10",
+            "event: activity.changed",
+            "data: {\"seq\":10,\"type\":\"activity.changed\",\"data\":{\"activity\":{\"inbox\":[]}}}",
+        ])
+        .unwrap();
+        assert_eq!(act.data, serde_json::json!({"inbox": []}));
+
+        // Non-wrapped events keep their object …
+        let rm = parse_frame(&[
+            "id: 11",
+            "event: device.removed",
+            "data: {\"seq\":11,\"type\":\"device.removed\",\"data\":{\"id\":\"d1\"}}",
+        ])
+        .unwrap();
+        assert_eq!(rm.data, serde_json::json!({"id": "d1"}));
+        // … and an already-bare payload (legacy/mock) is left alone.
+        let bare = parse_frame(&[
+            "id: 12",
+            "event: snapshot",
+            "data: {\"seq\":12,\"type\":\"snapshot\",\"data\":{\"devices\":[]}}",
+        ])
+        .unwrap();
+        assert_eq!(bare.data, serde_json::json!({"devices": []}));
     }
 
     #[test]

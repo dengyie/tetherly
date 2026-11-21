@@ -5,7 +5,7 @@
 // `tetherly://link` emits. Uses window.__TAURI__ (withGlobalTauri), so no
 // npm dependency is needed.
 
-import { ApiError, type LinkState, type Method, type ServerEvent, type Transport } from "./transport";
+import { ApiError, type LinkState, type Method, type ServerEvent, type Transport, unwrapEventData } from "./transport";
 
 type TauriApi = {
   core: {
@@ -55,8 +55,12 @@ export class TauriTransport implements Transport {
     // The Rust side keeps lastSeq; the JS value is ignored (§5.2).
     const unsubs: Promise<() => void>[] = [
       tauri().event.listen("tetherly://event", (e) => {
-        const ev = e.payload as ServerEvent;
-        if (ev && typeof ev === "object" && "seq" in ev && "type" in ev) on(ev);
+        // Rust forwards the WireEvent `{seq, type, data}`; the SPA's
+        // ServerEvent names the cursor `id` (what `lastSeq` is fed from).
+        const ev = e.payload as { seq?: unknown; type?: unknown; data?: unknown } | null;
+        if (!ev || typeof ev !== "object" || typeof ev.seq !== "number" || typeof ev.type !== "string") return;
+        const sev: ServerEvent = { id: ev.seq, type: ev.type, data: unwrapEventData(ev.type, ev.data) };
+        on(sev);
       }),
       tauri().event.listen("tetherly://link", (e) => {
         const s = e.payload as LinkState;

@@ -3,7 +3,7 @@
 // Reconnect policy per ADR-139 §5.2: 1s -> 2s -> 5s -> 10s, capped.
 
 import { API_PREFIX } from "../api/gen/api";
-import { ApiError, type LinkState, type Method, type ServerEvent, type Transport } from "./transport";
+import { ApiError, type LinkState, type Method, type ServerEvent, type Transport, unwrapEventData } from "./transport";
 
 const BACKOFF_MS = [1000, 2000, 5000, 10000];
 export const SSE_HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -19,7 +19,9 @@ export class HttpTransport implements Transport {
     const headers: Record<string, string> = { "Tetherly-Client": "web/1.0.0" };
     if (token) headers.Authorization = `Bearer ${token}`;
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    const resp = await fetch(API_PREFIX + path, {
+    // `path` is already the full `/api/v1/...` route (ApiClient speaks the same
+    // paths to the Tauri proxy, which requires that prefix) — do not prepend.
+    const resp = await fetch(path, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -150,7 +152,7 @@ export function parseFrame(frame: string): ServerEvent | null {
     const parsed = JSON.parse(data);
     if (parsed && typeof parsed === "object" && "seq" in parsed) {
       if (parsed.seq !== id || !("type" in parsed) || !("data" in parsed)) return null;
-      return { id, type, data: parsed.data };
+      return { id, type, data: unwrapEventData(type, parsed.data) };
     }
     return { id, type, data: parsed };
   } catch (err) {
