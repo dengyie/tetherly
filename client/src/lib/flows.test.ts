@@ -76,6 +76,7 @@ describe("app flows over MockTransport", () => {
     };
     const layout = {
       display: { width: 2560, height: 1664, scale_factor: 2 },
+      display_auto: true,
       edges: [
         { edge: "left", peer: null },
         { edge: "right", peer: "d1" },

@@ -356,6 +356,7 @@ mod events {
                             height: 956,
                             scale_factor: 2.0,
                         },
+                        display_auto: true,
                         edges: vec![LayoutEdge {
                             edge: "right".into(),
                             peer: Some("p1".into()),

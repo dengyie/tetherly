@@ -132,6 +132,13 @@
             <div class="text-xs font-semibold">本机</div>
             <div class="mono text-[11px] dim">{data.display.width} × {data.display.height}</div>
             <div class="text-[10px] dim">缩放 {Math.round(data.display.scale_factor * 100)}%</div>
+            {#if data.display_auto === true}
+              <span class="badge mt-1 border-brand-200 bg-brand-50 text-brand-700 dark:border-brand-800 dark:bg-brand-950/40 dark:text-brand-300" title="分辨率由 daemon 从系统读取（§221）"><Icon name="monitor" size={11} />自动检测</span>
+            {:else if data.display_auto === false}
+              <!-- `undefined` = older daemon without §221: show neither badge nor the button. -->
+              <span class="badge mt-1" title="分辨率已手动固定；点击恢复自动可重新跟随系统">手动设置</span>
+              <button type="button" class="btn btn-ghost btn-sm mt-1 block w-full text-[11px]" disabled={busy} onclick={() => cfg({ display_auto: true })}><Icon name="refresh" size={11} />恢复自动</button>
+            {/if}
           </div>
         </div>
         {@render slot("right")}

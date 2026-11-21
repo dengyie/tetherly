@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::events::UiEvent;
-use crate::store::{save_topology_layout, save_topology_policy, TopologyPolicy};
+use crate::store::{save_topology_layout, save_topology_policy, TopologyLayout, TopologyPolicy};
 use std::collections::HashMap;
 use tetherly_core::{
     CoreError, DeviceId, DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor,
@@ -16,6 +16,10 @@ use tracing::debug;
 pub struct TopologyLayoutReport {
     pub ok: bool,
     pub display: DisplayRect,
+    /// `true` while `display` follows the OS (§221); `false` once pinned via
+    /// `PATCH /topology/config {width|height|scale_factor}`.
+    #[serde(default)]
+    pub display_auto: bool,
     pub neighbors: HashMap<DisplayEdge, EdgeNeighbor>,
     pub config: EdgeCrossingConfig,
     pub peer_count: usize,
@@ -87,9 +91,51 @@ pub struct TopologyPolicyReport {
     pub message: String,
 }
 
+/// OS display probe used by the auto-display refresh (§221). Unit tests get
+/// `None` so layout assertions stay deterministic across the macOS / Windows /
+/// Linux CI runners (a headless runner would otherwise inject its own size).
+pub(crate) fn probe_local_display() -> Option<(u32, u32, Option<f32>)> {
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        crate::platform::local_display_probe()
+    }
+}
+
+/// Fold an OS probe into `layout.display` unless the user pinned it. Returns
+/// `true` when the rectangle changed. A `None` scale keeps the stored scale.
+pub(crate) fn apply_display_probe(
+    layout: &mut TopologyLayout,
+    probe: Option<(u32, u32, Option<f32>)>,
+) -> bool {
+    if layout.display_manual {
+        return false;
+    }
+    let Some((w, h, scale)) = probe else {
+        return false;
+    };
+    let next = DisplayRect::new(w, h, scale.unwrap_or(layout.display.scale_factor));
+    if next == layout.display {
+        return false;
+    }
+    layout.display = next;
+    true
+}
+
 impl Node {
+    /// Refresh the auto-tracked local display from the OS (§221). No-op when
+    /// the display is pinned manually or the platform cannot report a size.
+    pub fn topology_refresh_auto_display(&self) -> bool {
+        let mut layout = self.shared.topology_layout.lock().expect("topology_layout");
+        apply_display_probe(&mut layout, probe_local_display())
+    }
+
     /// Returns the current local spatial display topology, configured neighbors, and crossing settings.
     pub fn topology_layout(&self) -> TopologyLayoutReport {
+        self.topology_refresh_auto_display();
         let layout = self
             .shared
             .topology_layout
@@ -105,6 +151,7 @@ impl Node {
         TopologyLayoutReport {
             ok: true,
             display: layout.display,
+            display_auto: !layout.display_manual,
             neighbors: layout.neighbors,
             config: layout.config,
             peer_count,
@@ -335,10 +382,20 @@ impl Node {
         fast_push_delta_px: Option<u32>,
         entry_return_grace_ms: Option<u32>,
         remote_speed_percent: Option<u32>,
+        display_auto: Option<bool>,
     ) -> Result<TopologyConfigReport, CoreError> {
         let now = self.shared.clock.unix_ms();
         let (display, config, neighbors_count) = {
             let mut layout = self.shared.topology_layout.lock().expect("topology_layout");
+            // §221: `display_auto: true` drops the manual pin and re-reads the
+            // OS right away; explicit geometry below pins it again.
+            if display_auto == Some(true) {
+                layout.display_manual = false;
+                apply_display_probe(&mut layout, probe_local_display());
+            }
+            if width.is_some() || height.is_some() || scale_factor.is_some() {
+                layout.display_manual = true;
+            }
             if let Some(res) = resistance_px {
                 layout.config.resistance_px = TopologyValidator::clamp_resistance(res);
             }
@@ -423,6 +480,7 @@ impl Node {
     pub async fn topology_broadcast_state(&self) -> Result<usize, CoreError> {
         let now_ms = self.shared.clock.unix_ms();
         let my_id = self.shared.identity.device_id().to_string();
+        self.topology_refresh_auto_display();
         let (display, neighbors, config) = {
             let layout = self.shared.topology_layout.lock().expect("topology_layout");
             (layout.display, layout.neighbors.clone(), layout.config)
@@ -558,5 +616,58 @@ impl Node {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod auto_display_tests {
+    use super::{apply_display_probe, TopologyLayout};
+    use tetherly_core::DisplayRect;
+
+    fn layout(manual: bool) -> TopologyLayout {
+        TopologyLayout {
+            display_manual: manual,
+            ..TopologyLayout::default()
+        }
+    }
+
+    #[test]
+    fn probe_replaces_the_default_rectangle_and_keeps_scale_when_unknown() {
+        let mut l = layout(false);
+        assert!(apply_display_probe(&mut l, Some((1470, 956, None))));
+        assert_eq!(l.display, DisplayRect::new(1470, 956, 1.0));
+        assert!(!l.display_manual, "auto refresh never pins the display");
+    }
+
+    #[test]
+    fn probe_scale_is_adopted_and_clamped() {
+        let mut l = layout(false);
+        assert!(apply_display_probe(&mut l, Some((1470, 956, Some(2.0)))));
+        assert_eq!(l.display.scale_factor, 2.0);
+        // 16-bit garbage from a broken driver is clamped, not trusted verbatim.
+        assert!(apply_display_probe(&mut l, Some((65535, 1, Some(9.0)))));
+        assert_eq!(l.display, DisplayRect::new(15360, 240, 4.0));
+    }
+
+    #[test]
+    fn manual_pin_and_missing_probe_leave_the_rectangle_alone() {
+        let mut pinned = layout(true);
+        pinned.display = DisplayRect::new(2560, 1440, 1.25);
+        assert!(!apply_display_probe(
+            &mut pinned,
+            Some((1470, 956, Some(2.0)))
+        ));
+        assert_eq!(pinned.display, DisplayRect::new(2560, 1440, 1.25));
+
+        let mut auto = layout(false);
+        assert!(!apply_display_probe(&mut auto, None));
+        assert_eq!(auto.display, DisplayRect::default());
+    }
+
+    #[test]
+    fn unchanged_probe_reports_no_change() {
+        let mut l = layout(false);
+        assert!(!apply_display_probe(&mut l, Some((1920, 1080, Some(1.0)))));
+        assert!(!apply_display_probe(&mut l, Some((1920, 1080, None))));
     }
 }

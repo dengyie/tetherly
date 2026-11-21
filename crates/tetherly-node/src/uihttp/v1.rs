@@ -6499,6 +6499,7 @@ async fn patch_topology_config(node: &Node, body: &[u8]) -> Handled {
             patch.fast_push_delta_px,
             patch.entry_return_grace_ms,
             patch.remote_speed_percent,
+            patch.display_auto,
         )
         .await
         .map_err(core_error)?;

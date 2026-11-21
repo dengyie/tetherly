@@ -15,6 +15,7 @@ const MIME = {
 
 const layout = {
   display: { width: 1920, height: 1080, scale_factor: 1 },
+  display_auto: true,
   edges: [
     { edge: "left", peer: null },
     { edge: "right", peer: "d1" },

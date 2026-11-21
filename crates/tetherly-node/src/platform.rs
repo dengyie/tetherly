@@ -1874,6 +1874,37 @@ pub fn screen_size() -> (i32, i32) {
     (1920, 1080)
 }
 
+/// Primary-display geometry for the spatial topology (§221): logical
+/// `(width, height)` in the same coordinate space `cursor_pos` /
+/// `screen_size` use, plus the backing scale when the OS exposes it.
+/// `None` when the platform cannot say (headless / no display server), so
+/// callers keep whatever the layout file holds instead of adopting a bogus
+/// 1×1 rectangle.
+#[cfg(windows)]
+pub fn local_display_probe() -> Option<(u32, u32, Option<f32>)> {
+    let (w, h) = screen_size();
+    (w > 0 && h > 0).then_some((w as u32, h as u32, None))
+}
+
+#[cfg(target_os = "macos")]
+pub fn local_display_probe() -> Option<(u32, u32, Option<f32>)> {
+    let main_id = objc2_core_graphics::CGMainDisplayID();
+    let bounds = objc2_core_graphics::CGDisplayBounds(main_id);
+    let w = bounds.size.width;
+    let h = bounds.size.height;
+    if !(w >= 1.0 && h >= 1.0) {
+        return None;
+    }
+    let px_w = objc2_core_graphics::CGDisplayPixelsWide(main_id) as f64;
+    let scale = (px_w > 0.0).then_some((px_w / w) as f32);
+    Some((w as u32, h as u32, scale))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn local_display_probe() -> Option<(u32, u32, Option<f32>)> {
+    None
+}
+
 /// Smooth-wheel sub-detent accumulator (Windows hook, §176).
 ///
 /// Product decision 2026-11-20: smooth (high-resolution) wheel scrolling IS

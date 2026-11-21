@@ -1805,6 +1805,13 @@ pub fn save_focus_policy(dir: &Path, policy: &FocusPolicy) -> Result<(), NodeSto
 pub struct TopologyLayout {
     #[serde(default)]
     pub display: DisplayRect,
+    /// `true` once the user pinned `display` through `PATCH /topology/config`
+    /// (§221). While `false` the daemon refreshes `display` from the OS
+    /// (`platform::local_display_probe`) at startup, on every layout read and
+    /// before each topology broadcast, so the rectangle peers map cursor
+    /// entries against is the real screen rather than the 1920×1080 default.
+    #[serde(default)]
+    pub display_manual: bool,
     #[serde(default)]
     pub neighbors: HashMap<DisplayEdge, EdgeNeighbor>,
     #[serde(default)]
@@ -3830,6 +3837,10 @@ mod tests {
         assert_eq!(def_layout.display.width, 1920);
         assert_eq!(def_layout.display.height, 1080);
         assert!(def_layout.neighbors.is_empty());
+        assert!(
+            !def_layout.display_manual,
+            "fresh layouts follow the OS display"
+        );
 
         let def_policy = load_topology_policy(&dir);
         assert!(def_policy.enabled);
@@ -3849,6 +3860,7 @@ mod tests {
         );
         let custom_layout = TopologyLayout {
             display: DisplayRect::new(2560, 1440, 1.25),
+            display_manual: true,
             neighbors,
             config: EdgeCrossingConfig {
                 resistance_px: 20,

@@ -155,6 +155,7 @@ async fn disable_tb_redundancy_band(node: &tetherly_node::Node) {
         None,
         Some(0),
         None,
+        None,
     )
     .await
     .unwrap();

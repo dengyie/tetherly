@@ -746,6 +746,7 @@ pub fn layout(node: &Node) -> Layout {
             height: l.display.height,
             scale_factor: l.display.scale_factor,
         },
+        display_auto: l.display_auto,
         edges,
         config: tetherly_api::CrossingConfig {
             resistance_px: l.config.resistance_px,

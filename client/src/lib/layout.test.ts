@@ -29,8 +29,9 @@ const device = (id: string, name: string, over: Partial<Device> = {}): Device =>
   ...over,
 });
 
-const layout = (): LayoutData => ({
+const layout = (over: Partial<LayoutData> = {}): LayoutData => ({
   display: { width: 2560, height: 1440, scale_factor: 2 },
+  display_auto: true,
   edges: [
     { edge: "left", peer: null },
     { edge: "right", peer: "d1" },
@@ -49,6 +50,7 @@ const layout = (): LayoutData => ({
     remote_speed_percent: 100,
   },
   policy: { enabled: true, allow_inbound_control: true, auto_link_paired_peers: false },
+  ...over,
 });
 
 function mountLayout(data: LayoutData | null = layout()) {
@@ -70,6 +72,8 @@ describe("layout editor", () => {
     mountLayout();
     expect(screen.getByTestId("layout-display").textContent).toContain("2560 × 1440");
     expect(screen.getByTestId("layout-display").textContent).toContain("缩放 200%");
+    expect(screen.getByTestId("layout-display").textContent).toContain("自动检测");
+    expect(screen.queryByRole("button", { name: /恢复自动/ })).toBeNull();
     const right = screen.getByRole("group", { name: "右侧" });
     expect(right.textContent).toContain("WIN");
     expect(screen.getByRole("group", { name: "左侧" }).textContent).toContain("未配置");
@@ -112,6 +116,13 @@ describe("layout editor", () => {
       { method: "PATCH", path: "/api/v1/topology/config", body: { wrap_around: true } },
       { method: "PATCH", path: "/api/v1/topology/policy", body: { allow_inbound_control: false } },
     ]);
+  });
+
+  it("offers 恢复自动 for a manually pinned display and PATCHes display_auto (§221)", async () => {
+    const t = mountLayout(layout({ display_auto: false }));
+    expect(screen.getByTestId("layout-display").textContent).toContain("手动设置");
+    await fireEvent.click(screen.getByRole("button", { name: /恢复自动/ }));
+    expect(t.calls).toEqual([{ method: "PATCH", path: "/api/v1/topology/config", body: { display_auto: true } }]);
   });
 
   it("syncs topology to peers", async () => {

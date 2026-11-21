@@ -755,6 +755,11 @@ pub struct LayoutEdge {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Layout {
     pub display: DisplayRect,
+    /// `true` while `display` tracks the OS; `false` once pinned through
+    /// `PATCH /topology/config` geometry (§221). Send `display_auto: true` in
+    /// that PATCH to drop the pin.
+    #[serde(default)]
+    pub display_auto: bool,
     pub edges: Vec<LayoutEdge>,
     pub config: CrossingConfig,
     pub policy: LayoutPolicy,
@@ -1809,6 +1814,9 @@ pub struct TopologyConfigPatch {
     pub height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale_factor: Option<f32>,
+    /// `true` clears the manual display pin and re-probes the OS (§221).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_auto: Option<bool>,
 }
 
 /// Topology governance policy (mirrors the store's `TopologyPolicy`; device

@@ -30,6 +30,7 @@ const inbox = (over: Partial<Inbox> = {}): Inbox => ({
 
 const layout = (over: Partial<Layout> = {}): Layout => ({
   display: { width: 1470, height: 956, scale_factor: 2 },
+  display_auto: true,
   edges: [{ edge: "right", peer: null }],
   config: {
     resistance_px: 15,

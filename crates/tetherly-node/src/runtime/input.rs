@@ -7953,6 +7953,7 @@ mod remote_screen_tests {
             None,
             None,
             Some(150),
+            None,
         )
         .await
         .unwrap();

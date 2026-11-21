@@ -129,7 +129,13 @@ export type LayoutEdge = {
  */
 edge: string, peer: string | null, };
 
-export type Layout = { display: DisplayRect, edges: Array<LayoutEdge>, config: CrossingConfig, policy: LayoutPolicy, };
+export type Layout = { display: DisplayRect,
+/**
+ * `true` while `display` tracks the OS; `false` once pinned through
+ * `PATCH /topology/config` geometry (§221). Send `display_auto: true` in
+ * that PATCH to drop the pin.
+ */
+display_auto: boolean, edges: Array<LayoutEdge>, config: CrossingConfig, policy: LayoutPolicy, };
 
 export type DisplayRect = { width: number, height: number, scale_factor: number, };
 
@@ -317,7 +323,11 @@ export type TopologyUnlinkRequest = { edge: string, };
 
 export type TopologyUnlinkReport = { edge: string, };
 
-export type TopologyConfigPatch = { resistance_px?: number | null, delay_ms?: number | null, corner_lock_size_px?: number | null, wrap_around?: boolean | null, redundancy_band_px?: number | null, slow_dwell_ms?: number | null, fast_push_delta_px?: number | null, entry_return_grace_ms?: number | null, remote_speed_percent?: number | null, width?: number | null, height?: number | null, scale_factor?: number | null, };
+export type TopologyConfigPatch = { resistance_px?: number | null, delay_ms?: number | null, corner_lock_size_px?: number | null, wrap_around?: boolean | null, redundancy_band_px?: number | null, slow_dwell_ms?: number | null, fast_push_delta_px?: number | null, entry_return_grace_ms?: number | null, remote_speed_percent?: number | null, width?: number | null, height?: number | null, scale_factor?: number | null,
+/**
+ * `true` clears the manual display pin and re-probes the OS (§221).
+ */
+display_auto?: boolean | null, };
 
 export type TopologyConfigReport = { display: DisplayRect, config: CrossingConfig, };
 

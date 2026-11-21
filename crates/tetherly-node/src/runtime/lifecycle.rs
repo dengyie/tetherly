@@ -186,7 +186,18 @@ impl Node {
         let initial_local_actions = load_local_actions(&cfg.data_dir);
         let initial_action_policy = load_action_policy(&cfg.data_dir);
         let initial_focus_policy = load_focus_policy(&cfg.data_dir);
-        let initial_topology_layout = load_topology_layout(&cfg.data_dir);
+        let mut initial_topology_layout = load_topology_layout(&cfg.data_dir);
+        if super::topology::apply_display_probe(
+            &mut initial_topology_layout,
+            super::topology::probe_local_display(),
+        ) {
+            tracing::info!(
+                width = initial_topology_layout.display.width,
+                height = initial_topology_layout.display.height,
+                scale = initial_topology_layout.display.scale_factor,
+                "topology: local display auto-detected (§221)"
+            );
+        }
         let initial_topology_policy = load_topology_policy(&cfg.data_dir);
         let initial_input_policy = load_input_policy(&cfg.data_dir);
         let initial_virtual_display_policy = load_virtual_display_policy(&cfg.data_dir);
