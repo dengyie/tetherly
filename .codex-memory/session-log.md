@@ -1761,3 +1761,8 @@
 - 定级并修复 P3：screen_recording_replay（screen_media.rs:153）缺 ParentDir 守卫，镜像兄弟函数补齐 + data_dir 相对解析；新增 uihttp 测试 v1_screen_recording_replay_rejects_traversal，RED→GREEN 证据链（stash 验证）。
 - commit 11525b7 已推送，CI run 44869937409；plan §8 已登记。
 - 教训重申：plan §8 插入必须用完整上一条标题行作 old_string（§203 教训）。
+
+## 2026-11-21 §206 node runtime 收尾深审收官
+- lifecycle.rs 3001 行全读完毕（700-2100 run/attach/handle_event，2100-3001 restart_daemon/preflight/cleanup + 测试）。确认 attach/release channel-identity ownership、keepalive weak sender、peer-down drag 清扫、restart staging 门 + preflight、lan promotion 身份核验全链在位。
+- §206 全 13 模块（~10k 行）纯审查零缺陷；plan §8 登记（old_string 用 §205 完整标题行，lesson 复用成功）；.codex-memory 双文件更新。
+- node runtime/ 层 35 模块深审至此全部收官：§204（会话面，零缺陷）、§205（屏幕面，1×P3 修复 11525b7 + CI 44869937409）、§206（收尾，零缺陷，3×P4 观察项）。

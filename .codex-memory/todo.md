@@ -305,3 +305,8 @@
 - 验证：RED（stash 守卫测试失败）→ GREEN → clippy 双形态 0 error → CI run 44869937409。
 - P4 观察项：①tile 编码 cache/grid 两分支 ~700 行×2 近似重复可抽 helper；②batch chunk pacing 逐 chunk await 现状默认值无碍。
 - 下一步：§206 runtime 其余模块（lifecycle/discovery/audio/routes/topology/locate/focus/remote_session/drag_controller/drag_target/shell_reveal/overlay ~8k 行），完成后批量登记 + 验收汇报。
+
+## 2026-11-21 §206 node runtime 收尾深审（纯审查，零代码缺陷）
+- [x] §206 lifecycle/discovery/audio/routes/topology/locate/focus/remote_session/drag×3/shell_reveal/overlay ~10k 行全读，零缺陷收官
+- [x] 登记 plan §8（§206 条目，含 3 条 P4 观察项）
+- 待办：node runtime/ 35 模块深审全部完成（§204/§205/§206）；下一步等待用户验收或指派新审计面（如 node 非 runtime 模块、client/Android 面）
