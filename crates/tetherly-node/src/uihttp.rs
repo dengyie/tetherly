@@ -1188,6 +1188,56 @@ mod tests {
 
     /// §162b: file-domain v1 resources — offers/decisions, outbox, storage,
     /// resume, auto-accept policy, inbox content — served and gated.
+    /// §205: recording replay must share the traversal guard its sibling
+    /// recording endpoints enforce — `..` components and missing file names
+    /// fail closed (UnsafeFileName) even at Read tier, while a plain relative
+    /// path still resolves under data_dir.
+    #[tokio::test]
+    async fn v1_screen_recording_replay_rejects_traversal() {
+        let (node, dir) = temp_test_node("v1_rec_replay_guard");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let client = crate::apitoken::read_client(&dir).expect("client token minted");
+        let client_auth = format!("Authorization: Bearer {client}");
+
+        for evil in ["../escape.trec", "sub/../../escape.trec", "a/../.."] {
+            let (_, code, body) = raw_with_head(
+                port,
+                "GET",
+                &format!("/api/v1/screen/recording/replay?path={evil}"),
+                Some(&client_auth),
+            )
+            .await;
+            assert_eq!(code, 400, "{body}");
+            let e: tetherly_api::ErrorBody = serde_json::from_value(body).unwrap();
+            assert_eq!(e.error.code, tetherly_api::ErrorCode::BadRequest);
+            assert!(
+                e.error.message.contains("unsafe file name"),
+                "traversal must be rejected by the path guard, got: {}",
+                e.error.message
+            );
+        }
+
+        // A plain relative path under data_dir passes the guard and reaches
+        // the open (not-found OpenRefused, not a traversal rejection).
+        let (_, code, body) = raw_with_head(
+            port,
+            "GET",
+            "/api/v1/screen/recording/replay?path=recordings/missing.trec",
+            Some(&client_auth),
+        )
+        .await;
+        assert_eq!(code, 400, "{body}");
+        let e: tetherly_api::ErrorBody = serde_json::from_value(body).unwrap();
+        assert_eq!(e.error.code, tetherly_api::ErrorCode::BadRequest);
+        assert!(
+            e.error.message.contains("open recording"),
+            "plain relative path must pass the guard and fail on open, got: {}",
+            e.error.message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn v1_file_domains_serve_and_gate() {
         let (node, dir) = temp_test_node("v1_file_domains");

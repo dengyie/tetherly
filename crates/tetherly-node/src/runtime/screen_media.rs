@@ -161,8 +161,24 @@ impl Node {
                 "recording path is required".into(),
             ));
         }
+        // Same traversal guard as screen_playback_start /
+        // screen_recording_snapshot_data: the caller-supplied replay path is
+        // resolved (absolute allowed, relative joined to data_dir), so `..`
+        // components and missing file names must fail closed before any
+        // filesystem read.
         let p = std::path::PathBuf::from(trimmed);
-        let file = std::fs::File::open(&p)
+        if p.file_name().is_none()
+            || p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(CoreError::UnsafeFileName);
+        }
+        let resolved = if p.is_absolute() {
+            p.clone()
+        } else {
+            self.shared.cfg.data_dir.join(&p)
+        };
+        let file = std::fs::File::open(&resolved)
             .map_err(|e| CoreError::OpenRefused(format!("open recording: {e}")))?;
         let mut reader = ScreenRecordingReader::new(std::io::BufReader::new(file))?;
         let eff_limit = limit.clamp(1, SCREEN_RECORDING_REPLAY_LIMIT_MAX);
@@ -182,7 +198,7 @@ impl Node {
         let meta = reader.meta().clone();
         Ok(ScreenRecordingReplayReport {
             ok: true,
-            path: p.display().to_string(),
+            path: resolved.display().to_string(),
             width: meta.width,
             height: meta.height,
             format_tag: meta.format_tag,
