@@ -1828,7 +1828,7 @@ impl ScreenFrame {
         Self::decode_payload(&frame.payload)
     }
 
-    /// Header is 24 bytes: magic(4) proto(1) seq(8) x(4) y(4) w(2) h(2)
+    /// Header is 31 bytes: magic(4) proto(1) seq(8) x(4) y(4) w(2) h(2)
     /// fmt(1) compress(1) stride(4).
     pub fn decode_payload(payload: &[u8]) -> Result<Self, CoreError> {
         // magic(4) + proto(1) + seq(8) + x(4) + y(4) + w(2) + h(2) + fmt(1)

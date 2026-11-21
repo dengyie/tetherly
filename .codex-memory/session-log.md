@@ -1722,3 +1722,11 @@
 - 修复②（P3）：audio_routing Attach/Detach sanitize 哨兵 "invalid_audio_session" 改 blank 模式（clear()），对齐 remote_session.rs no-sentinel 不变量；RED → GREEN（sanitize_blanks_invalid_session_id_not_sentinel）。
 - 验证：core 341（+2）/ node gesture 8 + audio_routing 2 回归绿；clippy 双形态 0 error；fmt 过；CI 提交后权威门禁。
 - microphone.rs 全 confirmed-design；core 根目录全部审毕，下一批 screen/（~26k 行分批）。
+- CI 44840651065 首跑 Windows job 唯一失败 test_action_runtime_policy_local_allowlist_and_sandbox_execution（5s 轮询窗内子进程历史未落，"never recorded its history entry"）——与本批 diff（gesture_map/audio_routing+docs）无交集，此前 8 连绿、mac/ubuntu 同测试过；--failed 重跑后全绿 6/6，判定 Windows runner 慢 flaky。登记备查：该测试 5s deadline 在慢 runner 上余量不足（tokio spawn + 子进程 echo 全链），后续若再现可加大 deadline 或改事件驱动。
+
+## 2026-11-21 §193 screen/ 协议五件套深审（wire/overlay/sender/receiver/sink+playout）
+- 范围：screen/ 第一批 6 文件 ~5500 行全读（wire 1906 / overlay 350 / sender 1634 / receiver 996 / sink 349 / playout 308）；至此 screen 协议三件套 + 重组/呈现链审毕。
+- 缺陷（P4，已修）：wire.rs:1831 decode_payload doc 注释 "Header is 24 bytes" 实际 31 字节（代码 const HEADER=31 正确），纯注释过期。
+- 关键正面论证：wire decode 31B header + 白名单 + 8MiB decoded cap 防 decode-bomb；assembler TMF1 重组 count==div_ceil 校验防短 count 空洞完成、delivered_seq 水位防 straggler 复活且 reset 保留水位、旧 seq 分片不打断新流；receiver apply seq 窗口容忍 next_seq=1 重启（last_seq!=0 才判跳变）、trace_pairs 区分 sender reset 与 HARQ 重复；on_peer_gone 全复位；playout 迟帧仅在队列>1 丢（保最后一帧呈现）。
+- P4 观察项登记：receiver apply profiler 硬编码 stage 值为占位（真实数据走 TYPE_SCREEN_PROFILE，node screen_stream.rs:281/1828 接线在位）；playout 名义间隔 33_333us 对高 fps 略保守（仅 EMA 平滑度）。
+- 验证：定向 cargo test -p tetherly-core --lib screen:: 89 全绿；fmt 过；一行注释修复随 CI 门禁。
