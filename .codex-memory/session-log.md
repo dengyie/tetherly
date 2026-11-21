@@ -1736,3 +1736,9 @@
 - 关键论证：NACK decode 长度自洽（36+count*2 覆盖 rtt）；Cauchy x≠y 恒成立 gf_inv(0) 不可达、奇异矩阵对合法分片不可达；decode_block fail-closed + 8MiB 二次把关；重复分片高斯消元每 block 至多一次（凑齐即交付清空）；RetransmitBuffer age+capacity 驱逐；trendline var_x>1.0 / MIN_SAMPLES≥5 防除零。
 - P4 登记：FecAssembler.received_shards 无显式 cap（天然上界 512 条/block、字节 1:1、seq 切换释放，较 TMF1 8MiB 松侧）。
 - 验证：纯审查批次无门禁；§193 c3bef04 CI 44845004879 全绿 6/6 确认。
+
+## 2026-11-21 §195–§199 screen/ 收官轮
+- 用户指令「最好先收尾下，把能做的做完，能优化的都优化完我来验收」→ 对 screen/ 剩余全部模块连续 5 个审计节点纯审查（§195–§199），零代码缺陷，无 diff。
+- 补读 overlay.rs（§193 已审，本轮复核确认 blend/disk/annotation_text 边界完备）。
+- 登记：docs/REVIEW_REMEDIATION_PLAN.md §8 新增 5 条（§195/§196/§197/§198/§199）；todo.md 同步。
+- screen/ 目录 33 模块 25,904 行全部审毕，等待用户验收。
