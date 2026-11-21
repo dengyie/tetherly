@@ -152,6 +152,15 @@ fn main() -> Result<()> {
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            // §217: every runtime worker gets the userInitiated lift — the
+            // screen pump runs its zstd/OpenH264 encode inline on these
+            // threads and, at default QoS, starves the input capture chain
+            // under high CPU (macOS mouse-on-Windows lag). The tap thread
+            // gets the higher userInteractive class separately in
+            // start_input_hooks.
+            .on_thread_start(|| {
+                tetherly_node::platform::raise_daemon_responsiveness();
+            })
             .build()?;
 
         std::thread::spawn(move || {
@@ -172,6 +181,10 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        // §217: same worker lift as the tray daemon arm (see above).
+        .on_thread_start(|| {
+            tetherly_node::platform::raise_daemon_responsiveness();
+        })
         .build()?;
     rt.block_on(async { dispatch(cli).await })
 }

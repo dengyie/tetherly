@@ -2252,6 +2252,11 @@ impl Node {
         }
         let node = self.clone_handle();
         std::thread::spawn(move || {
+            // §217: the capture worker drains the hook queue and ships the
+            // roaming frames; under high CPU it competes with the screen
+            // pump's inline encode work on the same machine. Lift it above
+            // that load (macOS QoS; elsewhere inherits the process lift).
+            let _ = crate::platform::set_current_thread_user_interactive();
             while let Ok(ev) = rx.recv() {
                 // A failed send means the remote input channel is not open (yet)
                 // or just closed. That is transient, not fatal: keep the hook

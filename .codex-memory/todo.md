@@ -357,3 +357,9 @@
 - [x] legacy 删除：/api/events 路由 + handle_sse + SseStream facade + loopback legacy fn 全删；共享路径 fn 更名
 - [x] 验证：workspace 955 测试全绿 + clippy 三门 -D warnings + fmt + svelte-check 0 错 + vitest 36 绿
 - [x] 文档：LEGACY_API_MAP「§216 收尾落地，整体删除成立」+ CONTROL_CLIENT M5 + plan §8（恢复 §215 标题行）；提交 + CI
+
+## §218 (2026-11-22) 高 CPU 下 Mac 控制 Windows 鼠标卡顿 — macOS QoS 治理
+- 根因：screen pump 编码内联在 tokio worker（无 block_in_place）；macOS raise_daemon_responsiveness 原 no-op；tap runloop + 捕获线程默认 QoS → 调度饥饿。input 独立 session 排除同队列饿死。
+- 修复：macOS QoS 落地（pthread_set_qos_class_self_np USER_INITIATED 0x19 + 回读 + 不降级）；set_current_thread_user_interactive（0x21）；runtime on_thread_start 全 worker 提升 + tap/捕获线程 userInteractive。
+- 测试：qos_lifts_fire_on_a_fresh_thread（RED 证明新线程起于 DEFAULT）等 3 新测试；lib 331 全绿；clippy -D warnings / fmt 过。
+- 常量教训：QoS 值以 sys/qos.h 为准（0x19/0x21），凭记忆 0x20 被 RED 抓 EINVAL。

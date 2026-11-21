@@ -2684,9 +2684,78 @@ pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
     report
 }
 
-/// No CPU-starvation analogue off Windows (the Mac daemon runs at normal
-/// QoS in the user session); honest no-op.
-#[cfg(not(windows))]
+/// §217: macOS is not a starvation-free analogue — an input-sharing daemon
+/// competes with miner/encoder-class CPU loads exactly like the Windows one
+/// (production: high system CPU made the Mac controller's mouse on the
+/// Windows peer visibly laggy; the screen pump runs zstd/OpenH264 encoding
+/// inline on the shared tokio workers while the CGEvent tap and the capture
+/// worker sat at default QoS under them). Lift the calling thread to
+/// `userInitiated` QoS — the pthread analogue of the Windows AboveNormal
+/// lift above — and report what the kernel granted. Best-effort: a denied
+/// call is reported honestly, never fatal.
+#[cfg(target_os = "macos")]
+pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
+    // Mirrors `sys/qos.h` (libc does not export the QoS API):
+    // USER_INTERACTIVE=0x21 > USER_INITIATED=0x19 > DEFAULT=0x15 >
+    // UTILITY=0x11 > BACKGROUND=0x09 > UNSPECIFIED=0x00.
+    #[repr(i32)]
+    enum QosClass {
+        UserInitiated = 0x19,
+    }
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: i32, relative_priority: i32) -> i32;
+        fn qos_class_self() -> i32;
+    }
+    let mut report = DaemonResponsiveness::default();
+    unsafe {
+        let before = qos_class_self();
+        report.priority_was_low = before < QosClass::UserInitiated as i32;
+        // Never demote an already-elevated thread (Windows
+        // daemon_priority_needs_raise alignment: High/Realtime stay).
+        if report.priority_was_low {
+            report.priority_ok = pthread_set_qos_class_self_np(QosClass::UserInitiated as i32, 0)
+                == 0
+                && qos_class_self() >= QosClass::UserInitiated as i32;
+        } else {
+            report.priority_ok = true;
+        }
+        // No EcoQoS/working-set analogue on this side; report the same
+        // "nothing held back" shape as a successful Windows run.
+        report.throttling_disabled = true;
+        report.working_set_pinned = true;
+    }
+    report
+}
+
+/// §217: lift the CALLING thread to `userInteractive` QoS. The CGEvent tap
+/// runloop must sit above the daemon's own encoder/pump load (its callback
+/// latency is the first deadline in the input chain — WindowServer delivers
+/// HID events to the tap synchronously, and a starved tap both delays
+/// roams and lets macOS consider disabling it). Must be called ON the
+/// spawned thread, before the runloop starts. Best-effort; returns whether
+/// the thread is at the class after the call.
+#[cfg(target_os = "macos")]
+pub fn set_current_thread_user_interactive() -> bool {
+    const QOS_CLASS_USER_INTERACTIVE: i32 = 0x21;
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: i32, relative_priority: i32) -> i32;
+        fn qos_class_self() -> i32;
+    }
+    // SAFETY: documented pthread QoS setter, applies to the caller only.
+    unsafe {
+        qos_class_self() >= QOS_CLASS_USER_INTERACTIVE
+            || pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_current_thread_user_interactive() -> bool {
+    // No per-thread analogue wired on other platforms; the Windows hook
+    // thread inherits the process lift from `raise_daemon_responsiveness`.
+    false
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
     DaemonResponsiveness::default()
 }
@@ -3593,6 +3662,14 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     std::thread::Builder::new()
         .name("tetherly-input-tap".into())
         .spawn(move || {
+            // §217: the tap callback runs synchronously on WindowServer's
+            // HID delivery; under high CPU it must out-priority the
+            // daemon's own screen-encoder/pump load or mouse roams queue
+            // behind them. Applied before the runloop starts.
+            let qos_lifted = set_current_thread_user_interactive();
+            if !qos_lifted {
+                tracing::debug!("input tap thread: QoS lift declined; running at inherited class");
+            }
             let (ctx_w, ctx_h) = screen_size();
             let ctx = Box::new(MacTapContext {
                 tx,
@@ -4676,15 +4753,86 @@ mod daemon_responsiveness_tests {
         assert!(report.image_locked_bytes > 0, "{report:?}");
     }
 
-    // macOS/Linux have no miner-starvation analogue; the call is an honest
-    // no-op that reports nothing applied.
-    #[cfg(not(windows))]
+    // §217: macOS lifts the calling thread to userInitiated QoS (the
+    // analogue of the Windows AboveNormal lift) and reports it; only
+    // other off-Windows platforms stay a no-op. The test runner may
+    // already run above the class (xctest/userInteractive) — then the
+    // never-demote rule keeps it and the report must still say ok.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn raise_daemon_responsiveness_lifts_macos_qos() {
+        let report = raise_daemon_responsiveness();
+        assert!(report.priority_ok, "{report:?}");
+        // Read-back through the same API the fix uses.
+        const QOS_CLASS_USER_INITIATED: i32 = 0x19;
+        unsafe extern "C" {
+            fn qos_class_self() -> i32;
+        }
+        // SAFETY: pure read of the calling thread's class.
+        assert!(
+            unsafe { qos_class_self() } >= QOS_CLASS_USER_INITIATED,
+            "{report:?}"
+        );
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     #[test]
     fn raise_daemon_responsiveness_is_a_no_op_off_windows() {
         assert_eq!(
             raise_daemon_responsiveness(),
             DaemonResponsiveness::default()
         );
+    }
+
+    // §217: the per-thread userInteractive lift for the tap runloop takes
+    // on the calling thread (macOS only; other platforms honestly report
+    // no per-thread analogue).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn set_current_thread_user_interactive_takes() {
+        assert!(set_current_thread_user_interactive());
+        const QOS_CLASS_USER_INTERACTIVE: i32 = 0x21;
+        unsafe extern "C" {
+            fn qos_class_self() -> i32;
+        }
+        // SAFETY: pure read of the calling thread's class.
+        assert!(unsafe { qos_class_self() } >= QOS_CLASS_USER_INTERACTIVE);
+    }
+
+    // §217 RED proof: a freshly spawned pthread inherits a class BELOW
+    // userInitiated (DEFAULT), the daemon-lift branch actually fires there,
+    // and the per-thread userInteractive lift also takes. In-process the
+    // main test thread may already run at userInteractive (33), which is
+    // why the direct-thread assertions live on the spawned worker.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn qos_lifts_fire_on_a_fresh_thread() {
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, bool, i32, bool)>();
+        std::thread::spawn(move || {
+            unsafe extern "C" {
+                fn qos_class_self() -> i32;
+            }
+            // SAFETY: pure reads + documented QoS setters, caller-thread only.
+            unsafe {
+                let before = qos_class_self();
+                let report = raise_daemon_responsiveness();
+                let after_lift = qos_class_self();
+                let interactive = set_current_thread_user_interactive();
+                let _ = tx.send((
+                    before,
+                    report.priority_ok,
+                    after_lift.max(if interactive { 0x21 } else { after_lift }),
+                    interactive,
+                ));
+            }
+        });
+        let (before, lifted_ok, final_class, interactive) = rx.recv().expect("worker reported");
+        // The fresh thread starts below userInitiated (DEFAULT=0x15 or
+        // UNSPECIFIED) — proving the starvation premise §217 fixes.
+        assert!(before < 0x19, "fresh thread QoS {before}");
+        assert!(lifted_ok);
+        assert!(final_class >= 0x19);
+        assert!(interactive);
     }
 }
 
