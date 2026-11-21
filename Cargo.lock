@@ -5055,6 +5055,7 @@ dependencies = [
  "tetherly-crypto",
  "tetherly-loopback",
  "tetherly-net",
+ "tetherly-node",
  "tokio",
  "tracing",
  "tracing-subscriber",

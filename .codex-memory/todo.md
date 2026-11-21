@@ -373,3 +373,10 @@
 - ③ macOS 报告字段改事实值：throttling_disabled/working_set_pinned=false、image_locked_bytes=0，测试断言（原硬编码 true 是假情报）。
 - ④ qos_sys 模块收口 QoS extern（原三处重复）；capture worker 提升失败补 debug 日志（对齐 tap）。
 - 门禁：lib 331 全绿 + clippy 0 error + fmt 过。
+
+## §218-c (2026-11-22) §218 二轮 review 三项收尾 + 部署
+- ① worker hook 观测性：lift_current_thread_user_initiated 提升被拒时补 tracing::debug!(?report)——tokio worker 无其它观测路径，否则「已提升/仍默认」不可分辨。
+- ② CLI 双树接线：bins/tetherly-cli 手写 runtime（build_cli_runtime + block_on(async_main())；#[tokio::main(builder=…)] 只接受字面量，编译期 "Must be a literal"）；新增 tetherly-node.workspace=true 依赖；watch/audit watcher worker 获同等 QoS 提升。
+- ③ qos_sys 可见性统一 pub(crate)。
+- 门禁：fmt / lib 331 全绿 / clippy node+cli -D warnings / node bins + cli build 全过。
+- 部署：v0.2.71 升级至 /Applications/Tetherly.app（health 回读 0.2.71，daemon responsiveness 日志在案，input tunnel 连 tdev_rguuuxmtz7e2hfpm）。

@@ -16,6 +16,9 @@ tetherly-core.workspace = true
 tetherly-crypto.workspace = true
 tetherly-net.workspace = true
 tetherly-loopback.workspace = true
+# §218: worker-thread QoS lift for the long-running watcher runtime
+# (lift_current_thread_user_initiated lives in platform).
+tetherly-node.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

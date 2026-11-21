@@ -62,8 +62,24 @@ mod dispatch;
 mod util;
 use dispatch::dispatch;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+// §218: the CLI's long-running watchers (watch/audit SSE consumers) ride
+// the same multi-thread runtime shape as the daemon, so their workers get
+// the same per-thread QoS lift under high CPU load. Built by hand instead of
+// `#[tokio::main]` because the attribute macro cannot carry `on_thread_start`.
+// No-op off macOS.
+fn build_cli_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(tetherly_node::platform::lift_current_thread_user_initiated)
+        .build()
+        .expect("cli tokio runtime")
+}
+
+fn main() -> Result<()> {
+    build_cli_runtime().block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // process quietly like any classic tool, not panic in println!.
     #[cfg(unix)]
     unsafe {

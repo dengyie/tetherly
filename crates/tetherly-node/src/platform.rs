@@ -2769,8 +2769,8 @@ pub fn set_current_thread_user_interactive() -> bool {
 /// UTILITY=0x11 > BACKGROUND=0x09 > UNSPECIFIED=0x00.
 #[cfg(target_os = "macos")]
 mod qos_sys {
-    pub const QOS_CLASS_USER_INTERACTIVE: i32 = 0x21;
-    pub const QOS_CLASS_USER_INITIATED: i32 = 0x19;
+    pub(crate) const QOS_CLASS_USER_INTERACTIVE: i32 = 0x21;
+    pub(crate) const QOS_CLASS_USER_INITIATED: i32 = 0x19;
     unsafe extern "C" {
         pub(crate) fn pthread_set_qos_class_self_np(qos_class: i32, relative_priority: i32) -> i32;
         pub(crate) fn qos_class_self() -> i32;
@@ -2795,7 +2795,17 @@ pub fn set_current_thread_user_interactive() -> bool {
 pub fn lift_current_thread_user_initiated() {
     #[cfg(target_os = "macos")]
     {
-        let _ = raise_daemon_responsiveness();
+        // The tokio workers have no other observability path: a declined
+        // lift must show up in the log like the tap/capture threads' debug
+        // lines do, or "worker lifted" vs "worker still default QoS" is
+        // indistinguishable when debugging latency under load.
+        let report = raise_daemon_responsiveness();
+        if !report.priority_ok {
+            tracing::debug!(
+                ?report,
+                "tokio worker: QoS lift declined; running at inherited class"
+            );
+        }
     }
 }
 
