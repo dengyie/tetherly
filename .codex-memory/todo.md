@@ -321,3 +321,4 @@
 - [x] §208 tetherly-loopback（664 行全读）+ tetherly-api（7435+2188 行全读/扫读）深审：crate 内零缺陷；CLI 调用方 cmd_peers.rs route-remove peer 未编码（唯一漏网点）P4 修复 29975de；clippy 三门 + loopback/api/node-bin 测试全绿；CI 44882481611。
 - [x] §209 tetherly-net 2,893 行收尾深审（7 源文件 + 4 测试文件全读）：验证性审计零缺陷——outbox 两阶段/rekey 恢复/filechan 上界与 AAD/proptest 全部在位；28 测试全绿。至此全部 7 个 Rust crate 深审收官。
 - [x] §210 client/ Tauri 壳 + SPA 前端深审（~3.9k 行全读）：验证性审计零缺陷——token 隔离/SSE 双实现契约一致/tray fold 纯函数/SPA 单写者事件流全部在位；pnpm check 0 错 + vitest 36 绿 + shell clippy/test 33 绿。至此全部交付面（7 crate + Android + client）深审收官。
+- [x] §211 Android Kotlin 层深审（~1.3k 行全读）：P4 self-echo 修复 d41115d（NotifyListener 不再转发自身前台通知）；生命周期状态机/回复队列/所有权决策表全部在位；本地补 build-tools 34 + platform 35 后 17 单测 0 失败 + assembleDebug 绿。
