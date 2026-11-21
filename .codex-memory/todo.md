@@ -291,3 +291,17 @@
 - 范围：noise/pairbind/identity/spake/aead/kdf/vectors/error/lib 全读（959 行）。深度 review 迭代核心四 crate（core/net/node UI 面/crypto）收官。
 - 结论：全部 clean。IK prologue Hello 绑定 + remote_static 顶替防护测试钉死；PairBind 方向分离 nonce + verify_strict；Identity 双标量不混用 + ZeroizeOnDrop；AEAD counter nonce；Argon2id 冻结参数；vectors #[cfg(test)] 门控；lib.rs forbid(unsafe_code)。P4 两项备查（aead 错误名不副实映射 PairBind、handshake_hash 快照式缓存）。
 - 登记：docs/REVIEW_REMEDIATION_PLAN.md §8 §203 条目已插入（§202 前），§202 标题行修复。
+
+## 2026-11-21 §204 node runtime 会话面深审（纯审查，零代码缺陷）
+- 完成：runtime/ 会话面 8 模块（trust 907 / clipboard 1085 / notify 995 / actions 902 / messages 869 / audit 298 / session 67 / config 266，共 ~5.5k 行）全读。
+- 结论：零代码缺陷。正面论证：trust admit_channel side-channel blocklist 双门 + resolve_peer 歧义 fail-closed；clipboard 有界投递状态机（3 次尝试/8s age）仅全 peer 接受才 commit；notify 横幅抑制链有序 + ANCS 专用线程；actions 5s 冷却 + kill_on_drop + sanitize_output；messages TEXT_MESSAGE_MAX + engine 有界环 + outbox resend 走 validate_send_source_path；audit 环形缓冲；session accept 后 blocklist 复查；config 严格名校验。
+- P4 观察项 2 条登记备查（get_by_id 前缀匹配便利性；ANCS 泵线程 panic 无自动重启）。
+- 登记：docs/REVIEW_REMEDIATION_PLAN.md §8 §204 条目（纯审查无 diff，无需 CI 门禁）。
+- 下一步：§205 node runtime 屏幕面（screen_stream/screen_control/screen_mode/screen_media/screen_status/screen_dto，~11k 行）。
+
+## 2026-11-21 §205 node runtime 屏幕面深审（完成）
+- 范围：screen_dto/screen_status/screen_control/screen_media/screen_mode/screen_stream 全读（~11k 行）。
+- 缺陷：P3 `screen_recording_replay` 缺兄弟函数都有的 ParentDir/UnsafeFileName 路径守卫（Read tier HTTP 可达，文件存在性探测面）。已修复 commit 11525b7。
+- 验证：RED（stash 守卫测试失败）→ GREEN → clippy 双形态 0 error → CI run 44869937409。
+- P4 观察项：①tile 编码 cache/grid 两分支 ~700 行×2 近似重复可抽 helper；②batch chunk pacing 逐 chunk await 现状默认值无碍。
+- 下一步：§206 runtime 其余模块（lifecycle/discovery/audio/routes/topology/locate/focus/remote_session/drag_controller/drag_target/shell_reveal/overlay ~8k 行），完成后批量登记 + 验收汇报。

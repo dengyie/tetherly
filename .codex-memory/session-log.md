@@ -1749,3 +1749,15 @@
 - §201 信任与会话面（session/hello/bind/pin/otp/allowlist/liveness）纯审查收官，零代码缺陷；两项 P4 备查（otp 字节漂移、allowlist scheme fail-open 且取证确认非 wire 可达）。计划 §8 已登记。
 - §202 core 根目录剩余 19 模块纯审查收官，零代码缺陷；tetherly-core 全 crate 审毕。计划 §8 已登记。
 - §203 tetherly-crypto 全 crate 纯审查收官，零代码缺陷。核心四 crate 全部审毕。
+
+### 2026-11-21 §204 node runtime 会话面深审（纯审查，零代码缺陷，无代码变更）
+- 范围：runtime/{trust,clipboard,notify,actions,messages,audit,session,config}.rs 全读（~5.5k 行）。
+- 结论：零代码缺陷；2 条 P4 观察项（get_by_id starts_with 前缀匹配；ANCS 泵线程 panic 无自动重启）登记 plan §8 备查。
+- 正面论证要点：trust.rs admit_channel side-channel blocklist+expected-device 双门；clipboard.rs 有界投递状态机三测试钉死；notify.rs 抑制链有序 + ANCS 线程隔离；actions.rs 5s 冷却 + kill_on_drop 回归在位；messages.rs 零明文审计 + outbox resend 受控路径复检；audit.rs 有界环；session.rs handshake 后 blocklist 复查；config.rs tray owner keepalive 窗口正确。
+- 登记：plan §8 插入 §204 条目（§203 上方）；todo.md 同步。
+
+## 2026-11-21 §205 屏幕面深审收官 + P3 修复
+- screen_stream.rs 4979 行全部读完（tile 编码分发/LTR/PIR/SVC/delta/背压整帧丢弃/FEC pacing）。
+- 定级并修复 P3：screen_recording_replay（screen_media.rs:153）缺 ParentDir 守卫，镜像兄弟函数补齐 + data_dir 相对解析；新增 uihttp 测试 v1_screen_recording_replay_rejects_traversal，RED→GREEN 证据链（stash 验证）。
+- commit 11525b7 已推送，CI run 44869937409；plan §8 已登记。
+- 教训重申：plan §8 插入必须用完整上一条标题行作 old_string（§203 教训）。
