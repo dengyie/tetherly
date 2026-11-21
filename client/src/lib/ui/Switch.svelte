@@ -23,8 +23,8 @@
   aria-checked={checked}
   aria-label={label || undefined}
   {disabled}
-  class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 {checked
-    ? 'bg-indigo-600 border-indigo-600'
+  class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 {checked
+    ? 'bg-brand-600 border-brand-600'
     : 'bg-zinc-200 dark:bg-zinc-700 border-zinc-200 dark:border-zinc-700'} {className}"
   onclick={() => onchange?.(!checked)}
   {...rest}

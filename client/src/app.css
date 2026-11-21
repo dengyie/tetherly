@@ -1,17 +1,45 @@
 /* Tailwind v4 entry. Class-based dark mode: the ThemeToggle sets `html.dark`
    (ADR-139 §5.4 tokens are kept below for the few hand-written rules). */
 @import "tailwindcss";
+/* The committed build output must never feed the class scanner: scanning
+   dist/ makes every build inherit the previous build's utilities (stale
+   indigo classes survived one release that way) and the build:ci zero-diff
+   gate then only converges after two runs. */
+@source not "../dist";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-  --color-accent: #2f6fed;
+  /* mac47054639 brand palette (assets/brand): mango orange + leaf green. */
+  --color-accent: #f87800;
+  --color-brand-50: #fff4e8;
+  --color-brand-100: #ffe4c7;
+  --color-brand-200: #ffc994;
+  --color-brand-300: #ffa75c;
+  --color-brand-400: #ff8f2e;
+  --color-brand-500: #f87800;
+  --color-brand-600: #d96400;
+  --color-brand-700: #b05000;
+  --color-brand-800: #8a3f05;
+  --color-brand-900: #6e3408;
+  --color-brand-950: #3d1a03;
+  --color-leaf-50: #f1fae8;
+  --color-leaf-100: #e0f4cf;
+  --color-leaf-200: #c2e9a2;
+  --color-leaf-300: #9bd96d;
+  --color-leaf-400: #74c63f;
+  --color-leaf-500: #50b010;
+  --color-leaf-600: #3f8f0c;
+  --color-leaf-700: #326e0d;
+  --color-leaf-800: #2a5711;
+  --color-leaf-900: #244912;
+  --color-leaf-950: #102706;
 }
 
 :root {
-  --accent: #2f6fed;
+  --accent: #f87800;
   --bg: #f3f4f7;
   --surface: #ffffff;
   --text: #1c1e21;
@@ -67,10 +95,10 @@ body {
   @apply flex items-center gap-2 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100 mb-3;
 }
 @utility btn {
-  @apply inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 text-xs font-medium shadow-xs transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-50 disabled:pointer-events-none select-none cursor-pointer;
+  @apply inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 text-xs font-medium shadow-xs transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 disabled:opacity-50 disabled:pointer-events-none select-none cursor-pointer;
 }
 @utility btn-primary {
-  @apply border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-500 hover:border-indigo-500 dark:bg-indigo-600 dark:border-indigo-600 dark:hover:bg-indigo-500;
+  @apply border-brand-600 bg-brand-600 text-white hover:bg-brand-500 hover:border-brand-500 dark:bg-brand-600 dark:border-brand-600 dark:hover:bg-brand-500;
 }
 @utility btn-danger {
   @apply text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:border-rose-200 dark:hover:border-rose-800;
@@ -82,7 +110,7 @@ body {
   @apply h-7 px-2.5 text-[11px];
 }
 @utility input {
-  @apply h-8 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-sm text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-400 disabled:opacity-50;
+  @apply h-8 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-sm text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-400 disabled:opacity-50;
 }
 @utility badge {
   @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-medium border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300;

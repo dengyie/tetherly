@@ -145,6 +145,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "objc2-core-graphics",
     "NSApplication",
     "NSButton",
+    "NSCell",
     "NSColor",
     "NSControl",
     "NSCursor",

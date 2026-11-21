@@ -14,7 +14,7 @@
     class?: string;
   } = $props();
 
-  const BAR: Record<string, string> = { streaming: "bg-indigo-500", done: "bg-emerald-500", error: "bg-rose-500" };
+  const BAR: Record<string, string> = { streaming: "bg-brand-500", done: "bg-emerald-500", error: "bg-rose-500" };
   const indeterminate = $derived(value === null || value === undefined || Number.isNaN(value));
   const clamped = $derived(indeterminate ? 0 : Math.min(100, Math.max(0, value as number)));
   const bar = $derived(BAR[status] ?? BAR.streaming);

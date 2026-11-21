@@ -92,7 +92,7 @@
           {@const peer = peerOf.get(edge) ?? null}
           <div
             class="group relative flex min-h-12 w-full max-w-48 items-center justify-center rounded-xl border-2 border-dashed px-2 py-1.5 text-xs transition
-              {dragOver === edge ? 'border-indigo-500 bg-indigo-500/10' : peer ? 'border-indigo-300/70 bg-indigo-500/5 dark:border-indigo-700/60' : 'border-zinc-300/80 dark:border-zinc-700/70'}"
+              {dragOver === edge ? 'border-brand-500 bg-brand-500/10' : peer ? 'border-brand-300/70 bg-brand-500/5 dark:border-brand-700/60' : 'border-zinc-300/80 dark:border-zinc-700/70'}"
             data-edge={edge}
             role="group"
             aria-label="{edgeLabel[edge]}侧"
@@ -101,10 +101,10 @@
             ondrop={(e) => onDrop(e, edge)}
           >
             {#if peer}
-              <span class="inline-flex items-center gap-1.5 truncate font-medium"><Icon name="link" size={12} class="text-indigo-500" />{peerName(peer)}</span>
+              <span class="inline-flex items-center gap-1.5 truncate font-medium"><Icon name="link" size={12} class="text-brand-500" />{peerName(peer)}</span>
               <button type="button" class="btn btn-ghost btn-sm absolute -right-2 -top-2 h-6 w-6 !p-0 opacity-0 transition group-hover:opacity-100 focus:opacity-100" aria-label="断开{edgeLabel[edge]}侧" disabled={busy} onclick={() => unlink(edge)}><Icon name="x" size={12} /></button>
             {:else}
-              <button type="button" class="inline-flex items-center gap-1 dim hover:text-indigo-600" disabled={busy} onclick={() => (picking = picking === edge ? null : edge)}><Icon name="plus" size={12} /><span class="whitespace-nowrap">{edgeLabel[edge]}侧 · 未配置</span></button>
+              <button type="button" class="inline-flex items-center gap-1 dim hover:text-brand-700" disabled={busy} onclick={() => (picking = picking === edge ? null : edge)}><Icon name="plus" size={12} /><span class="whitespace-nowrap">{edgeLabel[edge]}侧 · 未配置</span></button>
             {/if}
             {#if picking === edge}
               <div class="absolute left-1/2 top-full z-30 mt-1 w-44 -translate-x-1/2 rounded-xl border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-700 dark:bg-zinc-900" role="menu">

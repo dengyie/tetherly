@@ -114,8 +114,8 @@
       {/if}
     </div>
     {#if pin}
-      <div class="mt-3 rounded-xl border border-dashed border-indigo-300/70 dark:border-indigo-700/60 bg-indigo-50/60 dark:bg-indigo-950/30 px-4 py-3 text-center">
-        <div class="mono text-2xl font-semibold tracking-[0.4em] text-indigo-700 dark:text-indigo-300">{pin}</div>
+      <div class="mt-3 rounded-xl border border-dashed border-brand-300/70 dark:border-brand-700/60 bg-brand-50/60 dark:bg-brand-950/30 px-4 py-3 text-center">
+        <div class="mono text-2xl font-semibold tracking-[0.4em] text-brand-700 dark:text-brand-300">{pin}</div>
         <div class="mt-1 text-[11px] dim">在另一台设备上输入此 PIN 完成配对</div>
       </div>
     {/if}

@@ -39,7 +39,7 @@
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
                 <span class="font-medium">{c.app_name || c.app_id}</span>
-                {#if c.has_otp}<span class="badge border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300"><Icon name="key" size={11} />含验证码</span>{/if}
+                {#if c.has_otp}<span class="badge border-brand-200 bg-brand-50 text-brand-700 dark:border-brand-800 dark:bg-brand-950/40 dark:text-brand-300"><Icon name="key" size={11} />含验证码</span>{/if}
               </div>
               <div class="text-[13px]">{c.title}</div>
               <div class="text-xs dim">来自 {c.source} · {whenMs(c.expires_ms)} 过期</div>
@@ -79,7 +79,7 @@
               <div class="break-words text-[13px]">{m.text}</div>
               <div class="text-xs dim">{m.peer} · {whenMs(m.timestamp_ms)}</div>
             </div>
-            {#if !m.read}<span class="inline-flex h-2 w-2 shrink-0 rounded-full bg-indigo-500" title="未读"></span>{/if}
+            {#if !m.read}<span class="inline-flex h-2 w-2 shrink-0 rounded-full bg-brand-500" title="未读"></span>{/if}
           </li>
         {/each}
       </ul>

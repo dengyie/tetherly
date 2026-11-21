@@ -31,7 +31,7 @@
   {#if actionLabel}
     <button
       type="button"
-      class="mt-4 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors cursor-pointer"
+      class="mt-4 px-3.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium transition-colors cursor-pointer"
       onclick={() => onaction?.()}
     >
       {actionLabel}

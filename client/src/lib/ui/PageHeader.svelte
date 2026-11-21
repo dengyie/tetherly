@@ -11,7 +11,7 @@
 
 <div class="flex items-start gap-3 pb-1">
   {#if icon}
-    <span class="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+    <span class="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-500/10 text-brand-600 dark:text-brand-400">
       <Icon name={icon} size={18} />
     </span>
   {/if}

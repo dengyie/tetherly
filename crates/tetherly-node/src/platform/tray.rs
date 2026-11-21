@@ -326,6 +326,20 @@ mod macos_tray {
         if let Some(button) = item.button(mtm) {
             let title = NSString::from_str("⇄ Tetherly");
             button.setTitle(&title);
+            // Brand mark (assets/brand/menubar-72x72.png, mac47054639) drawn
+            // at 18pt left of the title; the glyph title stays as fallback
+            // if AppKit cannot decode the PNG.
+            let png = objc2_foundation::NSData::with_bytes(include_bytes!(
+                "../../../../assets/brand/menubar-72x72.png"
+            ));
+            if let Some(image) =
+                objc2_app_kit::NSImage::initWithData(objc2_app_kit::NSImage::alloc(), &png)
+            {
+                image.setSize(objc2_foundation::NSSize::new(18.0, 18.0));
+                button.setImage(Some(&image));
+                button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeft);
+                button.setTitle(&NSString::from_str("Tetherly"));
+            }
             // ADR-137 Engine I: the tray icon is a live dropzone — dragging
             // files onto it sends them to the connected peer via the loopback
             // drag REST chain (intent → confirm → stream → MOTW settle).
@@ -476,10 +490,10 @@ mod windows_tray {
         Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-        DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage, RegisterClassExW,
-        SetForegroundWindow, SetTimer, TrackPopupMenuEx, TranslateMessage, HICON, HMENU,
-        IDI_APPLICATION, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, TPM_RIGHTBUTTON, WM_APP,
+        AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+        DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage,
+        RegisterClassExW, SetForegroundWindow, SetTimer, TrackPopupMenuEx, TranslateMessage, HICON,
+        HMENU, IDI_APPLICATION, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, TPM_RIGHTBUTTON, WM_APP,
         WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
         WNDCLASSEXW,
     };
@@ -497,6 +511,48 @@ mod windows_tray {
 
     fn to_wide(s: &str) -> Vec<u16> {
         OsStr::new(s).encode_wide().chain(Some(0)).collect()
+    }
+
+    /// The mac47054639 brand mark as an `HICON`, built from the embedded
+    /// `assets/brand/tray-32x32.rgba` (straight-alpha RGBA, top-down). GDI
+    /// wants bottom-up BGRA XOR bits plus a 1bpp AND mask; at 32bpp the mask
+    /// is all-zero and the alpha channel drives transparency. Falls back to
+    /// the stock application icon if GDI refuses, so the tray never vanishes
+    /// over a cosmetic failure.
+    fn brand_icon() -> HICON {
+        const SIDE: usize = 32;
+        const RGBA: &[u8; SIDE * SIDE * 4] =
+            include_bytes!("../../../../assets/brand/tray-32x32.rgba");
+        let mut xor = vec![0u8; SIDE * SIDE * 4];
+        for y in 0..SIDE {
+            let src_row = (SIDE - 1 - y) * SIDE * 4;
+            let dst_row = y * SIDE * 4;
+            for x in 0..SIDE {
+                let s = src_row + x * 4;
+                let d = dst_row + x * 4;
+                xor[d] = RGBA[s + 2];
+                xor[d + 1] = RGBA[s + 1];
+                xor[d + 2] = RGBA[s];
+                xor[d + 3] = RGBA[s + 3];
+            }
+        }
+        let and_mask = vec![0u8; SIDE * SIDE / 8];
+        let icon = unsafe {
+            CreateIcon(
+                std::ptr::null_mut(),
+                SIDE as i32,
+                SIDE as i32,
+                1,
+                32,
+                and_mask.as_ptr(),
+                xor.as_ptr(),
+            )
+        };
+        if icon.is_null() {
+            unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) }
+        } else {
+            icon
+        }
     }
 
     static GLOBAL_UI_PORT: AtomicU16 = AtomicU16::new(45716);
@@ -592,7 +648,7 @@ mod windows_tray {
             GLOBAL_UI_PORT.store(ui_port, Ordering::Relaxed);
 
             let class_name = to_wide("TetherlyTrayClass");
-            let icon: HICON = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+            let icon: HICON = brand_icon();
 
             let wndclass = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,

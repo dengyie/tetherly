@@ -196,7 +196,7 @@
               aria-current={page === n.id ? "page" : undefined}
               onclick={() => (page = n.id)}
             >
-              <Icon name={n.icon} size={16} class={page === n.id ? "text-indigo-500" : "text-zinc-400 group-hover/nav:text-zinc-600 dark:group-hover/nav:text-zinc-300"} />
+              <Icon name={n.icon} size={16} class={page === n.id ? "text-brand-500" : "text-zinc-400 group-hover/nav:text-zinc-600 dark:group-hover/nav:text-zinc-300"} />
               {n.label}
             </button>
           {/each}

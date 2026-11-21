@@ -99,7 +99,7 @@
               <span class="ml-auto mono text-[11px] text-zinc-500">{Math.floor((t.transferred / t.total) * 100)}%</span>
             </div>
             <div class="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
-              <div class="h-full rounded-full bg-indigo-500 transition-all" style="width: {Math.floor((t.transferred / t.total) * 100)}%"></div>
+              <div class="h-full rounded-full bg-brand-500 transition-all" style="width: {Math.floor((t.transferred / t.total) * 100)}%"></div>
             </div>
           </li>
         {/each}

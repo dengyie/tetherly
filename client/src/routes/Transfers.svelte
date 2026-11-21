@@ -58,14 +58,14 @@
     <ul class="m-0 list-none p-0">
       {#each data.transfers as t (t.transfer_id)}
         <li class="row items-start">
-          <span class="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg {t.direction === 'inbound' ? 'bg-sky-500/10 text-sky-600' : 'bg-violet-500/10 text-violet-600'}">
+          <span class="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg {t.direction === 'inbound' ? 'bg-sky-500/10 text-sky-600' : 'bg-leaf-500/10 text-leaf-600'}">
             <Icon name={t.direction === "inbound" ? "download" : "upload"} size={15} />
           </span>
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2">
               <span class="badge">{dirLabel[t.direction] ?? t.direction}</span>
               <span class="truncate font-medium">{t.filename}</span>
-              <span class="ml-auto shrink-0 text-xs font-medium {t.phase === 'failed' ? 'text-rose-600' : t.phase === 'completed' ? 'text-emerald-600' : 'text-indigo-600'}">{phaseLabel[t.phase] ?? t.phase}</span>
+              <span class="ml-auto shrink-0 text-xs font-medium {t.phase === 'failed' ? 'text-rose-600' : t.phase === 'completed' ? 'text-emerald-600' : 'text-brand-600'}">{phaseLabel[t.phase] ?? t.phase}</span>
             </div>
             <div class="mt-1.5">
               <ProgressBar value={pctNum(t)} status={barStatus(t.phase)} label="{bytes(t.transferred)} / {bytes(t.total)} · {bytes(t.speed_bps)}/s" />

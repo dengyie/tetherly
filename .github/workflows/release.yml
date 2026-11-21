@@ -126,7 +126,7 @@ jobs:
           set -euo pipefail
           apt-get -o Acquire::Check-Valid-Until=false update
           apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git pkg-config binutils xz-utils
+            build-essential ca-certificates curl file git pkg-config binutils xz-utils
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}

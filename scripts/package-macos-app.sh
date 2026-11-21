@@ -184,12 +184,24 @@ mkdir -p "$STAGED_APP/Contents/Resources"
 cp "$BINARY_PATH" "$STAGED_APP/Contents/MacOS/Tetherly"
 chmod +x "$STAGED_APP/Contents/MacOS/Tetherly"
 
+# §219 brand: the mango mark (client/src-tauri/icons/icon.icns, generated
+# from assets/brand/mac47054639-1024.png) becomes the bundle icon so Finder,
+# Dock and the login-items list show it instead of the generic app glyph.
+ICON_ICNS="$REPO_ROOT/client/src-tauri/icons/icon.icns"
+if [[ -f "$ICON_ICNS" ]]; then
+    cp "$ICON_ICNS" "$STAGED_APP/Contents/Resources/Tetherly.icns"
+else
+    echo "WARN: $ICON_ICNS missing; bundle ships without an icon" >&2
+fi
+
 cat << EOF > "$STAGED_APP/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
+    <string>Tetherly</string>
+    <key>CFBundleIconFile</key>
     <string>Tetherly</string>
     <key>CFBundleIdentifier</key>
     <string>dev.tetherly.tetherly</string>

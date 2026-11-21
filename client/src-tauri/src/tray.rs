@@ -147,62 +147,46 @@ pub fn tint(state: TrayState) -> (u8, u8, u8) {
     }
 }
 
-/// The 32×32 embedded tray glyph: a base plate plus two bars (rows 13–18 and
-/// 21–26, columns 4–18). Committed as a `const` so no asset file is loaded at
-/// runtime; `base` pixels in the bar bands are the tint target.
-pub const GLYPH: [u8; 32 * 32 * 4] = build_glyph();
+/// The 32×32 embedded tray glyph: the mango brand mark
+/// (`assets/brand/tray-32x32.rgba`, straight-alpha RGBA, top-down), copied
+/// into a `const` so no asset file is loaded at runtime.
+/// [`TrayState::tinted_icon`] paints the state badge over its corner.
+pub const GLYPH: [u8; 32 * 32 * 4] = *include_bytes!("../../../assets/brand/tray-32x32.rgba");
 
-const fn build_glyph() -> [u8; 32 * 32 * 4] {
-    let mut px = [0u8; 32 * 32 * 4];
-    // Base plate: a soft dark disc, alpha falls off at the rim. Distance is
-    // compared squared — `sqrt` is not const-callable.
-    let r2 = 13.0 * 13.0;
-    let r2_rim = 14.5 * 14.5;
-    let mut y = 0;
-    while y < 32 {
-        let mut x = 0;
-        while x < 32 {
-            let dx = x as f32 - 15.5;
-            let dy = y as f32 - 15.5;
-            let d2 = dx * dx + dy * dy;
-            let (r, g, b, a) = if d2 <= r2 {
-                (16, 42, 60, 235)
-            } else if d2 <= r2_rim {
-                (16, 42, 60, 140)
-            } else {
-                (0, 0, 0, 0)
-            };
-            let i = (y * 32 + x) * 4;
-            px[i] = r;
-            px[i + 1] = g;
-            px[i + 2] = b;
-            px[i + 3] = a;
-            x += 1;
-        }
-        y += 1;
-    }
-    // The two bars keep the base color; [`TrayState::tinted_icon`] recolors
-    // them per state at runtime.
-    px
-}
+/// State badge geometry: centre and radius (pixels) of the dot painted by
+/// [`TrayState::tinted_icon`]. A 1px dark ring keeps it legible on both light
+/// and dark menu bars.
+pub const BADGE_CENTER: (f32, f32) = (24.5, 24.5);
+pub const BADGE_RADIUS: f32 = 6.0;
+const BADGE_RING: (u8, u8, u8) = (16, 42, 60);
 
 impl TrayState {
-    /// Recolor the bar band of [`GLYPH`] with this state's [`tint`].
+    /// Paint this state's [`tint`] badge over the bottom-right corner of
+    /// `base`; every pixel outside the badge is left as the brand mark.
     ///
-    /// Pure so tests can pin the tint behavior without a tray.
+    /// Pure so tests can pin the badge behavior without a tray.
     pub fn tinted_icon(&self, base: &[u8]) -> tauri::image::Image<'static> {
         let mut rgba = base.to_vec();
         let (r, g, b) = tint(*self);
-        // The glyph bars sit in rows 0.42–0.48 and 0.52–0.58 of the icon.
-        for y in [13, 14, 15, 16, 17, 18, 21, 22, 23, 24, 25, 26] {
-            for x in 4..=18 {
+        let (cx, cy) = BADGE_CENTER;
+        let dot2 = BADGE_RADIUS * BADGE_RADIUS;
+        let ring2 = (BADGE_RADIUS + 1.0) * (BADGE_RADIUS + 1.0);
+        for y in 0..32usize {
+            for x in 0..32usize {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let d2 = dx * dx + dy * dy;
                 let i = (y * 32 + x) * 4;
-                if rgba[i] != 16 || rgba[i + 1] != 42 {
-                    continue; // not a base pixel of the bar band
+                if d2 <= dot2 {
+                    rgba[i..i + 4].copy_from_slice(&[r, g, b, 255]);
+                } else if d2 <= ring2 {
+                    rgba[i..i + 4].copy_from_slice(&[
+                        BADGE_RING.0,
+                        BADGE_RING.1,
+                        BADGE_RING.2,
+                        255,
+                    ]);
                 }
-                rgba[i] = r;
-                rgba[i + 1] = g;
-                rgba[i + 2] = b;
             }
         }
         tauri::image::Image::new_owned(rgba, 32, 32)
@@ -428,14 +412,13 @@ mod tests {
     }
 
     #[test]
-    fn glyph_is_32x32_rgba_and_opaque_in_bars() {
+    fn glyph_is_32x32_rgba_brand_mark() {
         assert_eq!(GLYPH.len(), 32 * 32 * 4);
-        // The bar band pixels the tint targets exist and are the base color.
-        let i = (14 * 32 + 10) * 4;
-        assert_eq!((GLYPH[i], GLYPH[i + 1], GLYPH[i + 2]), (16, 42, 60));
-        assert!(GLYPH[i + 3] > 0, "bar pixel is visible");
-        // Outside the icon the plate is transparent.
+        // Outside the mark the icon is transparent …
         assert_eq!(GLYPH[3], 0);
+        // … and the mark itself is opaque where the brand asset draws.
+        let i = (8 * 32 + 10) * 4;
+        assert!(GLYPH[i + 3] > 240, "brand pixel is visible");
     }
 
     #[test]
@@ -452,14 +435,22 @@ mod tests {
     }
 
     #[test]
-    fn tinted_icon_recovers_state_color_in_bars() {
+    fn tinted_icon_paints_state_badge_and_keeps_mark() {
         let icon = TrayState::Remote.tinted_icon(&GLYPH);
         let rgba = icon.rgba();
-        let i = (14 * 32 + 10) * 4;
-        assert_eq!((rgba[i], rgba[i + 1], rgba[i + 2]), tint(TrayState::Remote));
-        // A non-bar pixel keeps the base color.
+        // Badge centre carries the state tint, fully opaque.
+        let i = (24 * 32 + 24) * 4;
+        let (r, g, b) = tint(TrayState::Remote);
+        assert_eq!(
+            (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]),
+            (r, g, b, 255)
+        );
+        // The ring just outside the dot is dark so the badge reads on any bar.
+        let k = (24 * 32 + 31) * 4;
+        assert_eq!((rgba[k], rgba[k + 1], rgba[k + 2]), BADGE_RING);
+        // A pixel far from the badge is the untouched brand mark.
         let j = (5 * 32 + 10) * 4;
-        assert_eq!(rgba[j], 16);
+        assert_eq!(&rgba[j..j + 4], &GLYPH[j..j + 4]);
     }
 
     #[test]
