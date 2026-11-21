@@ -26,3 +26,4 @@ android/app/src/main/jniLibs/
 # (client/dist IS committed — the daemon embeds it at compile time, same as
 # ui/index.html).
 client/node_modules/
+__pycache__/
