@@ -275,12 +275,25 @@ impl Opener for MemoryOpener {
 
 /// Dispatches native OS notification banners (macOS Notification Center /
 /// Windows balloon & toast / Linux notify-send).
+/// Escape text for embedding inside an AppleScript string literal. Backslash
+/// MUST be escaped first: AppleScript treats `\` as the escape character, so
+/// a payload ending in `\"` (e.g. a peer-supplied inbound file name) would
+/// otherwise survive quote-escaping as `\\` + terminator and let the rest of
+/// the string run as script. Newlines are dropped — osascript takes the
+/// script as one argv element.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ")
+}
+
 pub struct SystemNotifier;
 
 impl Notifier for SystemNotifier {
     fn notify(&self, payload: &NotificationPayload) -> Result<(), CoreError> {
-        let title = payload.title.replace('"', "\\\"").replace('\n', " ");
-        let body = payload.body.replace('"', "\\\"").replace('\n', " ");
+        let title = applescript_escape(&payload.title);
+        let body = applescript_escape(&payload.body);
 
         let mut cmd = if cfg!(target_os = "macos") {
             let script = if payload.sound {
@@ -4700,5 +4713,43 @@ mod opener_cmdline_tests {
         assert_eq!(opener_command_line(exe, r#"a" "calc.exe"#), None);
         assert_eq!(opener_command_line(exe, "a\nb"), None);
         assert_eq!(opener_command_line(exe, ""), None);
+    }
+}
+
+#[cfg(test)]
+mod applescript_escape_tests {
+    use super::applescript_escape;
+
+    /// §207 review: the osascript branch builds its script by interpolating
+    /// peer-controlled notification text (the inbound file-transfer banner
+    /// body embeds the peer-supplied file name). Escaping `"` alone is not
+    /// enough — AppleScript reads `\` as the escape character, so a payload
+    /// ending in `\` turned the injected `\"` into a literal backslash plus
+    /// an UNESCAPED quote that terminated the string, and everything after
+    /// ran as script. Backslash must be escaped first.
+    #[test]
+    fn trailing_backslash_cannot_break_out_of_the_string_literal() {
+        // Payload shape: `\"; do shell script "x"` — under the old escaper
+        // (`replace('"', "\\\"")`) this became `\\"…` = literal backslash,
+        // string terminator, then `do shell script "x"` executed by
+        // osascript.
+        let out = applescript_escape(r##"\"; do shell script "x""##);
+        // `\\` (doubled backslash) + `\"` (escaped quote) — the literal can
+        // no longer terminate early.
+        assert_eq!(out, r##"\\\"; do shell script \"x\""##);
+        // Same shape as a real banner body would embed it (file name at the
+        // end of a sentence): the quote stays escaped even after a `\`.
+        assert_eq!(
+            applescript_escape(r"\evil\"),
+            r"\\evil\\",
+            "a lone trailing backslash is doubled, never eats the closing quote"
+        );
+    }
+
+    #[test]
+    fn quotes_and_newlines_still_escaped() {
+        assert_eq!(applescript_escape("a\"b"), "a\\\"b");
+        assert_eq!(applescript_escape("a\nb"), "a b");
+        assert_eq!(applescript_escape("plain"), "plain");
     }
 }
