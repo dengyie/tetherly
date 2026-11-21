@@ -318,3 +318,4 @@
 - P3-2b：model.rs 4 处 `.expect("validated ... policy")`——持久化真可 Err（save_action_policy → CoreError::File），旧码 panic handler task；已修 9899e50（签名改 Result，调用点 map_err(core_error)?）。
 - P4 观察项：screen.rs AdbSource raw 模式 w*h*4 不可信分配（opt-in + 管理员信任域，接受）；model.rs expect 原观察项已升级修复。
 - 待办：CI 9899e50 确认绿；等待用户验收或指派新审计面（client/Android/脚本面）。
+- [x] §208 tetherly-loopback（664 行全读）+ tetherly-api（7435+2188 行全读/扫读）深审：crate 内零缺陷；CLI 调用方 cmd_peers.rs route-remove peer 未编码（唯一漏网点）P4 修复 29975de；clippy 三门 + loopback/api/node-bin 测试全绿；CI 44882481611。

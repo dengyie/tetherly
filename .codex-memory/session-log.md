@@ -1773,3 +1773,5 @@
 - P3-2 whiteboard import 先读后校验 + model.rs 4×expect panic：commit 9899e50。修复中发现 `?` 不能直接作用于 CoreError（Handled 错误侧是 UiResponse，无 From<CoreError>），改 `.map_err(core_error)?`——新增教训：v1.rs handler 内 CoreError 传播一律走 core_error 映射，勿裸 `?`。新增回归测试 v1_whiteboard_import_rejects_bad_paths_before_read。
 - 门禁：clippy 双形态 0 error；uihttp 25 + model 4 + 新增 1 全绿；fmt 过。plan §8 登记（§207 条目置顶于 §206 完整标题行前，lesson 第三次复用成功）；.codex-memory 双文件更新。
 - CI 补录：44877084905（9899e50）windows 失败——回归测试用 "/etc/passwd" 当绝对路径，但 Windows 无盘符路径不算 is_absolute()；改为 temp_dir 平台无关绝对路径后 6c81f02 推送，44878772315 首跑 windows phase3 m3_5 "session did not register in time" 时序 flake（与改动无关），rerun success。教训：路径守卫回归测试的绝对路径用例必须用 temp_dir 构造，裸 "/..." 在 Windows 不成立。
+## 2026-11-21 §208 loopback+api 深审收官
+- tetherly-loopback 与 tetherly-api 两 crate 全读，零 crate 内缺陷。经验：契约 crate（纯 DTO + 少量逻辑面）审计重心应放在仅有的逻辑点（EventEnvelope/Patch<T>/Topic parse）并核对契约测试是否逐一覆盖；CLI→loopback 调用方要单独核查 query 编码纪律，`url_encode` 一律走 core `encode_query_value`（仅 unreserved，/ 与 CRLF 也转义）。
