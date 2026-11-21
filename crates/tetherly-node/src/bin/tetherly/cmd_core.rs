@@ -1250,7 +1250,7 @@ pub(crate) async fn events(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+    let mut sse = tetherly_node::loopback_v1_events_connect(ui_port)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1273,12 +1273,12 @@ pub(crate) async fn events(
             if now >= dl {
                 break;
             }
-            match tokio::time::timeout(dl - now, sse.next_event()).await {
+            match tokio::time::timeout(dl - now, sse.next_diagnostic()).await {
                 Ok(res) => res,
                 Err(_) => break,
             }
         } else {
-            sse.next_event().await
+            sse.next_diagnostic().await
         };
 
         match next_res {

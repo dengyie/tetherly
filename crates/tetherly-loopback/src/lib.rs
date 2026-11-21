@@ -287,9 +287,34 @@ impl SseStream {
             }
         }
     }
+
+    /// Read the next v1 diagnostic event as its bare internal-event JSON
+    /// (§216). A `diagnostic` envelope's `data` is `{kind, payload}`; this
+    /// returns the `payload` object verbatim, so watchers that used to parse
+    /// the retired `/api/events` stream's `{"kind":…,…}` frames keep their
+    /// field-level parsing unchanged. Non-diagnostic frames (resource state,
+    /// snapshot, invalidated) are skipped; malformed JSON is skipped too,
+    /// matching the typed facades' drop-on-decode behavior.
+    pub async fn next_diagnostic(&mut self) -> io::Result<Option<String>> {
+        while let Some(raw) = self.next_event().await? {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            if v.get("type").and_then(|t| t.as_str()) != Some("diagnostic") {
+                continue;
+            }
+            let Some(data) = v.get("data") else {
+                continue;
+            };
+            if data.get("kind").and_then(|k| k.as_str()).is_some() {
+                return Ok(Some(data.to_string()));
+            }
+        }
+        Ok(None)
+    }
 }
 
-async fn loopback_events_connect_path_with_deadlines(
+async fn loopback_sse_connect_path_with_deadlines(
     port: u16,
     path: &str,
     handshake_timeout: Duration,
@@ -350,54 +375,19 @@ async fn loopback_events_connect_path_with_deadlines(
     }
 }
 
-/// Open the legacy `/api/events` SSE stream with explicit deadlines.
-///
-/// This remains available for event families that predate the v1 envelope.
-pub async fn loopback_legacy_events_connect_with_deadlines(
-    port: u16,
-    handshake_timeout: Duration,
-    idle_timeout: Duration,
-) -> io::Result<SseStream> {
-    loopback_events_connect_path_with_deadlines(
-        port,
-        "/api/events",
-        handshake_timeout,
-        idle_timeout,
-    )
-    .await
-}
-
-/// Open the legacy `/api/events` SSE stream with explicit deadlines.
-///
-/// The default remains legacy because several CLI watchers consume event kinds
-/// that are not represented by the v1 resource envelope. The request is still
-/// authenticated and the handshake is validated by the shared transport.
-pub async fn loopback_events_connect_with_deadlines(
-    port: u16,
-    handshake_timeout: Duration,
-    idle_timeout: Duration,
-) -> io::Result<SseStream> {
-    loopback_legacy_events_connect_with_deadlines(port, handshake_timeout, idle_timeout).await
-}
-
 /// Open the v1 `/api/v1/events` resource stream with explicit deadlines.
 pub async fn loopback_v1_events_connect_with_deadlines(
     port: u16,
     handshake_timeout: Duration,
     idle_timeout: Duration,
 ) -> io::Result<SseStream> {
-    loopback_events_connect_path_with_deadlines(
+    loopback_sse_connect_path_with_deadlines(
         port,
         "/api/v1/events",
         handshake_timeout,
         idle_timeout,
     )
     .await
-}
-
-/// Connect to a node's authenticated legacy event stream.
-pub async fn loopback_events_connect(port: u16) -> io::Result<SseStream> {
-    loopback_events_connect_with_deadlines(port, SSE_HANDSHAKE_TIMEOUT, SSE_IDLE_TIMEOUT).await
 }
 
 /// Connect to a node's authenticated v1 resource event stream.
@@ -472,7 +462,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(5)).await;
         });
 
-        let err = match loopback_events_connect_with_deadlines(
+        let err = match loopback_v1_events_connect_with_deadlines(
             port,
             Duration::from_millis(100),
             Duration::from_millis(100),
@@ -503,7 +493,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(5)).await;
         });
 
-        let mut sse = loopback_events_connect_with_deadlines(
+        let mut sse = loopback_v1_events_connect_with_deadlines(
             port,
             Duration::from_secs(1),
             Duration::from_millis(100),
@@ -537,7 +527,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
         });
 
-        let mut sse = loopback_events_connect_with_deadlines(
+        let mut sse = loopback_v1_events_connect_with_deadlines(
             port,
             Duration::from_secs(1),
             Duration::from_secs(1),
@@ -618,7 +608,7 @@ mod tests {
             stream.shutdown().await.unwrap();
         });
 
-        let err = match loopback_events_connect_with_deadlines(
+        let err = match loopback_v1_events_connect_with_deadlines(
             port,
             Duration::from_secs(1),
             Duration::from_secs(1),

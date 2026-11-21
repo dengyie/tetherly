@@ -504,7 +504,7 @@ pub(crate) fn print_focus_policy_json(body: &[u8]) -> Result<()> {
 }
 
 pub(crate) async fn do_focus_watch(ui_port: u16, json: bool) -> Result<()> {
-    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+    let mut sse = tetherly_node::loopback_v1_events_connect(ui_port)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -515,7 +515,7 @@ pub(crate) async fn do_focus_watch(ui_port: u16, json: bool) -> Result<()> {
     if !json {
         println!("Streaming live focus mode events on 127.0.0.1:{ui_port}...");
     }
-    while let Ok(Some(raw)) = sse.next_event().await {
+    while let Ok(Some(raw)) = sse.next_diagnostic().await {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             let kind = v["kind"].as_str().unwrap_or("");
             if kind == "focus_state_changed"

@@ -348,3 +348,11 @@
 - [x] 结论：§214 收尾条件为伪条件，迁移不可行；真实前提=诊断事件 v1 契约化（Event::Diagnostic 或事件族）
 - [x] 修复：LEGACY_API_MAP 勘误块 §215 修订（/api/events 定性为常设 CLI 诊断通道，不视为债务）+ CONTROL_CLIENT M5 行同步；plan 历史段保持原样由 §215 仲裁
 - [x] 零代码变更；登记 plan §8 + 本 todo + session-log；提交 + CI
+
+## §216（2026-11-22）诊断事件 v1 契约化 + legacy /api/events 删除 — 完成
+- [x] 契约层：Event::Diagnostic{flatten DiagnosticFrame{kind,payload}}，wire data=裸 {kind,payload}；契约测试 43 绿；TS BLESS 再生成
+- [x] hub：project.rs::diagnostic_payload()（丢弃臂→裸 UiEvent JSON）+ pump 逐条透传；单测双路径共存绿
+- [x] CLI 双树 36 文件：loopback_v1_events_connect + next_diagnostic()（loopback 层展平），v["kind"] 解析零改动
+- [x] legacy 删除：/api/events 路由 + handle_sse + SseStream facade + loopback legacy fn 全删；共享路径 fn 更名
+- [x] 验证：workspace 955 测试全绿 + clippy 三门 -D warnings + fmt + svelte-check 0 错 + vitest 36 绿
+- [x] 文档：LEGACY_API_MAP「§216 收尾落地，整体删除成立」+ CONTROL_CLIENT M5 + plan §8（恢复 §215 标题行）；提交 + CI

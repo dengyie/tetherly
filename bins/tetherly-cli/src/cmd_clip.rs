@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Clipboard policy, watch and poll.
 
-use super::util::{loopback_events_connect, loopback_get, loopback_post};
+use super::util::{loopback_get, loopback_post, loopback_v1_events_connect};
 use super::*;
 
 /// `tetherly-cli clip` -- Clip arm of the top-level dispatch.
@@ -434,7 +434,7 @@ pub(crate) fn print_clipboard_policy(v: &serde_json::Value) {
 }
 
 pub(crate) async fn do_clip_watch(ui_port: u16, json: bool) -> Result<()> {
-    let mut sse = loopback_events_connect(ui_port).await.map_err(|e| {
+    let mut sse = loopback_v1_events_connect(ui_port).await.map_err(|e| {
         anyhow::anyhow!(
             "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
@@ -445,7 +445,7 @@ pub(crate) async fn do_clip_watch(ui_port: u16, json: bool) -> Result<()> {
             "Streaming live clipboard synchronization & security events on 127.0.0.1:{ui_port}..."
         );
     }
-    while let Ok(Some(raw)) = sse.next_event().await {
+    while let Ok(Some(raw)) = sse.next_diagnostic().await {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             let kind = v["kind"].as_str().unwrap_or("");
             if kind == "clipboard_synced"

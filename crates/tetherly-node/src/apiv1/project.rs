@@ -128,7 +128,8 @@ pub fn project(ev: &UiEvent) -> Vec<Mark> {
         | E::MicrophonePolicyChanged { .. }
         | E::BenchPolicyChanged { .. } => invalidate(Topic::Settings),
         // Diagnostics, transient sessions and feature telemetry: not part of
-        // the v1 resource model (yet). Legacy `/api/events` still carries them.
+        // the v1 resource model; they are forwarded verbatim as `diagnostic`
+        // events by the hub (§216), see `diagnostic_payload`.
         E::PairingNeeded { .. }
         | E::Status { .. }
         | E::MetricsReset { .. }
@@ -161,6 +162,21 @@ pub fn project(ev: &UiEvent) -> Vec<Mark> {
         | E::BenchSessionStarted { .. }
         | E::BenchSessionFinished { .. }
         | E::BandwidthProfileUpdated { .. } => Vec::new(),
+    }
+}
+
+/// §216: the diagnostics-and-telemetry variants that `project` maps to no
+/// resource mark are forwarded verbatim on `/api/v1/events` as
+/// `Event::Diagnostic`. Serializing the `UiEvent` keeps its snake_case
+/// `kind` tag and every field, so CLI watchers keep their exact field
+/// parsing contract while moving off the retired `/api/events` stream.
+pub fn diagnostic_payload(ev: &UiEvent) -> Option<serde_json::Value> {
+    // Empty marks + not already a v1 envelope == pure telemetry: exactly the
+    // variants routed to the catch-all `Vec::new()` arm of `project`.
+    if !matches!(ev, UiEvent::V1 { .. }) && project(ev).is_empty() {
+        serde_json::to_value(ev).ok()
+    } else {
+        None
     }
 }
 

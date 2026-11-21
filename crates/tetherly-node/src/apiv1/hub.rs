@@ -5,7 +5,7 @@
 use super::coalesce::Coalescer;
 use super::journal::{Frame, Journal};
 use super::model;
-use super::project::{project, Key};
+use super::project::{diagnostic_payload, project, Key};
 use crate::Node;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -147,6 +147,19 @@ async fn pump(hub: Arc<EventHub>, node: Node) {
             }
             res = events.recv() => match res {
                 Ok(ev) => {
+                    // §216: telemetry with no resource mark is forwarded
+                    // verbatim (uncollided, one frame per event) so CLI
+                    // watchers see every diagnostic at full granularity.
+                    if let Some(payload) = diagnostic_payload(&ev) {
+                        let kind = payload
+                            .get("kind")
+                            .and_then(|k| k.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        hub.publish(&Event::Diagnostic {
+                            diagnostic: tetherly_api::DiagnosticFrame { kind, payload },
+                        });
+                    }
                     for m in project(&ev) {
                         c.mark(m.key, m.noisy);
                     }
@@ -262,6 +275,71 @@ mod tests {
         // full resync removes everything not present
         let ev = diff_devices(&mut known, vec![], None);
         assert_eq!(ev, vec![Event::DeviceRemoved { id: "b".into() }]);
+    }
+
+    /// §216: telemetry that maps to no resource mark is forwarded verbatim
+    /// as `diagnostic` frames — same kind tag, same fields the legacy
+    /// `/api/events` stream carried.
+    #[tokio::test]
+    async fn telemetry_events_forward_as_diagnostic_frames() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("hub_diag");
+        let hub = EventHub::spawn(node.clone_handle());
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let sub = hub.subscribe(None);
+        let mut rx = sub.rx;
+        while let Ok(f) = rx.try_recv() {
+            let _ = f;
+        }
+
+        node.emit(crate::events::UiEvent::AuditEventRecorded {
+            id: 7,
+            category: "pairing".into(),
+            severity: "notice".into(),
+            action: "pair_bind".into(),
+            target: None,
+            summary: "peer bound".into(),
+            success: true,
+            timestamp_ms: 5,
+        });
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let f = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(f.name, "diagnostic", "{}", f.data);
+        let env: tetherly_api::EventEnvelope = serde_json::from_str(&f.data).unwrap();
+        match env.event {
+            Event::Diagnostic { diagnostic } => {
+                assert_eq!(diagnostic.kind, "audit_event_recorded");
+                assert_eq!(diagnostic.payload["category"], "pairing");
+                assert_eq!(diagnostic.payload["summary"], "peer bound");
+                assert_eq!(diagnostic.payload["success"], true);
+            }
+            other => panic!("expected Diagnostic, got {other:?}"),
+        }
+
+        // A state-bearing event still resolves to full state (both paths
+        // coexist for one event source).
+        node.emit(crate::events::UiEvent::FileDone {
+            transfer_id: "t1".into(),
+        });
+        let mut got = false;
+        while let Ok(f) = rx.try_recv() {
+            if f.name == "transfers.changed" {
+                got = true;
+            }
+        }
+        if !got {
+            let f = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(f.name, "transfers.changed", "{}", f.data);
+        }
+
+        drop(rx);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

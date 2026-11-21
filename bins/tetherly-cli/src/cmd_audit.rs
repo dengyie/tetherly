@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Security audit trail list/clear/watch.
 
-use super::util::{loopback_events_connect, loopback_get, loopback_post, now_ms};
+use super::util::{loopback_get, loopback_post, loopback_v1_events_connect, now_ms};
 use super::*;
 
 /// `tetherly-cli audit` -- Audit arm of the top-level dispatch.
@@ -187,7 +187,7 @@ pub(crate) async fn handle_audit_watch(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let mut sse = loopback_events_connect(ui_port).await.map_err(|e| {
+    let mut sse = loopback_v1_events_connect(ui_port).await.map_err(|e| {
         anyhow::anyhow!(
             "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
@@ -209,7 +209,7 @@ pub(crate) async fn handle_audit_watch(
 
     let mut received = 0usize;
     loop {
-        match sse.next_event().await {
+        match sse.next_diagnostic().await {
             Ok(Some(raw)) => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
                     if v["kind"].as_str() == Some("audit_event_recorded") {

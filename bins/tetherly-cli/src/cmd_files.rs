@@ -3,8 +3,8 @@
 
 use super::cmd_core::print_event;
 use super::util::{
-    format_bytes, format_speed, format_timestamp_ago, loopback_events_connect, loopback_get,
-    loopback_post, now_ms, now_secs, url_encode,
+    format_bytes, format_speed, format_timestamp_ago, loopback_get, loopback_post,
+    loopback_v1_events_connect, now_ms, now_secs, url_encode,
 };
 use super::*;
 
@@ -1079,7 +1079,7 @@ pub(crate) async fn handle_outbox_watch(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let mut sse = loopback_events_connect(ui_port).await.map_err(|e| {
+    let mut sse = loopback_v1_events_connect(ui_port).await.map_err(|e| {
         anyhow::anyhow!(
             "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
@@ -1092,7 +1092,7 @@ pub(crate) async fn handle_outbox_watch(
         };
         println!("Streaming live outbox events on 127.0.0.1:{ui_port}{filter_info}...");
     }
-    while let Ok(Some(raw)) = sse.next_event().await {
+    while let Ok(Some(raw)) = sse.next_diagnostic().await {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
             let kind = val["kind"].as_str().unwrap_or("");
             if kind == "outbox_updated" || kind == "outbox_cleared" {

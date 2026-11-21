@@ -259,6 +259,24 @@ pub struct Snapshot {
     pub input: Input,
 }
 
+/// One internal diagnostic event forwarded verbatim onto
+/// `/api/v1/events` ([`Event::Diagnostic`], §216). `kind` is the internal
+/// event's snake_case tag (e.g. `audit_event_recorded`,
+/// `camera_session_started`); `payload` carries that event's fields exactly
+/// as the retired `/api/events` stream emitted them, so CLI watchers keep
+/// their field-level parsing contract while moving to the v1 transport.
+/// Bodies, OTP digits, and clipboard text never appear in payloads (the
+/// internal event enum enforces this upstream).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DiagnosticFrame {
+    pub kind: String,
+    // Arbitrary JSON by design; the internal event enum is the schema. Kept
+    // `unknown` in TS so consumers narrow it themselves.
+    #[cfg_attr(test, ts(type = "unknown"))]
+    pub payload: serde_json::Value,
+}
+
 /// Event-stream topics (`?topics=a,b`). Also the resource an
 /// [`Event::Invalidated`] tells the client to refetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -322,13 +340,21 @@ impl Topic {
 
 /// One event on `/api/v1/events`. State-bearing events carry the resource's
 /// full current value (clients replace, never merge); `invalidated` asks the
-/// client to refetch a resource that has no pushed form yet.
+/// client to refetch a resource that has no pushed form yet; `diagnostic`
+/// forwards a single internal telemetry event verbatim (§216).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "type")]
 pub enum Event {
     #[serde(rename = "snapshot")]
     Snapshot { snapshot: Snapshot },
+    #[serde(rename = "diagnostic")]
+    Diagnostic {
+        // Flattened so the wire `data` payload is the bare
+        // `{kind, payload}` frame — one unwrap for CLI consumers (§216).
+        #[serde(flatten)]
+        diagnostic: DiagnosticFrame,
+    },
     #[serde(rename = "device.updated")]
     DeviceUpdated { device: Device },
     #[serde(rename = "device.removed")]
@@ -358,6 +384,7 @@ impl Event {
     pub fn name(&self) -> &'static str {
         match self {
             Event::Snapshot { .. } => "snapshot",
+            Event::Diagnostic { .. } => "diagnostic",
             Event::DeviceUpdated { .. } => "device.updated",
             Event::DeviceRemoved { .. } => "device.removed",
             Event::PairingChanged { .. } => "pairing.changed",
@@ -373,9 +400,12 @@ impl Event {
     }
 
     /// Topic used for `?topics=` filtering; `None` (snapshot) always passes.
+    /// `diagnostic` also always passes: CLI watchers subscribe without topics
+    /// and every diagnostic family must reach them (matches the legacy
+    /// `/api/events` behavior it replaces, §216).
     pub fn topic(&self) -> Option<Topic> {
         match self {
-            Event::Snapshot { .. } => None,
+            Event::Snapshot { .. } | Event::Diagnostic { .. } => None,
             Event::DeviceUpdated { .. } | Event::DeviceRemoved { .. } => Some(Topic::Devices),
             Event::PairingChanged { .. } => Some(Topic::Pairing),
             Event::InputChanged { .. } => Some(Topic::Input),
@@ -7025,6 +7055,7 @@ mod bindings {
             decl::<Pairing>(&cfg),
             decl::<Input>(&cfg),
             decl::<Snapshot>(&cfg),
+            decl::<DiagnosticFrame>(&cfg),
             decl::<Topic>(&cfg),
             decl::<Event>(&cfg),
             decl::<EventEnvelope>(&cfg),

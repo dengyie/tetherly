@@ -351,7 +351,7 @@ export interface Transport {
 | **M2 门面 + Web SPA** ✅ v0.2.58–v0.2.61（§130–§133，Svelte 5，先 `/next/` 托管） | 实现 §4.2 全部端点；`client/` 工程搭好，包括 Transport、store、设计系统和 7 个页面；daemon 在 `/next/` 托管新 SPA，旧控制台留在 `/` | vitest 覆盖 reducer 和 store；Playwright 对接 MockTransport 跑主要流程；在真实 daemon 上冒烟测试 |
 | **M3 Tauri 桌面壳** ✅ v0.2.62（§134–§138） | `src-tauri`：请求代理、事件流转发、token 读取（含 Windows 客户端 token 签发）、托盘、托盘面板、自启、系统通知、深链接；CI 的 release 产物增加 `.dmg` 和 `.msi` | 两端安装运行；托盘状态和事件同步；daemon 重启后客户端自动恢复；内存占用 < 120 MB |
 | **M4 切换** ✅ v0.2.64（§139，§210 复核通过） | `/` 改为新 SPA，旧控制台移到 `/legacy/` 保留两个版本；daemon 内置托盘的双击动作改为优先唤起客户端（深链接 `tetherly://open`），失败时再打开浏览器；`popover.rs` 退役 | 生产两端连续使用一周没有回退 |
-| **M5 收敛** ✅ §141–§142 + §156/§161–§166 + §168–§169（legacy 路由面整体删除；`/api/events` 为常设 CLI 诊断事件通道，v1 契约补齐诊断事件族后才能删，见 LEGACY_API_MAP §214 勘误 + §215 复核） | 删除 `ui/index.html` 和 `/legacy/`；旧 `/api/*` 别名逐个下线（先在日志中记录调用方，确认 CLI 和 Android 已迁移后再删）；Android Compose 改版（§171 已落地） | 路由数从约 555 降到约 60（v1）加 CLI 必需路由；`uihttp.rs` 显著变小 |
+| **M5 收敛** ✅ §141–§142 + §156/§161–§166 + §168–§169 + §216（legacy 路由面整体删除；`/api/events` 诊断流随 §216 v1 契约化后删除，daemon 只服务 `/`、`/assets/*` 与 `/api/v1/*`，见 LEGACY_API_MAP §214/§215/§216） | 删除 `ui/index.html` 和 `/legacy/`；旧 `/api/*` 别名逐个下线（先在日志中记录调用方，确认 CLI 和 Android 已迁移后再删）；Android Compose 改版（§171 已落地）；§216 补 `Event::Diagnostic` 契约并把 CLI watcher 全部迁到 `/api/v1/events` | 路由数从约 555 降到约 60（v1）；`uihttp.rs` 显著变小 |
 
 每个阶段都按项目现有的发布流程执行：TDD、fmt、clippy（含 windows-gnu）、test、版本号、CI、tag、deploy 和两端验证；两端都只部署 CI 产物。Tauri 客户端是新增产物，**不替换 daemon 二进制**，daemon 的部署流程不变。
 

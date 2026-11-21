@@ -346,26 +346,6 @@ async fn handle(
             return v1::events(&mut stream, &node, hub, query, last_event_id).await;
         }
     }
-    if method == "GET"
-        && (path == "/api/events"
-            || path == "/api/events/stream"
-            || path.starts_with("/api/events?")
-            || path.starts_with("/api/events/stream?"))
-    {
-        // Keep the legacy stream temporarily for older local clients, but do
-        // not let it bypass the v1 Read boundary while callers migrate.
-        let granted =
-            crate::apitoken::granted_tier(token, client_token, presented.as_deref().unwrap_or(""));
-        if granted < Some(crate::apitoken::Tier::Read) {
-            let resp = if granted.is_none() {
-                v1::error(tetherly_api::ErrorCode::Unauthorized, "api token required")
-            } else {
-                v1::error(tetherly_api::ErrorCode::Forbidden, "token tier too low")
-            };
-            return write_http_response(&mut stream, &resp).await;
-        }
-        return handle_sse(&mut stream, &node).await;
-    }
     if content_len > MAX_BODY {
         write_http(&mut stream, 413, "text/plain", b"too large").await?;
         return Ok(());
@@ -571,15 +551,8 @@ async fn write_http(
     write_http_response(stream, &resp).await
 }
 
-/// An active Server-Sent Events stream connected to a loopback UI endpoint.
-///
-/// A thin typed facade over [`tetherly_loopback::SseStream`]: the transport and
-/// its deadlines live in the shared crate, while decoding into this crate's
-/// [`UiEvent`](crate::events::UiEvent) has to stay here because that type does.
-pub struct SseStream(tetherly_loopback::SseStream);
-
-/// Typed facade for the authenticated v1 resource stream. It keeps the
-/// legacy `SseStream` unchanged for watchers that consume `UiEvent` directly.
+/// Typed facade for the authenticated v1 resource stream, with
+/// envelope-to-`UiEvent` decoding.
 pub struct V1SseStream(tetherly_loopback::SseStream);
 
 impl V1SseStream {
@@ -597,6 +570,12 @@ impl V1SseStream {
         }
         Ok(None)
     }
+
+    /// Read the next diagnostic event as its bare internal-event JSON (§216).
+    /// Thin forward to the shared crate's frame-level helper.
+    pub async fn next_diagnostic(&mut self) -> std::io::Result<Option<String>> {
+        self.0.next_diagnostic().await
+    }
 }
 
 fn decode_v1_ui_event(raw: &str) -> Option<crate::events::UiEvent> {
@@ -607,116 +586,11 @@ fn decode_v1_ui_event(raw: &str) -> Option<crate::events::UiEvent> {
     })
 }
 
-impl SseStream {
-    /// Read the next event data string from the stream.
-    /// Comments (lines starting with ':') and blank separator lines are skipped.
-    /// Returns `Ok(Some(data))` when a `data: ...` event arrives,
-    /// `Ok(None)` when the stream is closed, or `Err` on I/O error (including
-    /// the shared client's idle deadline).
-    pub async fn next_event(&mut self) -> std::io::Result<Option<String>> {
-        self.0.next_event().await
-    }
-
-    /// Read the next typed `UiEvent` from the legacy stream, skipping frames
-    /// that do not decode.
-    pub async fn next_ui_event(&mut self) -> std::io::Result<Option<crate::events::UiEvent>> {
-        while let Some(raw) = self.next_event().await? {
-            if let Ok(ev) = serde_json::from_str::<crate::events::UiEvent>(&raw) {
-                return Ok(Some(ev));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Read the next v1 resource event envelope. Invalid frames are skipped,
-    /// matching the legacy typed facade's behavior.
-    pub async fn next_v1_event(&mut self) -> std::io::Result<Option<tetherly_api::EventEnvelope>> {
-        while let Some(raw) = self.next_event().await? {
-            if let Ok(ev) = serde_json::from_str::<tetherly_api::EventEnvelope>(&raw) {
-                return Ok(Some(ev));
-            }
-        }
-        Ok(None)
-    }
-}
-
-/// Connect to the authenticated legacy event stream used by existing CLI watchers.
-pub async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
-    tetherly_loopback::loopback_events_connect(port)
-        .await
-        .map(SseStream)
-}
-
 /// A v1 resource-event stream with explicit envelope-to-`UiEvent` decoding.
 pub async fn loopback_v1_events_connect(port: u16) -> std::io::Result<V1SseStream> {
     tetherly_loopback::loopback_v1_events_connect(port)
         .await
         .map(V1SseStream)
-}
-
-async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> {
-    let mut events = node.subscribe();
-    let header = "HTTP/1.1 200 OK\r\n\
-                  Content-Type: text/event-stream; charset=utf-8\r\n\
-                  Cache-Control: no-cache, no-transform\r\n\
-                  Connection: keep-alive\r\n\r\n";
-    stream.write_all(header.as_bytes()).await?;
-    stream.flush().await?;
-
-    // Initial greeting comment so client knows stream is established
-    stream.write_all(b": connected\n\n").await?;
-    stream.flush().await?;
-
-    let mut shutdown = node.shutdown_signal();
-    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
-    // Consume initial tick that fires immediately
-    ping_interval.tick().await;
-
-    loop {
-        tokio::select! {
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    break;
-                }
-            }
-            res = events.recv() => {
-                match res {
-                    Ok(ev) => {
-                        if let Ok(json) = serde_json::to_string(&ev) {
-                            let payload = format!("data: {json}\n\n");
-                            if stream.write_all(payload.as_bytes()).await.is_err() {
-                                break;
-                            }
-                            if stream.flush().await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        let payload = format!(": lagged {n}\n\n");
-                        if stream.write_all(payload.as_bytes()).await.is_err() {
-                            break;
-                        }
-                        if stream.flush().await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        break;
-                    }
-                }
-            }
-            _ = ping_interval.tick() => {
-                if stream.write_all(b": ping\n\n").await.is_err() {
-                    break;
-                }
-                if stream.flush().await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 // Generated router: every arm pattern stays here so the (method, path) table

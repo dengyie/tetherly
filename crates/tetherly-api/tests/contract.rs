@@ -219,6 +219,34 @@ mod events {
         assert_eq!(back, env);
     }
 
+    /// §216: the diagnostic variant forwards the internal event verbatim.
+    /// The wire payload nests under `data` as `{kind, payload}` so CLI
+    /// watchers can unwrap one level and keep their legacy field parsing.
+    #[test]
+    fn diagnostic_envelope_roundtrips_with_kind_and_payload() {
+        let env = EventEnvelope {
+            seq: 42,
+            event: Event::Diagnostic {
+                diagnostic: DiagnosticFrame {
+                    kind: "screen_state_changed".into(),
+                    payload: serde_json::json!({
+                        "state": "streaming",
+                        "allowed": true,
+                        "peer": "p1",
+                    }),
+                },
+            },
+        };
+        let v = serde_json::to_value(&env).unwrap();
+        assert_eq!(v["seq"], 42);
+        assert_eq!(v["type"], "diagnostic");
+        assert_eq!(v["data"]["kind"], "screen_state_changed");
+        assert_eq!(v["data"]["payload"]["state"], "streaming");
+        assert_eq!(v["data"]["payload"]["peer"], "p1");
+        let back: EventEnvelope = serde_json::from_value(v).unwrap();
+        assert_eq!(back, env);
+    }
+
     #[test]
     fn event_names_match_wire_tags_and_topics() {
         let cases = [
@@ -259,6 +287,26 @@ mod events {
                 },
                 "invalidated",
                 Some(Topic::Layout),
+            ),
+            // §216: diagnostic events pass every topic filter (None), matching
+            // the retired `/api/events` stream they replace.
+            (
+                Event::Diagnostic {
+                    diagnostic: DiagnosticFrame {
+                        kind: "audit_event_recorded".into(),
+                        payload: serde_json::json!({
+                            "id": 9,
+                            "category": "pairing",
+                            "severity": "notice",
+                            "action": "pair_bind",
+                            "summary": "peer bound",
+                            "success": true,
+                            "timestamp_ms": 5,
+                        }),
+                    },
+                },
+                "diagnostic",
+                None,
             ),
             (
                 Event::TransfersChanged {

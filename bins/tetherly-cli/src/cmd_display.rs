@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Virtual display status/attach/detach/policy/watch.
 
-use super::util::{loopback_events_connect, loopback_get, loopback_post};
+use super::util::{loopback_get, loopback_post, loopback_v1_events_connect};
 use super::*;
 
 /// `tetherly-cli display` -- Display arm of the top-level dispatch.
@@ -491,13 +491,13 @@ pub(crate) async fn do_virtual_display_policy(
 }
 
 pub(crate) async fn do_virtual_display_watch(ui_port: u16, json: bool) -> Result<()> {
-    let mut sse = loopback_events_connect(ui_port).await.map_err(|e| {
+    let mut sse = loopback_v1_events_connect(ui_port).await.map_err(|e| {
         anyhow::anyhow!("failed to connect to loopback events stream (is node running?): {e}")
     })?;
     if !json {
         println!("Streaming live virtual display events on 127.0.0.1:{ui_port}...");
     }
-    while let Ok(Some(raw)) = sse.next_event().await {
+    while let Ok(Some(raw)) = sse.next_diagnostic().await {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             let kind = v["kind"].as_str().unwrap_or("");
             if kind == "virtual_display_session_started"

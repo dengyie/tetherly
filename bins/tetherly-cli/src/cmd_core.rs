@@ -2,8 +2,8 @@
 //! `run`/`identity`/`pin`/`dial` plus node status, metrics, events and caps.
 
 use super::util::{
-    format_bytes, format_speed, format_uptime, loopback_events_connect, loopback_get,
-    loopback_post, now_ms,
+    format_bytes, format_speed, format_uptime, loopback_get, loopback_post,
+    loopback_v1_events_connect, now_ms,
 };
 use super::*;
 
@@ -548,7 +548,7 @@ pub(crate) async fn events(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let mut sse = loopback_events_connect(ui_port).await.map_err(|e| {
+    let mut sse = loopback_v1_events_connect(ui_port).await.map_err(|e| {
         anyhow::anyhow!(
             "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
              start one with `tetherly --data-dir <dir> run` first"
@@ -569,12 +569,12 @@ pub(crate) async fn events(
             if now >= dl {
                 break;
             }
-            match tokio::time::timeout(dl - now, sse.next_event()).await {
+            match tokio::time::timeout(dl - now, sse.next_diagnostic()).await {
                 Ok(res) => res,
                 Err(_) => break,
             }
         } else {
-            sse.next_event().await
+            sse.next_diagnostic().await
         };
 
         match next_res {

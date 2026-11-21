@@ -189,7 +189,7 @@ pub(crate) async fn handle_audit_watch(
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
-    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+    let mut sse = tetherly_node::loopback_v1_events_connect(ui_port)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -213,7 +213,7 @@ pub(crate) async fn handle_audit_watch(
 
     let mut received = 0usize;
     loop {
-        match sse.next_event().await {
+        match sse.next_diagnostic().await {
             Ok(Some(raw)) => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
                     if v["kind"].as_str() == Some("audit_event_recorded") {

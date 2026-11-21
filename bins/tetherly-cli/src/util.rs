@@ -15,5 +15,5 @@ pub(crate) use tetherly_core::text::{
 };
 pub(crate) use tetherly_core::{now_ms, now_secs};
 pub(crate) use tetherly_loopback::{
-    loopback_delete, loopback_events_connect, loopback_get, loopback_post,
+    loopback_delete, loopback_get, loopback_post, loopback_v1_events_connect,
 };

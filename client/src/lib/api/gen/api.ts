@@ -56,9 +56,11 @@ export type Input = { seat: string, channel_open: boolean, peer: string | null, 
 
 export type Snapshot = { system: System, devices: Array<Device>, pairing: Pairing, input: Input, };
 
+export type DiagnosticFrame = { kind: string, payload: unknown, };
+
 export type Topic = "devices" | "pairing" | "input" | "system" | "layout" | "transfers" | "inbox" | "activity" | "clipboard" | "settings";
 
-export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "activity.changed", activity: Activity, } | { "type": "invalidated", topic: Topic, };
+export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "diagnostic", kind: string, payload: unknown, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "activity.changed", activity: Activity, } | { "type": "invalidated", topic: Topic, };
 
 export type EventEnvelope = { seq: number, event: unknown, };
 
