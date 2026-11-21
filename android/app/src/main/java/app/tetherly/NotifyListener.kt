@@ -60,6 +60,10 @@ class NotifyListener : NotificationListenerService() {
 
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // Self-echo guard: our own foreground notification ("通知转发已开启",
+        // ongoing) is not phone content. Without this, every service start
+        // forwarded a "Tetherly" banner back to the desktop.
+        if (sbn.packageName == packageName) return
         val n = sbn.notification ?: return
         val extras = n.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
