@@ -1793,3 +1793,6 @@
 
 ## §216 诊断事件 v1 契约化（2026-11-22）
 落地 §215 确立的真实收尾前提：Event::Diagnostic 契约（flatten 使 wire data={kind,payload}）→ hub 对 ~40 种遥测 UiEvent 逐条透传 → 双树 CLI 36 watcher 切 /api/v1/events（next_diagnostic 展平一层，字段解析零改动）→ 删除 /api/events 路由、handle_sse、SseStream facade、loopback legacy fn。workspace 955 测试全绿，clippy 三门过，svelte-check/vitest 过。§169 遗留的最后一条 legacy 路由清零。
+
+## §217 桌面客户端重做 + v0.2.70 发布（2026-11-22）
+按 awesome-ui-kit 规范在独立分支 feat/desktop-client-redesign 重做 Tauri/Svelte 客户端：Tailwind v4 随包打入、玻璃侧栏壳 + ⌘K 命令面板 + 主题切换、kit 组件移植为 Svelte 5（Icon/StatusIndicator/Glass/Switch/ProgressBar/AnimatedCounter/EmptyState/ToastStack/CommandPalette/PageHeader）、九个路由全部重写（文案/testid/托盘契约保留）、新增可视化布局编辑器（/api/v1/topology/*）。Vite 固定产出 daemon 嵌入的三文件。e2e mock server 自 M4 base 改 "/" 后只服务 /next/ 导致 4 用例白屏（接手前即坏），修为同时服务根路径并补 fixture。门禁：svelte-check 0/0、vitest 54、playwright 5、cargo uihttp::next 4、build:ci dist 零差异。教训：dist 必须在最后一次源码改动后重建再提交，否则 build:ci 零差异门会红（本次曾因布局槽位加宽后未重建被门拦下）。Tauri 壳 productName=Tetherly 与 /Applications/Tetherly.app（daemon 包装）同名，壳 dmg 不能直接覆盖安装；新 UI 经 daemon 内嵌 dashboard 上线。版本 bump v0.2.70（含 §179–§216 全部未发布修复）。
