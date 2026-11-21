@@ -319,3 +319,4 @@
 - P4 观察项：screen.rs AdbSource raw 模式 w*h*4 不可信分配（opt-in + 管理员信任域，接受）；model.rs expect 原观察项已升级修复。
 - 待办：CI 9899e50 确认绿；等待用户验收或指派新审计面（client/Android/脚本面）。
 - [x] §208 tetherly-loopback（664 行全读）+ tetherly-api（7435+2188 行全读/扫读）深审：crate 内零缺陷；CLI 调用方 cmd_peers.rs route-remove peer 未编码（唯一漏网点）P4 修复 29975de；clippy 三门 + loopback/api/node-bin 测试全绿；CI 44882481611。
+- [x] §209 tetherly-net 2,893 行收尾深审（7 源文件 + 4 测试文件全读）：验证性审计零缺陷——outbox 两阶段/rekey 恢复/filechan 上界与 AAD/proptest 全部在位；28 测试全绿。至此全部 7 个 Rust crate 深审收官。

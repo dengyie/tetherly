@@ -1775,3 +1775,5 @@
 - CI 补录：44877084905（9899e50）windows 失败——回归测试用 "/etc/passwd" 当绝对路径，但 Windows 无盘符路径不算 is_absolute()；改为 temp_dir 平台无关绝对路径后 6c81f02 推送，44878772315 首跑 windows phase3 m3_5 "session did not register in time" 时序 flake（与改动无关），rerun success。教训：路径守卫回归测试的绝对路径用例必须用 temp_dir 构造，裸 "/..." 在 Windows 不成立。
 ## 2026-11-21 §208 loopback+api 深审收官
 - tetherly-loopback 与 tetherly-api 两 crate 全读，零 crate 内缺陷。经验：契约 crate（纯 DTO + 少量逻辑面）审计重心应放在仅有的逻辑点（EventEnvelope/Patch<T>/Topic parse）并核对契约测试是否逐一覆盖；CLI→loopback 调用方要单独核查 query 编码纪律，`url_encode` 一律走 core `encode_query_value`（仅 unreserved，/ 与 CRLF 也转义）。
+## 2026-11-21 §209 tetherly-net 收官
+- 验证性审计经验：对已被 Batch 批次系统性加固过的 crate，深审重点是「逐行确认加固未回归」而非找新问题——outbox 提交/发送两阶段、rekey 取消恢复、filechan header 即拒/AAD 绑定、proptest 面均在位。7 crate（node/core/api/net/android/crypto/loopback）深审全部收官，剩余面为 client/Tauri 前端 TS。
