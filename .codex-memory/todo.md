@@ -322,3 +322,9 @@
 - [x] §209 tetherly-net 2,893 行收尾深审（7 源文件 + 4 测试文件全读）：验证性审计零缺陷——outbox 两阶段/rekey 恢复/filechan 上界与 AAD/proptest 全部在位；28 测试全绿。至此全部 7 个 Rust crate 深审收官。
 - [x] §210 client/ Tauri 壳 + SPA 前端深审（~3.9k 行全读）：验证性审计零缺陷——token 隔离/SSE 双实现契约一致/tray fold 纯函数/SPA 单写者事件流全部在位；pnpm check 0 错 + vitest 36 绿 + shell clippy/test 33 绿。至此全部交付面（7 crate + Android + client）深审收官。
 - [x] §211 Android Kotlin 层深审（~1.3k 行全读）：P4 self-echo 修复 d41115d（NotifyListener 不再转发自身前台通知）；生命周期状态机/回复队列/所有权决策表全部在位；本地补 build-tools 34 + platform 35 后 17 单测 0 失败 + assembleDebug 绿。
+
+## §212（2026-11-21）scripts/ + workflows 深审
+- [x] 11 文件 2,424 行全读：ci.yml/release.yml/deploy.sh/package-macos-app.sh/verify_cross_platform_smoke.sh/verify_crossing.py/verify_remote_e2e_{twcc,harq}.sh/win_memory_cleanup.ps1/launch_system.ps1/run_tetherly_system.bat
+- [x] 4×P4 修复：deploy.sh CLI digest 缺失；package-macos-app.sh 三下载路径 digest 缺失；release.yml sed 锚点过宽（实测 0.2.69）；release.yml arch gate 补齐（linux/desktop/android 三处）
+- [x] 1×注释漂移修复：smoke 1.2 节 /api/v1/input → /api/v1/input/tunnel
+- [x] 门禁：bash -n×5 + py_compile + sed 锚点实测 + YAML 解析（4+7 jobs）

@@ -222,6 +222,16 @@ deploy_windows() {
         echo "Error: digest mismatch for $(basename "$WIN_BIN"); refusing deployment." >&2
         exit 1
     fi
+    # The CLI binary is staged onto the host too (§212): same digest standard,
+    # otherwise a corrupted CLI would ship verified-daemon + unverified-cli.
+    if [ -f "$WIN_CLI" ]; then
+        expected_cli=$(awk -v name="$(basename "$WIN_CLI")" '$2 == name || $2 == "./" name || $2 == "*" name {print $1; exit}' "$TMP_DIR/SHA256SUMS")
+        actual_cli=$(shasum -a 256 "$WIN_CLI" | awk '{print $1}')
+        if [ -z "$expected_cli" ] || [ "$actual_cli" != "$expected_cli" ]; then
+            echo "Error: digest mismatch for $(basename "$WIN_CLI"); refusing deployment." >&2
+            exit 1
+        fi
+    fi
 
     echo "==> Staging Windows binaries to ${REMOTE_HOST}:E:/code/tetherly/data/updates/..."
     REMOTE_STAGING_NAME="tetherly-${TAG:-run_${RUN_ID}}.exe"

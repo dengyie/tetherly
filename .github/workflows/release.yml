@@ -49,8 +49,8 @@ jobs:
           [ "$(git describe --tags --exact-match HEAD)" = "${tag}" ]
 
           version="${tag#v}"
-          cargo_version="$(sed -n '/^\[workspace.package\]/,/^\[/{ s/.*"\([0-9][^"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
-          client_version="$(sed -n 's/.*"version": "\([0-9][^"]*\)".*/\1/p' client/package.json | head -n 1)"
+          cargo_version="$(sed -n '/^\[workspace.package\]/,/^\[/{ s/^version = "\([0-9][^"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
+          client_version="$(sed -n 's/^  "version": "\([0-9][^"]*\)".*/\1/p' client/package.json | head -n 1)"
           tauri_version="$(sed -n 's/.*"version": "\([0-9][^"]*\)".*/\1/p' client/src-tauri/tauri.conf.json | head -n 1)"
           for actual in "${cargo_version}" "${client_version}" "${tauri_version}"; do
             [ "${actual}" = "${version}" ] || {
@@ -144,6 +144,16 @@ jobs:
             echo "linux binary requires a glibc newer than 2.31" >&2
             exit 1
           fi
+      - name: verify binary architecture
+        run: |
+          set -euo pipefail
+          # §212: explicit architecture gate (Batch 5 "build/file/lipo" item) —
+          # a silent cross-target slip must not become a release asset.
+          file target/release/tetherly target/release/tetherly-cli | grep -qE 'x86-64'
+          if file target/release/tetherly | grep -qE 'arm64|aarch64'; then
+            echo "linux binary built for the wrong architecture" >&2
+            exit 1
+          fi
       - name: stage artifacts
         run: |
           set -euo pipefail
@@ -179,6 +189,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build release binaries
         run: cargo build --release --locked -p tetherly-node -p tetherly-cli
+      - name: verify binary architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          # §212: explicit per-matrix architecture gate — the macos leg must
+          # be arm64 and the windows leg x86-64, or the artifact is rejected.
+          ext=""
+          if [ "${RUNNER_OS}" = "Windows" ]; then ext=".exe"; fi
+          file "target/release/tetherly${ext}"
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            file "target/release/tetherly" | grep -qE 'arm64|aarch64'
+          else
+            file "target/release/tetherly${ext}" | grep -qE 'x86-64'
+          fi
       - name: stage artifacts
         shell: bash
         run: |
@@ -271,6 +295,11 @@ jobs:
         run: cargo install cargo-ndk --locked
       - name: build native .so (arm64-v8a)
         run: cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p tetherly-android --release
+      - name: verify native library architecture
+        run: |
+          set -euo pipefail
+          # §212: the shipped .so must be aarch64 ELF (Batch 5 arch gate).
+          file android/app/src/main/jniLibs/arm64-v8a/libtetherly_android.so | grep -qE 'aarch64'
       - uses: actions/setup-java@v6
         with:
           distribution: temurin

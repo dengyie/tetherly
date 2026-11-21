@@ -90,8 +90,8 @@ else
 fi
 
 # 1.2 Local macOS Accessibility & Capture Hooks
-# §169: legacy /api/input/ensure is gone; GET /api/v1/input is the v1
-# engine report (Read tier via per-start api.token).
+# §169: legacy /api/input/ensure is gone; GET /api/v1/input/tunnel (§165) is
+# the v1 engine report (Read tier via per-start api.token).
 LOCAL_CAPTURE=$(curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${LOCAL_PORT}/api/v1/input/tunnel" 2>/dev/null || true)
 if echo "$LOCAL_CAPTURE" | jq -e '.accessibility_trusted == true and .capture_active == true' >/dev/null 2>&1; then
     log_pass "macOS Accessibility TCC permissions verified (Trusted & Capture Active)"

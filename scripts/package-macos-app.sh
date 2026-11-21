@@ -89,12 +89,15 @@ if [ -n "$BINARY_PATH" ]; then
 elif [ -n "$FROM_RUN" ]; then
     echo "==> Downloading artifact from GitHub Actions run $FROM_RUN..."
     TMP_CLEANUP=$(mktemp -d /tmp/tetherly-ci-XXXXXX)
+    # §212: digest-check like deploy.sh does — an unverified binary must not
+    # reach /Applications just because it came from a different door.
     gh run download "$FROM_RUN" -n "tetherly-macos-arm64" -D "$TMP_CLEANUP"
+    gh run download "$FROM_RUN" -n "tetherly-release-digests" -D "$TMP_CLEANUP" || true
     BINARY_PATH="$TMP_CLEANUP/tetherly-macos-arm64"
 elif [ -n "$FROM_TAG" ]; then
     echo "==> Downloading artifact from GitHub Release tag $FROM_TAG..."
     TMP_CLEANUP=$(mktemp -d /tmp/tetherly-ci-XXXXXX)
-    gh release download "$FROM_TAG" -p "tetherly-macos-arm64" -D "$TMP_CLEANUP"
+    gh release download "$FROM_TAG" -p "tetherly-macos-arm64" -p "SHA256SUMS" -D "$TMP_CLEANUP"
     BINARY_PATH="$TMP_CLEANUP/tetherly-macos-arm64"
 elif [ "$BUILD_LOCAL" = true ]; then
     echo "==> Building release binary locally via cargo..."
@@ -111,8 +114,19 @@ else
     fi
     echo "==> No binary specified, downloading latest CI release ($LATEST_TAG)..."
     TMP_CLEANUP=$(mktemp -d /tmp/tetherly-ci-XXXXXX)
-    gh release download "$LATEST_TAG" -p "tetherly-macos-arm64" -D "$TMP_CLEANUP"
+    gh release download "$LATEST_TAG" -p "tetherly-macos-arm64" -p "SHA256SUMS" -D "$TMP_CLEANUP"
     BINARY_PATH="$TMP_CLEANUP/tetherly-macos-arm64"
+fi
+
+# §212: verify the downloaded binary against SHA256SUMS (single choke point
+# for all download modes; --binary from a trusted local path stays exempt).
+if [ -n "$TMP_CLEANUP" ] && [ -s "$TMP_CLEANUP/SHA256SUMS" ]; then
+    expected=$(awk -v name="$(basename "$BINARY_PATH")" '$2 == name || $2 == "./" name || $2 == "*" name {print $1; exit}' "$TMP_CLEANUP/SHA256SUMS")
+    actual=$(shasum -a 256 "$BINARY_PATH" | awk '{print $1}')
+    if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+        echo "Error: digest mismatch for $(basename "$BINARY_PATH"); refusing install." >&2
+        exit 1
+    fi
 fi
 
 if [ "$RESTART" = true ]; then

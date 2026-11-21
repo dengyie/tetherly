@@ -1782,3 +1782,4 @@
 ## 2026-11-21 §211 Android 层收官 + 本机 Android 门禁经验
 - Kotlin 层审计经验：self-echo 是 NotificationListener 类 app 的经典缺陷——ingress 首行就该过滤自身包名；node 下游无防线时上游守卫是唯一屏障。
 - 本机 Android 门禁踩坑三连：①sdkmanager 12.0 无法解析仓库 XML v4（报「XML 文件結構…」）→ 直接 curl dl.google.com 的 build-tools_r34-macosx.zip + platform-35_r02.zip 解包进 ~/Library/Android/sdk/{build-tools/34.0.0,platforms/android-35}；②gradle 走 maven 下载遇 "Remote host terminated the handshake" → 系统代理 127.0.0.1:7897 需以 -Dhttps.proxyHost/-Dhttps.proxyPort 传给 gradle CLI（GRADLE_OPTS/JAVA_TOOL_OPTIONS 不生效于该路径）；③无 gradle 安装时用 ~/.gradle/wrapper/dists 里已有的 8.13 + Android Studio 自带 JBR（JAVA_HOME）。
+- 2026-11-21 §212：scripts/workflows 全读收官。Batch 5 主干（tag checkout/版本契约/immutable publish/Windows rollback 锚点/全量 /api/v1）逐项验证在位；修 4×P4（两处 digest 缺口、sed 锚点、arch gate）+1 注释漂移。教训：release.yml 版本提取 sed 此前靠键序巧合（`.*"` 会吃段内任意带数字引号行）——用 `^version = "` / `^  "version": "` 行首锚；package-macos-app.sh 与 deploy.sh 消费同一 CI 产物但只后者验 digest，「同一产物多入口必须同标准」。
