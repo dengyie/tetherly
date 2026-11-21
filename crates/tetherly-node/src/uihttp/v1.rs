@@ -2164,7 +2164,7 @@ async fn patch_action_policy(node: &Node, query: Option<&str>, body: &[u8]) -> H
     }
     Ok(json(
         200,
-        &crate::apiv1::model::set_action_policy(node, policy),
+        &crate::apiv1::model::set_action_policy(node, policy).map_err(core_error)?,
     ))
 }
 
@@ -2297,7 +2297,7 @@ async fn patch_bench_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Ha
     }
     Ok(json(
         200,
-        &crate::apiv1::model::set_bench_policy(node, policy),
+        &crate::apiv1::model::set_bench_policy(node, policy).map_err(core_error)?,
     ))
 }
 
@@ -2474,7 +2474,7 @@ async fn patch_battery_policy(node: &Node, query: Option<&str>, body: &[u8]) -> 
     }
     Ok(json(
         200,
-        &crate::apiv1::model::set_battery_policy(node, policy),
+        &crate::apiv1::model::set_battery_policy(node, policy).map_err(core_error)?,
     ))
 }
 /// `POST /media/command` (§165): body or legacy query; single peer or
@@ -2748,7 +2748,7 @@ async fn patch_media_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Ha
     }
     Ok(json(
         200,
-        &crate::apiv1::model::set_media_policy(node, policy),
+        &crate::apiv1::model::set_media_policy(node, policy).map_err(core_error)?,
     ))
 }
 
@@ -4913,11 +4913,13 @@ async fn post_screen_whiteboard_import(node: &Node, body: &[u8]) -> Handled {
             total_added_counter: 0,
         }
     } else if let Some(file) = req.file {
-        let raw = std::fs::read(&file)
-            .map_err(|e| error(ErrorCode::BadRequest, format!("failed to read {file}: {e}")))?;
-        if file.contains("..") {
+        // Validate BEFORE reading: an absolute path or traversal must never
+        // touch the filesystem (a prior version read first and checked after).
+        if file.contains("..") || std::path::Path::new(&file).is_absolute() {
             return Err(error(ErrorCode::BadRequest, "path traversal rejected"));
         }
+        let raw = std::fs::read(&file)
+            .map_err(|e| error(ErrorCode::BadRequest, format!("failed to read {file}: {e}")))?;
         let dto: tetherly_api::WhiteboardSnapshotDto = serde_json::from_slice(&raw)
             .map_err(|e| error(ErrorCode::BadRequest, format!("bad snapshot json: {e}")))?;
         crate::apiv1::model::whiteboard_snapshot_runtime(dto)

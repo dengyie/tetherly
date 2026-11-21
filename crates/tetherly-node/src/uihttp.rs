@@ -1238,6 +1238,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// §207 P3: whiteboard import must validate `file` BEFORE touching the
+    /// filesystem — an absolute path or traversal is rejected without a read,
+    /// never leaked as an arbitrary-file probe.
+    #[tokio::test]
+    async fn v1_whiteboard_import_rejects_bad_paths_before_read() {
+        let (node, dir) = temp_test_node("v1_wb_import_guard");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("daemon token");
+        let auth = format!("Authorization: Bearer {token}");
+
+        for evil in ["/etc/passwd", "../escape.json", "sub/../../escape.json"] {
+            let payload = format!(r#"{{"file":"{evil}"}}"#);
+            let (code, resp) = raw_request(
+                port,
+                "POST",
+                "/api/v1/screen/whiteboard/import",
+                Some(&auth),
+                payload.as_bytes(),
+            )
+            .await;
+            assert_eq!(code, 400, "path {evil}: {}", String::from_utf8_lossy(&resp));
+            let body: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+            assert_eq!(body["error"]["code"], "bad_request", "{body}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("path traversal rejected"),
+                "path {evil}: must be rejected by the path guard, got: {body}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn v1_file_domains_serve_and_gate() {
         let (node, dir) = temp_test_node("v1_file_domains");

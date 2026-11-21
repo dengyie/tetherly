@@ -1496,11 +1496,15 @@ pub fn action_policy(node: &Node) -> ActionPolicyDto {
 }
 
 /// `PATCH /action/policy` — sparse policy update.
-pub fn set_action_policy(node: &Node, policy: crate::store::ActionPolicy) -> ActionPolicyDto {
-    let r = node
-        .set_action_policy(policy)
-        .expect("validated action policy");
-    action_policy_dto(r.policy)
+pub fn set_action_policy(
+    node: &Node,
+    policy: crate::store::ActionPolicy,
+) -> Result<ActionPolicyDto, CoreError> {
+    // The runtime layer sanitizes the policy, but persistence can still fail
+    // (read-only data dir, full disk) — surface that as a typed error instead
+    // of panicking inside the HTTP handler task.
+    let r = node.set_action_policy(policy)?;
+    Ok(action_policy_dto(r.policy))
 }
 
 // ---- §164: link benchmark domain ----
@@ -1561,11 +1565,12 @@ pub fn bench_policy(node: &Node) -> BenchPolicyDto {
 }
 
 /// `PATCH /bench/policy` — sparse policy update.
-pub fn set_bench_policy(node: &Node, policy: crate::store::BenchPolicy) -> BenchPolicyDto {
-    let r = node
-        .set_bench_policy(policy)
-        .expect("validated bench policy");
-    bench_policy_dto(r.policy)
+pub fn set_bench_policy(
+    node: &Node,
+    policy: crate::store::BenchPolicy,
+) -> Result<BenchPolicyDto, CoreError> {
+    let r = node.set_bench_policy(policy)?;
+    Ok(bench_policy_dto(r.policy))
 }
 
 /// `POST /bench/start` + `POST /bench/stop` decision report.
@@ -1759,11 +1764,12 @@ pub fn media_policy(node: &Node) -> MediaPolicyDto {
 }
 
 /// `PATCH /media/policy` — sparse policy update.
-pub fn set_media_policy(node: &Node, policy: crate::store::MediaControlPolicy) -> MediaPolicyDto {
-    let r = node
-        .set_media_policy(policy)
-        .expect("validated media policy");
-    media_policy_dto(r.policy)
+pub fn set_media_policy(
+    node: &Node,
+    policy: crate::store::MediaControlPolicy,
+) -> Result<MediaPolicyDto, CoreError> {
+    let r = node.set_media_policy(policy)?;
+    Ok(media_policy_dto(r.policy))
 }
 
 // ---- §165: battery/power domain ----
@@ -1820,11 +1826,12 @@ pub fn battery_policy(node: &Node) -> BatteryPolicyDto {
 }
 
 /// `PATCH /battery/policy` — sparse policy update.
-pub fn set_battery_policy(node: &Node, policy: crate::store::BatteryPolicy) -> BatteryPolicyDto {
-    let r = node
-        .set_battery_policy(policy)
-        .expect("validated battery policy");
-    battery_policy_dto(r.policy)
+pub fn set_battery_policy(
+    node: &Node,
+    policy: crate::store::BatteryPolicy,
+) -> Result<BatteryPolicyDto, CoreError> {
+    let r = node.set_battery_policy(policy)?;
+    Ok(battery_policy_dto(r.policy))
 }
 
 // ---- §165: ANCS (iPhone notification bridge) domain ----
