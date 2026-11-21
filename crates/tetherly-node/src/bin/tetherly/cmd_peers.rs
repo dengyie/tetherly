@@ -2,6 +2,7 @@
 //! Peer discovery, connect/disconnect/block, routes/net and link quality.
 
 use super::util::format_uptime;
+use super::util::url_encode;
 use super::*;
 
 /// `tetherly unpair` -- Unpair arm of the top-level dispatch.
@@ -239,7 +240,8 @@ pub(crate) async fn route(action: RouteCmd) -> Result<()> {
             ui_port,
         } => {
             // §156b: v1 route removal — DELETE /api/v1/routes?peer=….
-            let path = format!("/api/v1/routes?peer={}", peer.trim());
+            // §208: encode like every other query caller (peer ids are opaque).
+            let path = format!("/api/v1/routes?peer={}", url_encode(peer.trim()));
             let (code, resp) = tetherly_node::loopback_delete(ui_port, &path)
                 .await
                 .map_err(|e| {
