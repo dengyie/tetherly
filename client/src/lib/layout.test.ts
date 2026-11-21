@@ -53,8 +53,8 @@ const layout = (over: Partial<LayoutData> = {}): LayoutData => ({
   ...over,
 });
 
-function mountLayout(data: LayoutData | null = layout()) {
-  const t = new MockTransport();
+function mountLayout(data: LayoutData | null = layout(), responder?: () => unknown) {
+  const t = new MockTransport(responder);
   const devices: DevicesState = {
     byId: new Map([
       ["d1", device("d1", "WIN")],
@@ -116,6 +116,24 @@ describe("layout editor", () => {
       { method: "PATCH", path: "/api/v1/topology/config", body: { wrap_around: true } },
       { method: "PATCH", path: "/api/v1/topology/policy", body: { allow_inbound_control: false } },
     ]);
+  });
+
+  it("keeps sliders and switches focusable while a PATCH is in flight", async () => {
+    // A pending request must not `disabled` the control the user is on:
+    // Chrome blurs disabled elements, so the next ArrowLeft/Space would be lost.
+    const t = mountLayout(layout(), () => new Promise(() => {}));
+    const slider = screen.getByLabelText("推动阻力") as HTMLInputElement;
+    slider.focus();
+    slider.value = "45";
+    await fireEvent.change(slider);
+    expect(t.calls).toHaveLength(1);
+    expect(slider.disabled).toBe(false);
+    expect(slider.getAttribute("aria-busy")).toBe("true");
+    expect(document.activeElement).toBe(slider);
+    const sw = screen.getByRole("switch", { name: "边缘环绕" }) as HTMLButtonElement;
+    expect(sw.disabled).toBe(false);
+    // Buttons that trigger whole-page operations still lock while busy.
+    expect((screen.getByRole("button", { name: /同步到对端/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("offers 恢复自动 for a manually pinned display and PATCHes display_auto (§221)", async () => {

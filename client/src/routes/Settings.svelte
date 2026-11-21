@@ -49,11 +49,11 @@
     <ul class="m-0 mt-3 list-none p-0">
       <li class="row">
         <div class="flex-1"><div class="text-[13px]">mDNS 广播</div><div class="text-xs dim">在局域网内公布本机，供其他设备发现与配对。</div></div>
-        <Switch checked={data.general.advertise} disabled={saving} label="mDNS 广播" onchange={(v) => patch({ advertise: v })} />
+        <Switch checked={data.general.advertise} aria-busy={saving} label="mDNS 广播" onchange={(v) => patch({ advertise: v })} />
       </li>
       <li class="row">
         <div class="flex-1"><div class="text-[13px]">自动重连</div><div class="text-xs dim">链路中断后自动尝试恢复到已配对设备。</div></div>
-        <Switch checked={data.general.reconnect} disabled={saving} label="自动重连" onchange={(v) => patch({ reconnect: v })} />
+        <Switch checked={data.general.reconnect} aria-busy={saving} label="自动重连" onchange={(v) => patch({ reconnect: v })} />
       </li>
       <li class="row">
         <div class="flex-1"><div class="text-[13px]">仅本机回环</div><div class="text-xs dim">由 daemon 启动参数决定，此处只读。</div></div>
@@ -79,7 +79,7 @@
     <ul class="m-0 list-none p-0">
       <li class="row">
         <div class="flex-1"><div class="text-[13px]">自动接收文件</div><div class="text-xs dim">来自已配对设备的文件直接写入收件箱，无需逐个确认。</div></div>
-        <Switch checked={data.transfer.auto_accept} disabled={saving} label="自动接收文件" onchange={(v) => patch({ auto_accept: v })} />
+        <Switch checked={data.transfer.auto_accept} aria-busy={saving} label="自动接收文件" onchange={(v) => patch({ auto_accept: v })} />
       </li>
     </ul>
   {/if}

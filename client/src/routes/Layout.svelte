@@ -70,6 +70,9 @@
   }
 
   // Sliders commit on `change` (pointer release), not on every `input` tick.
+  // Sliders and switches stay enabled while a PATCH is in flight (`aria-busy`
+  // instead of `disabled`): disabling a focused control blurs it, which
+  // swallowed the next keyboard step in the live keyboard walk.
   function num(e: Event): number {
     return Number((e.currentTarget as HTMLInputElement).value);
   }
@@ -174,23 +177,23 @@
       <div class="flex flex-col gap-3">
         <label class="flex flex-col gap-1 text-xs">
           <span class="flex justify-between"><span>推动阻力</span><span class="mono dim">{data.config.resistance_px} px</span></span>
-          <input type="range" min="0" max="200" step="5" value={data.config.resistance_px} disabled={busy} onchange={(e) => cfg({ resistance_px: num(e) })} aria-label="推动阻力" />
+          <input type="range" min="0" max="200" step="5" value={data.config.resistance_px} aria-busy={busy} onchange={(e) => cfg({ resistance_px: num(e) })} aria-label="推动阻力" />
         </label>
         <label class="flex flex-col gap-1 text-xs">
           <span class="flex justify-between"><span>边缘停留</span><span class="mono dim">{data.config.delay_ms} ms</span></span>
-          <input type="range" min="0" max="1000" step="25" value={data.config.delay_ms} disabled={busy} onchange={(e) => cfg({ delay_ms: num(e) })} aria-label="边缘停留" />
+          <input type="range" min="0" max="1000" step="25" value={data.config.delay_ms} aria-busy={busy} onchange={(e) => cfg({ delay_ms: num(e) })} aria-label="边缘停留" />
         </label>
         <label class="flex flex-col gap-1 text-xs">
           <span class="flex justify-between"><span>角落锁定</span><span class="mono dim">{data.config.corner_lock_size_px} px</span></span>
-          <input type="range" min="0" max="200" step="5" value={data.config.corner_lock_size_px} disabled={busy} onchange={(e) => cfg({ corner_lock_size_px: num(e) })} aria-label="角落锁定" />
+          <input type="range" min="0" max="200" step="5" value={data.config.corner_lock_size_px} aria-busy={busy} onchange={(e) => cfg({ corner_lock_size_px: num(e) })} aria-label="角落锁定" />
         </label>
         <label class="flex flex-col gap-1 text-xs">
           <span class="flex justify-between"><span>远端指针速度</span><span class="mono dim">{data.config.remote_speed_percent}%</span></span>
-          <input type="range" min="25" max="300" step="5" value={data.config.remote_speed_percent} disabled={busy} onchange={(e) => cfg({ remote_speed_percent: num(e) })} aria-label="远端指针速度" />
+          <input type="range" min="25" max="300" step="5" value={data.config.remote_speed_percent} aria-busy={busy} onchange={(e) => cfg({ remote_speed_percent: num(e) })} aria-label="远端指针速度" />
         </label>
         <div class="row">
           <div class="flex-1"><div class="text-[13px]">边缘环绕</div><div class="text-xs dim">从最后一侧推出时回到第一侧。</div></div>
-          <Switch checked={data.config.wrap_around} disabled={busy} label="边缘环绕" onchange={(v) => cfg({ wrap_around: v })} />
+          <Switch checked={data.config.wrap_around} aria-busy={busy} label="边缘环绕" onchange={(v) => cfg({ wrap_around: v })} />
         </div>
       </div>
     </section>
@@ -200,15 +203,15 @@
       <ul class="m-0 list-none p-0">
         <li class="row">
           <div class="flex-1"><div class="text-[13px]">启用跨屏</div><div class="text-xs dim">关闭后键鼠不会离开本机。</div></div>
-          <Switch checked={data.policy.enabled} disabled={busy} label="启用跨屏" onchange={(v) => pol({ enabled: v })} />
+          <Switch checked={data.policy.enabled} aria-busy={busy} label="启用跨屏" onchange={(v) => pol({ enabled: v })} />
         </li>
         <li class="row">
           <div class="flex-1"><div class="text-[13px]">允许被远端控制</div><div class="text-xs dim">其他设备的键鼠可以跨进本机。</div></div>
-          <Switch checked={data.policy.allow_inbound_control} disabled={busy} label="允许被远端控制" onchange={(v) => pol({ allow_inbound_control: v })} />
+          <Switch checked={data.policy.allow_inbound_control} aria-busy={busy} label="允许被远端控制" onchange={(v) => pol({ allow_inbound_control: v })} />
         </li>
         <li class="row">
           <div class="flex-1"><div class="text-[13px]">自动连接已配对设备</div><div class="text-xs dim">新配对的设备自动占用一个空闲边缘。</div></div>
-          <Switch checked={data.policy.auto_link_paired_peers} disabled={busy} label="自动连接已配对设备" onchange={(v) => pol({ auto_link_paired_peers: v })} />
+          <Switch checked={data.policy.auto_link_paired_peers} aria-busy={busy} label="自动连接已配对设备" onchange={(v) => pol({ auto_link_paired_peers: v })} />
         </li>
       </ul>
     </section>
