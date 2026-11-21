@@ -6,8 +6,8 @@
 **Production-Grade Cross-Terminal Interconnection Engine, Hardware-Bound Peripherals & Multi-Platform Convergence Runtime**
 
 [![License](https://img.shields.io/badge/license-Apache_2.0_OR_MIT-blue.svg?style=flat-square)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Crates](https://img.shields.io/badge/Crates-6%20Modular%20Crates-purple.svg?style=flat-square)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/Rust-1.82+-orange.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Crates](https://img.shields.io/badge/Crates-7%20Modular%20Crates-purple.svg?style=flat-square)](Cargo.toml)
 [![Security](https://img.shields.io/badge/Crypto-SPAKE2%20%7C%20Noise%20IK-success.svg?style=flat-square)](crates/tetherly-crypto)
 [![Tests](https://img.shields.io/badge/tests-800+%20passed-brightgreen.svg?style=flat-square)]()
 
@@ -54,6 +54,8 @@ Heterogeneous desktop and mobile setups frequently suffer from protocol fragment
 | **Resumable File Pipeline** | Reliable high-throughput data transfer | Streaming binary channel with incremental SHA-256 verification, resume offset alignment, and rate-limited chunk scheduling. |
 | **Dual-Tree CLI** | Comprehensive node governance | Headless daemon accompanied by `tetherly-cli` providing 485 validated command paths through hardened loopback HTTP/SSE APIs. |
 
+<!-- §213: workspace = 7 crates (api/core/crypto/net/loopback/node/android) + shell member (client/src-tauri) + binaries tetherly, tetherly-viewer, tetherly-cli, android_probe. -->
+
 ---
 
 ## System Architecture
@@ -91,7 +93,7 @@ Heterogeneous desktop and mobile setups frequently suffer from protocol fragment
 
 ## Workspace Crate Topology
 
-The workspace maintains a modular separation of concerns across 6 specialized crates and 3 standalone binaries:
+The workspace maintains a modular separation of concerns across 7 specialized crates and 4 binaries (`tetherly`, `tetherly-viewer`, `tetherly-cli`, `android_probe`):
 
 | Crate / Binary | Path | Architectural Responsibility |
 | :--- | :--- | :--- |
@@ -109,7 +111,7 @@ The workspace maintains a modular separation of concerns across 6 specialized cr
 
 ### 1. Build from Source
 
-Ensure Rust 1.80+ is installed:
+Ensure Rust 1.82+ is installed (the workspace `rust-version`):
 
 ```bash
 # Clone repository
@@ -123,7 +125,8 @@ cargo build --release --workspace
 The compiled binaries will be available in `./target/release/`:
 - `tetherly` (Host node daemon)
 - `tetherly-cli` (Command-line tool)
-- `android_probe` (Diagnostic probe)
+- `tetherly-viewer` (macOS AppKit screen-viewer subprocess)
+- `android_probe` (Diagnostic probe, cross-compiled to Android)
 
 ### 2. Start Host Node Daemon
 
@@ -137,7 +140,7 @@ The compiled binaries will be available in `./target/release/`:
 In a secondary shell on the same host:
 
 ```bash
-# Request an 8-digit temporary PIN from the running daemon (valid for 3 minutes)
+# Rotate in a fresh 8-digit temporary PIN on the running daemon (valid for 3 minutes)
 ./target/release/tetherly pin
 ```
 
@@ -151,8 +154,8 @@ Valid for: 180 seconds
 On the second computer or device:
 
 ```bash
-# Pair using host address and generated PIN
-./target/release/tetherly-cli pair --address 192.168.1.50:45717 --pin 84920193
+# Ask the running node to dial the host address and pair with the PIN
+./target/release/tetherly dial --addr 192.168.1.50:45717 --pin 84920193
 ```
 
 Once paired, cryptographic identities (`id_pk` and `n_pk`) are saved locally. Subsequent connections reconnect automatically via forward-secret Noise IK handshakes without re-entering PINs.
@@ -200,14 +203,12 @@ Noise IK Encrypted Socket (Port 45717)
 
 ## Loopback REST API & Control Endpoints
 
-Running daemons expose a rich set of programmatic endpoints on `http://127.0.0.1:45716`:
-
 Running daemons expose the versioned v1 contract (`/api/v1/*`, ADR-139) on `http://127.0.0.1:45716` — Read/Write/Admin token tiers, TS types generated from the shared contract crate (`tetherly-api`). Highlights:
 
 | Endpoint | Method | Functional Description |
 | :--- | :--- | :--- |
 | `/api/v1/system` | `GET` | Node identity, uptime, active peers, and transport health. |
-| `/api/v1/pairing/pin` | `POST` | Rotate or revoke a 3-minute ephemeral pairing PIN. |
+| `/api/v1/pairing/pin` | `GET`/`DELETE`, `POST /api/v1/pairing/pin/rotate` | Query or revoke the 3-minute ephemeral pairing PIN; `rotate` mints a fresh one. |
 | `/api/v1/devices` | `GET` | List paired peers, link latency (RTT), tags, and profiles. |
 | `/api/v1/clip` | `GET`/`POST` | Inspect clipboard history ring buffer or synchronize content. |
 | `/api/v1/transfers` | `POST` | Initiate an outbound streaming file transfer offer. |

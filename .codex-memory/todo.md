@@ -328,3 +328,9 @@
 - [x] 4×P4 修复：deploy.sh CLI digest 缺失；package-macos-app.sh 三下载路径 digest 缺失；release.yml sed 锚点过宽（实测 0.2.69）；release.yml arch gate 补齐（linux/desktop/android 三处）
 - [x] 1×注释漂移修复：smoke 1.2 节 /api/v1/input → /api/v1/input/tunnel
 - [x] 门禁：bash -n×5 + py_compile + sed 锚点实测 + YAML 解析（4+7 jobs）
+
+## §213（2026-11-21）根配置 + README 双语深审
+- [x] 全读：Cargo.toml/deny.toml/rust-toolchain.toml/rustfmt.toml/.gitattributes/SECURITY.md/README.md/README.zh-CN.md + DEVELOPMENT.md 头部抽查
+- [x] 15 处 P4 漂移修复（EN 7 + zh 8）：crate 数 6→7+viewer、pair→dial 命令、PIN 端点方法、重复段落、Rust 1.80→1.82、zh 图框线
+- [x] plan 速读段基线 v0.2.65→v0.2.69
+- 验证：East Asian width 实测图框 4 行全 79；grep 残留清零；端点/命令逐一对路由表与 cli.rs 核对

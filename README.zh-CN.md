@@ -6,8 +6,8 @@
 **工业级跨终端设备互联引擎、硬件级虚拟键鼠漫游与多端协同运行时**
 
 [![License](https://img.shields.io/badge/license-Apache_2.0_OR_MIT-blue.svg?style=flat-square)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Crates](https://img.shields.io/badge/Crates-6%20Modular%20Crates-purple.svg?style=flat-square)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/Rust-1.82+-orange.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Crates](https://img.shields.io/badge/Crates-7%20Modular%20Crates-purple.svg?style=flat-square)](Cargo.toml)
 [![Security](https://img.shields.io/badge/Crypto-SPAKE2%20%7C%20Noise%20IK-success.svg?style=flat-square)](crates/tetherly-crypto)
 [![Tests](https://img.shields.io/badge/tests-800+%20passed-brightgreen.svg?style=flat-square)]()
 
@@ -83,7 +83,7 @@
         ▼                              ▼                              ▼
 ┌───────────────┐              ┌───────────────┐              ┌───────────────┐
 │ 已配对的电脑  │              │ 安卓智能手机  │              │ 苹果 iPhone   │
-│ (Desktop 对端)│              │ (JNI 原生客户端)             │ (ANCS 蓝牙信标)│
+│(Desktop 对端) │              │ JNI 原生客户端│              │(ANCS 蓝牙信标)│
 └───────────────┘              └───────────────┘              └───────────────┘
 ```
 
@@ -91,7 +91,7 @@
 
 ## 工作区 Crate 生态拓扑
 
-代码库由 6 个专职 Crate 与 3 个独立构建二进制组成，维持严格的分层边界：
+代码库由 7 个专职 Crate 与 4 个二进制组成（`tetherly`、`tetherly-viewer`、`tetherly-cli`、`android_probe`），维持严格的分层边界：
 
 | Crate / 二进制 | 物理目录 | 架构职责与技术细节 |
 | :--- | :--- | :--- |
@@ -109,7 +109,7 @@
 
 ### 1. 源码编译
 
-请确保本地已安装 Rust 1.80 或更高版本：
+请确保本地已安装 Rust 1.82 或更高版本（即工作区 `rust-version`）：
 
 ```bash
 # 克隆代码仓库
@@ -123,7 +123,8 @@ cargo build --release --workspace
 编译生成的可执行文件位于 `./target/release/`：
 - `tetherly`（桌面节点守护进程）
 - `tetherly-cli`（全功能命令行工具）
-- `android_probe`（真机诊断探针）
+- `tetherly-viewer`（macOS AppKit 屏幕查看子进程）
+- `android_probe`（真机诊断探针，交叉编译到 Android）
 
 ### 2. 启动宿主守护进程
 
@@ -153,8 +154,8 @@ Valid for: 180 seconds
 在第二台电脑或设备上：
 
 ```bash
-# 使用对端 IP 地址与生成的 PIN 码完成安全配对
-./target/release/tetherly-cli pair --address 192.168.1.50:45717 --pin 84920193
+# 让本机运行中的节点拨号对端地址并使用 PIN 完成安全配对
+./target/release/tetherly dial --addr 192.168.1.50:45717 --pin 84920193
 ```
 
 配对完成后，两端会自动持久化身份公钥（`id_pk` 与 `n_pk`）。后续再次互联时，两端通过前向安全的 Noise IK 握手毫秒级自动重连，无需再次输入 PIN 码。
@@ -202,14 +203,12 @@ FEC 前向纠错与平滑发包看门狗 (消减突发抖动与排队膨胀)
 
 ## 回环 REST 控制接口参考
 
-正在运行的守护进程在 `http://127.0.0.1:45716` 提供纯粹的 JSON API 与 SSE 数据流：
-
 守护进程在 `http://127.0.0.1:45716` 提供版本化的 v1 契约接口（`/api/v1/*`，ADR-139）——Read/Write/Admin 三级 token 门禁，TS 类型由共享契约 crate（`tetherly-api`）生成。核心端点：
 
 | 接口端点 | 请求方法 | 功能说明 |
 | :--- | :--- | :--- |
 | `/api/v1/system` | `GET` | 查询节点身份、开机时间、当前活动对端与连接健康度。 |
-| `/api/v1/pairing/pin` | `POST` | 申请生成或吊销当前 3 分钟有效期的临时配对 PIN。 |
+| `/api/v1/pairing/pin` | `GET`/`DELETE`，`POST /api/v1/pairing/pin/rotate` | 查询或吊销当前 3 分钟有效期的临时配对 PIN；`rotate` 生成新 PIN。 |
 | `/api/v1/devices` | `GET` | 列出已配对设备、往返延迟 (RTT)、标签与设备档案。 |
 | `/api/v1/clip` | `GET`/`POST` | 读取剪贴板环形历史记录或主动同步一条剪贴板内容。 |
 | `/api/v1/transfers` | `POST` | 向指定对端发起一条大文件断点续传邀请。 |
