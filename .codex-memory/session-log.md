@@ -1730,3 +1730,9 @@
 - 关键正面论证：wire decode 31B header + 白名单 + 8MiB decoded cap 防 decode-bomb；assembler TMF1 重组 count==div_ceil 校验防短 count 空洞完成、delivered_seq 水位防 straggler 复活且 reset 保留水位、旧 seq 分片不打断新流；receiver apply seq 窗口容忍 next_seq=1 重启（last_seq!=0 才判跳变）、trace_pairs 区分 sender reset 与 HARQ 重复；on_peer_gone 全复位；playout 迟帧仅在队列>1 丢（保最后一帧呈现）。
 - P4 观察项登记：receiver apply profiler 硬编码 stage 值为占位（真实数据走 TYPE_SCREEN_PROFILE，node screen_stream.rs:281/1828 接线在位）；playout 名义间隔 33_333us 对高 fps 略保守（仅 EMA 平滑度）。
 - 验证：定向 cargo test -p tetherly-core --lib screen:: 89 全绿；fmt 过；一行注释修复随 CI 门禁。
+
+## 2026-11-21 §194 screen/ 传输链深审（fec/retransmit/pacing，纯审查）
+- 范围：fec.rs 698 + retransmit.rs 454 + pacing.rs 554 = 1750 行全读；零代码缺陷，无 diff 无 CI。
+- 关键论证：NACK decode 长度自洽（36+count*2 覆盖 rtt）；Cauchy x≠y 恒成立 gf_inv(0) 不可达、奇异矩阵对合法分片不可达；decode_block fail-closed + 8MiB 二次把关；重复分片高斯消元每 block 至多一次（凑齐即交付清空）；RetransmitBuffer age+capacity 驱逐；trendline var_x>1.0 / MIN_SAMPLES≥5 防除零。
+- P4 登记：FecAssembler.received_shards 无显式 cap（天然上界 512 条/block、字节 1:1、seq 切换释放，较 TMF1 8MiB 松侧）。
+- 验证：纯审查批次无门禁；§193 c3bef04 CI 44845004879 全绿 6/6 确认。
