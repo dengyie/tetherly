@@ -13,6 +13,7 @@ import type {
   InboxOpenRequest,
   Activity,
   Input,
+  Layout,
   LogTail,
   LogLevel,
   LogLevelRequest,
@@ -21,6 +22,16 @@ import type {
   Settings,
   SettingsPatch,
   System,
+  Topology,
+  TopologyConfigPatch,
+  TopologyConfigReport,
+  TopologyLinkReport,
+  TopologyLinkRequest,
+  TopologyPolicy,
+  TopologyPolicyPatch,
+  TopologySyncReport,
+  TopologyUnlinkReport,
+  TopologyUnlinkRequest,
   Transfers,
 } from "./gen/api";
 import type { Transport } from "../transport/transport";
@@ -58,6 +69,33 @@ export class Api {
   }
   unblockDevice(id: string): Promise<void> {
     return this.t.request("DELETE", `/api/v1/devices/${encodeURIComponent(id)}/block`);
+  }
+  disconnectDevice(id: string): Promise<void> {
+    return this.t.request("POST", `/api/v1/devices/${encodeURIComponent(id)}/disconnect`);
+  }
+
+  // Layout / topology: reads are store-driven (`layout.changed` follows every
+  // topology write, apiv1/project.rs), writes go through these.
+  layout(): Promise<Layout> {
+    return this.t.request("GET", "/api/v1/layout");
+  }
+  topology(): Promise<Topology> {
+    return this.t.request("GET", "/api/v1/topology");
+  }
+  linkEdge(req: TopologyLinkRequest): Promise<TopologyLinkReport> {
+    return this.t.request("POST", "/api/v1/topology/links", req);
+  }
+  unlinkEdge(req: TopologyUnlinkRequest): Promise<TopologyUnlinkReport> {
+    return this.t.request("POST", "/api/v1/topology/unlinks", req);
+  }
+  syncTopology(): Promise<TopologySyncReport> {
+    return this.t.request("POST", "/api/v1/topology/sync");
+  }
+  patchTopologyConfig(patch: TopologyConfigPatch): Promise<TopologyConfigReport> {
+    return this.t.request("PATCH", "/api/v1/topology/config", patch);
+  }
+  patchTopologyPolicy(patch: TopologyPolicyPatch): Promise<TopologyPolicy> {
+    return this.t.request("PATCH", "/api/v1/topology/policy", patch);
   }
 
   pairing(): Promise<Pairing> {

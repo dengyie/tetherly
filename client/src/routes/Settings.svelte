@@ -1,6 +1,10 @@
 <script lang="ts">
   import type { Settings } from "../lib/api/gen/api";
   import type { Api } from "../lib/api/client";
+  import { withToast } from "../lib/ui/toast";
+  import Icon from "../lib/ui/Icon.svelte";
+  import PageHeader from "../lib/ui/PageHeader.svelte";
+  import Switch from "../lib/ui/Switch.svelte";
 
   let { data, api }: { data: Settings | null; api: Api } = $props();
 
@@ -10,7 +14,6 @@
   let nameDraft = $state("");
   let lastName = $state("");
   let saving = $state(false);
-  let notice = $state("");
   $effect(() => {
     const n = data?.general.name ?? "";
     if (n !== lastName) {
@@ -19,97 +22,65 @@
     }
   });
 
-  async function saveName() {
+  async function patch(p: Parameters<Api["patchSettings"]>[0], ok?: string) {
+    saving = true;
+    await withToast(() => api.patchSettings(p), ok);
+    saving = false;
+  }
+  function saveName() {
     const name = nameDraft.trim();
     if (!name || name === data?.general.name) return;
-    saving = true;
-    notice = "";
-    try {
-      await api.patchSettings({ name });
-      notice = "名称已更新";
-    } catch (e) {
-      notice = e instanceof Error ? e.message : String(e);
-    } finally {
-      saving = false;
-    }
-  }
-
-  async function toggleAutoAccept() {
-    if (!data) return;
-    saving = true;
-    notice = "";
-    try {
-      await api.patchSettings({ auto_accept: !data.transfer.auto_accept });
-    } catch (e) {
-      notice = e instanceof Error ? e.message : String(e);
-    } finally {
-      saving = false;
-    }
+    void patch({ name }, "名称已更新");
   }
 </script>
 
-<h1>设置</h1>
-{#if notice}<p class="notice">{notice}</p>{/if}
+<PageHeader title="设置" subtitle="节点名称、发现与传输策略" icon="settings" />
+
 <section class="card">
-  <h2>常规</h2>
+  <h2 class="card-title"><Icon name="sliders" size={15} class="text-zinc-400" />常规</h2>
   {#if !data}
-    <p class="dim">等待设置数据…</p>
+    <p class="m-0 dim">等待设置数据…</p>
   {:else}
-    <form onsubmit={(e) => { e.preventDefault(); saveName(); }}>
-      <label>
-        <span class="k">节点名称</span>
-        <input
-          bind:value={nameDraft}
-          maxlength={64}
-          disabled={saving}
-          placeholder={data.general.name}
-        />
-        <button type="submit" disabled={saving || !nameDraft.trim() || nameDraft.trim() === data.general.name}>
-          保存
-        </button>
-      </label>
+    <form class="flex flex-wrap items-center gap-2" onsubmit={(e) => { e.preventDefault(); saveName(); }}>
+      <label class="text-xs dim w-24" for="node-name">节点名称</label>
+      <input id="node-name" class="input flex-1 min-w-40 max-w-xs" bind:value={nameDraft} maxlength={64} disabled={saving} placeholder={data.general.name} />
+      <button type="submit" class="btn btn-primary" disabled={saving || !nameDraft.trim() || nameDraft.trim() === data.general.name}>保存</button>
     </form>
-    <ul>
-      <li><span class="k">mDNS 广播</span><span>{data.general.advertise ? "开" : "关"}</span></li>
-      <li><span class="k">自动重连</span><span>{data.general.reconnect ? "开" : "关"}</span></li>
-      <li><span class="k">仅本机回环</span><span>{data.general.loopback_only ? "开" : "关"}</span></li>
-      <li><span class="k">Overlay 组网</span><span>{data.general.overlay_enabled ? "开" : "关"}</span></li>
-    </ul>
-  {/if}
-</section>
-<section class="card">
-  <h2>传输</h2>
-  {#if !data}
-    <p class="dim">等待设置数据…</p>
-  {:else}
-    <ul>
-      <li>
-        <span class="k">自动接收文件</span>
-        <button class="toggle" disabled={saving} onclick={toggleAutoAccept}>
-          {data.transfer.auto_accept ? "开（点击关闭）" : "关（点击开启）"}
-        </button>
+    <ul class="m-0 mt-3 list-none p-0">
+      <li class="row">
+        <div class="flex-1"><div class="text-[13px]">mDNS 广播</div><div class="text-xs dim">在局域网内公布本机，供其他设备发现与配对。</div></div>
+        <Switch checked={data.general.advertise} disabled={saving} label="mDNS 广播" onchange={(v) => patch({ advertise: v })} />
+      </li>
+      <li class="row">
+        <div class="flex-1"><div class="text-[13px]">自动重连</div><div class="text-xs dim">链路中断后自动尝试恢复到已配对设备。</div></div>
+        <Switch checked={data.general.reconnect} disabled={saving} label="自动重连" onchange={(v) => patch({ reconnect: v })} />
+      </li>
+      <li class="row">
+        <div class="flex-1"><div class="text-[13px]">仅本机回环</div><div class="text-xs dim">由 daemon 启动参数决定，此处只读。</div></div>
+        <span class="badge">{data.general.loopback_only ? "开" : "关"}</span>
+      </li>
+      <li class="row">
+        <div class="flex-1"><div class="text-[13px]">Overlay 组网</div><div class="text-xs dim">跨网段中继能力，由 daemon 配置决定。</div></div>
+        <span class="badge">{data.general.overlay_enabled ? "开" : "关"}</span>
+      </li>
+      <li class="row">
+        <div class="flex-1"><div class="text-[13px]">托盘归属</div><div class="text-xs dim">当前由 {data.general.tray_owner === "client" ? "桌面客户端" : "daemon"} 持有托盘图标。</div></div>
+        <span class="badge mono">{data.general.tray_owner}</span>
       </li>
     </ul>
   {/if}
 </section>
 
-<style>
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--pad); margin-bottom: 12px; }
-  h2 { margin: 0 0 8px; font-size: 15px; }
-  .dim { color: var(--text-dim); font-size: 13px; }
-  .notice { color: var(--text-dim); font-size: 13px; }
-  ul { list-style: none; margin: 8px 0 0; padding: 0; }
-  li { padding: 6px 0; display: flex; gap: 16px; align-items: baseline; }
-  .k { color: var(--text-dim); width: 120px; flex: none; }
-  form label { display: flex; gap: 10px; align-items: baseline; }
-  input {
-    flex: 1; max-width: 320px; font: inherit; font-size: 14px;
-    background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px;
-  }
-  button {
-    border: 1px solid var(--border); background: var(--bg); color: var(--text);
-    padding: 3px 10px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px;
-  }
-  button:disabled { opacity: 0.5; cursor: default; }
-</style>
+<section class="card">
+  <h2 class="card-title"><Icon name="download" size={15} class="text-zinc-400" />传输</h2>
+  {#if !data}
+    <p class="m-0 dim">等待设置数据…</p>
+  {:else}
+    <ul class="m-0 list-none p-0">
+      <li class="row">
+        <div class="flex-1"><div class="text-[13px]">自动接收文件</div><div class="text-xs dim">来自已配对设备的文件直接写入收件箱，无需逐个确认。</div></div>
+        <Switch checked={data.transfer.auto_accept} disabled={saving} label="自动接收文件" onchange={(v) => patch({ auto_accept: v })} />
+      </li>
+    </ul>
+  {/if}
+</section>

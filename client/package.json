@@ -13,10 +13,12 @@
   "devDependencies": {
     "@playwright/test": "^1.65.1",
     "@sveltejs/vite-plugin-svelte": "^5",
+    "@tailwindcss/vite": "4.3.5",
     "@testing-library/svelte": "^5.4.2",
     "jsdom": "^31.0.1",
     "svelte": "^5",
     "svelte-check": "^4.7.8",
+    "tailwindcss": "4.3.5",
     "typescript": "^5",
     "vite": "^6",
     "vitest": "^5.1.0"

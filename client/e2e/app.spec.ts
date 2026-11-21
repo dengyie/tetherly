@@ -32,6 +32,24 @@ test("flow: navigation reaches every page without errors", async ({ page }) => {
   }
 });
 
+test("flow: pages render the event-fed sections", async ({ page }) => {
+  await page.getByRole("button", { name: "布局" }).click();
+  await expect(page.getByRole("group", { name: "右侧" })).toContainText("E2E-WIN");
+  await expect(page.getByRole("switch", { name: "启用跨屏" })).toHaveAttribute("aria-checked", "true");
+  await page.getByRole("button", { name: "传输" }).click();
+  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByRole("progressbar").first()).toHaveAttribute("aria-valuenow", "62");
+  await page.getByRole("button", { name: "收件箱" }).click();
+  await expect(page.getByText("photo.jpg")).toBeVisible();
+  await page.getByRole("button", { name: "设置" }).click();
+  await expect(page.getByRole("switch", { name: "mDNS 广播" })).toHaveAttribute("aria-checked", "true");
+  // ⌘K palette jumps between pages
+  await page.keyboard.press("ControlOrMeta+k");
+  await page.getByPlaceholder("输入命令或搜索…").fill("诊断");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("main h1")).toHaveText("诊断");
+});
+
 test("flow: token fragment is stripped and stored, not kept in the URL", async ({ page }) => {
   // A hash-only navigation does not remount the SPA, so load a fresh page
   // with the fragment already in place.

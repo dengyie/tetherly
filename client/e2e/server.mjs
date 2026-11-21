@@ -13,6 +13,43 @@ const MIME = {
   ".css": "text/css; charset=utf-8",
 };
 
+const layout = {
+  display: { width: 1920, height: 1080, scale_factor: 1 },
+  edges: [
+    { edge: "left", peer: null },
+    { edge: "right", peer: "d1" },
+    { edge: "top", peer: null },
+    { edge: "bottom", peer: null },
+  ],
+  config: {
+    resistance_px: 40,
+    delay_ms: 150,
+    corner_lock_size_px: 20,
+    wrap_around: false,
+    redundancy_band_px: 6,
+    slow_dwell_ms: 200,
+    fast_push_delta_px: 30,
+    entry_return_grace_ms: 300,
+    remote_speed_percent: 100,
+  },
+  policy: { enabled: true, allow_inbound_control: true, auto_link_paired_peers: false },
+};
+
+const settings = {
+  general: { name: "e2e-mac", advertise: true, reconnect: true, loopback_only: false, overlay_enabled: false, tray_owner: "client" },
+  transfer: { auto_accept: false },
+};
+const transfers = {
+  active_count: 1,
+  terminal_count: 1,
+  transfers: [
+    { transfer_id: "t1", peer: "d1", direction: "inbound", filename: "report.pdf", total: 1000, transferred: 620, speed_bps: 120000, phase: "transferring", error: null, started_ms: 0, updated_ms: 0 },
+    { transfer_id: "t2", peer: "d1", direction: "outbound", filename: "photo.jpg", total: 2048, transferred: 2048, speed_bps: 0, phase: "completed", error: null, started_ms: 0, updated_ms: 0 },
+  ],
+  stats: { bytes_sent: 2048, bytes_received: 620, completed_count: 1, failed_count: 0 },
+};
+const inbox = { count: 1, total_bytes: 2048, files: [{ name: "photo.jpg", size: 2048, modified_at_secs: 1700000000, is_safe: true }] };
+
 const snapshot = {
   system: {
     device_id: "self",
@@ -107,6 +144,10 @@ const server = http.createServer((req, res) => {
     const frames = [
       { type: "snapshot", data: snapshot },
       { type: "activity.changed", data: activity },
+      { type: "layout.changed", data: layout },
+      { type: "settings.changed", data: settings },
+      { type: "transfers.changed", data: transfers },
+      { type: "inbox.changed", data: inbox },
     ];
     for (const f of frames) {
       res.write(`id: ${seq}\nevent: ${f.type}\ndata: ${JSON.stringify({ seq, type: f.type, data: f.data })}\n\n`);
@@ -128,8 +169,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // SPA: /next/ and everything under it falls back to the entry document.
-  let rel = p.startsWith("/next/") ? p.slice("/next/".length) : "";
+  // SPA: served at / like the daemon (M4), with /next/ kept as an alias for
+  // the historical e2e entry. Anything that is not a built file falls back
+  // to the entry document.
+  let rel = p.startsWith("/next/") ? p.slice("/next/".length) : p.replace(/^\//, "");
   if (p === "/next" || p === "/next/" || rel === "") rel = "index.html";
   const file = join(DIST, rel);
   if (existsSync(file)) {

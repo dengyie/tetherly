@@ -1,86 +1,55 @@
 <script lang="ts">
   import type { Inbox } from "../lib/api/gen/api";
   import type { Api } from "../lib/api/client";
+  import { bytes, whenSecs } from "../lib/fmt";
+  import { withToast } from "../lib/ui/toast";
+  import Icon from "../lib/ui/Icon.svelte";
+  import PageHeader from "../lib/ui/PageHeader.svelte";
+  import EmptyState from "../lib/ui/EmptyState.svelte";
 
   let { data, api }: { data: Inbox | null; api: Api } = $props();
 
-  function bytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-  function when(secs: number): string {
-    if (!secs) return "—";
-    return new Date(secs * 1000).toLocaleString();
-  }
-
   let busyName: string | null = $state(null);
-  let notice = $state("");
   async function run(name: string, op: () => Promise<unknown>, ok: string) {
     busyName = name;
-    notice = "";
-    try {
-      await op();
-      notice = ok;
-    } catch (e) {
-      notice = e instanceof Error ? e.message : String(e);
-    } finally {
-      busyName = null;
-    }
+    await withToast(op, ok);
+    busyName = null;
   }
-  const open = (f: { name: string }) =>
-    run(f.name, () => api.openInboxFile(f.name), `已打开 ${f.name}`);
-  const del = (f: { name: string }) =>
-    run(f.name, () => api.deleteInboxFile(f.name), `已删除 ${f.name}`);
-  const clearAll = () =>
-    run("__all__", () => api.clearInbox(), "收件箱已清空");
+  const open = (f: { name: string }) => run(f.name, () => api.openInboxFile(f.name), `已打开 ${f.name}`);
+  const del = (f: { name: string }) => run(f.name, () => api.deleteInboxFile(f.name), `已删除 ${f.name}`);
+  const clearAll = () => run("__all__", () => api.clearInbox(), "收件箱已清空");
 </script>
 
-<h1>收件箱</h1>
-{#if notice}<p class="notice">{notice}</p>{/if}
+<PageHeader title="收件箱" subtitle="其他设备发来的文件" icon="inbox">
+  {#if (data?.count ?? 0) > 0}
+    <button type="button" class="btn btn-sm" disabled={busyName === "__all__"} onclick={clearAll}><Icon name="trash" size={13} />清空</button>
+  {/if}
+</PageHeader>
+
 <section class="card">
-  <h2>
-    已接收文件（{data?.count ?? 0} · {bytes(data?.total_bytes ?? 0)}）
-    {#if (data?.count ?? 0) > 0}
-      <button class="clear" disabled={busyName === "__all__"} onclick={clearAll}>清空</button>
-    {/if}
-  </h2>
+  <h2 class="card-title"><Icon name="file" size={15} class="text-zinc-400" />已接收文件（{data?.count ?? 0} · {bytes(data?.total_bytes ?? 0)}）</h2>
   {#if !data || data.files.length === 0}
-    <p class="dim">收件箱是空的。接收到的文件会出现在这里。</p>
+    <EmptyState icon="inbox" title="收件箱是空的" description="接收到的文件会出现在这里。" />
   {:else}
-    <ul>
+    <ul class="m-0 list-none p-0">
       {#each data.files as f (f.name)}
-        <li>
-          <strong>{f.name}</strong>
-          <span class="dim">{bytes(f.size)} · {when(f.modified_at_secs)}</span>
-          {#if !f.is_safe}<span class="warn">文件名不安全</span>{/if}
-          <span class="actions">
+        <li class="row">
+          <span class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500"><Icon name="file" size={15} /></span>
+          <div class="min-w-0 flex-1">
+            <div class="truncate font-medium">{f.name}</div>
+            <div class="text-xs dim">{bytes(f.size)} · {whenSecs(f.modified_at_secs)}</div>
+          </div>
+          {#if !f.is_safe}
+            <span class="badge border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-400"><Icon name="alert-triangle" size={11} />文件名不安全</span>
+          {/if}
+          <div class="flex items-center gap-1.5">
             {#if f.is_safe}
-              <button disabled={busyName === f.name} onclick={() => open(f)}>打开</button>
+              <button type="button" class="btn btn-sm" disabled={busyName === f.name} onclick={() => open(f)}><Icon name="external-link" size={13} />打开</button>
             {/if}
-            <button class="danger" disabled={busyName === f.name} onclick={() => del(f)}>删除</button>
-          </span>
+            <button type="button" class="btn btn-danger btn-sm" disabled={busyName === f.name} onclick={() => del(f)}>删除</button>
+          </div>
         </li>
       {/each}
     </ul>
   {/if}
 </section>
-
-<style>
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--pad); margin-bottom: 12px; }
-  h2 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 10px; }
-  .dim { color: var(--text-dim); }
-  .notice { color: var(--text-dim); font-size: 13px; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  li { padding: 6px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  .warn { color: var(--danger, #c0392b); font-size: 12px; }
-  .actions { margin-left: auto; display: flex; gap: 6px; }
-  button {
-    border: 1px solid var(--border); background: var(--bg); color: var(--text);
-    padding: 3px 10px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px;
-  }
-  button:disabled { opacity: 0.5; cursor: default; }
-  button.danger { color: var(--danger, #c0392b); }
-  button.clear { margin-left: auto; font-size: 12px; }
-</style>
