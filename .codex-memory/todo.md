@@ -320,3 +320,4 @@
 - 待办：CI 9899e50 确认绿；等待用户验收或指派新审计面（client/Android/脚本面）。
 - [x] §208 tetherly-loopback（664 行全读）+ tetherly-api（7435+2188 行全读/扫读）深审：crate 内零缺陷；CLI 调用方 cmd_peers.rs route-remove peer 未编码（唯一漏网点）P4 修复 29975de；clippy 三门 + loopback/api/node-bin 测试全绿；CI 44882481611。
 - [x] §209 tetherly-net 2,893 行收尾深审（7 源文件 + 4 测试文件全读）：验证性审计零缺陷——outbox 两阶段/rekey 恢复/filechan 上界与 AAD/proptest 全部在位；28 测试全绿。至此全部 7 个 Rust crate 深审收官。
+- [x] §210 client/ Tauri 壳 + SPA 前端深审（~3.9k 行全读）：验证性审计零缺陷——token 隔离/SSE 双实现契约一致/tray fold 纯函数/SPA 单写者事件流全部在位；pnpm check 0 错 + vitest 36 绿 + shell clippy/test 33 绿。至此全部交付面（7 crate + Android + client）深审收官。

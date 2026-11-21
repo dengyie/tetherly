@@ -1777,3 +1777,5 @@
 - tetherly-loopback 与 tetherly-api 两 crate 全读，零 crate 内缺陷。经验：契约 crate（纯 DTO + 少量逻辑面）审计重心应放在仅有的逻辑点（EventEnvelope/Patch<T>/Topic parse）并核对契约测试是否逐一覆盖；CLI→loopback 调用方要单独核查 query 编码纪律，`url_encode` 一律走 core `encode_query_value`（仅 unreserved，/ 与 CRLF 也转义）。
 ## 2026-11-21 §209 tetherly-net 收官
 - 验证性审计经验：对已被 Batch 批次系统性加固过的 crate，深审重点是「逐行确认加固未回归」而非找新问题——outbox 提交/发送两阶段、rekey 取消恢复、filechan header 即拒/AAD 绑定、proptest 面均在位。7 crate（node/core/api/net/android/crypto/loopback）深审全部收官，剩余面为 client/Tauri 前端 TS。
+## 2026-11-21 §210 client 面收官
+- 前端壳审计经验：Tauri 壳的安全重心在 token 生命周期（Rust 独占 + fragment 即剥）与 WebView 能力最小化（proxy 白名单双守卫）；SPA 审计重心在事件流单写者纪律与 SSE 客户端的 seq 交叉校验。全项目深度 review 迭代（§171→§210）至此全部交付面收官，后续迭代以回归守护与新需求为主。
