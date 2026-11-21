@@ -1787,3 +1787,6 @@
 
 ## §214 docs/ 三文档深审（2026-11-21）
 文档面收官：三文档全读 ~1,061 行，逐条对照代码。核心发现：两文档「legacy /api/* 整体删除」表述不准——GET /api/events + /api/events/stream 因 18 个 CLI 调用点消费原生 UiEvent（v1 为投影 EventEnvelope，语义不同）而存活，已补勘误块 + 收尾条件；CONTROL_CLIENT_DEVELOPMENT 状态漂移（设计稿→已上线）已修；FILE_TRANSFER_MODULE 零缺陷。登记 plan §8，提交 + CI 跟踪。
+
+## §215 legacy SSE 收尾条件深审（2026-11-22）
+复核 §214 勘误：收尾条件「CLI watcher 切 loopback_v1_events_connect」是伪条件——v1 只有 12 个资源事件，CLI 消费的约 40 种诊断 kind 被 project() 丢弃（Vec::new 臂），invalidated 无载荷且 CLI 零处理。改写勘误：/api/events 定性为常设 CLI 诊断事件通道（Read tier 门禁在位），真实删除前提=诊断事件 v1 契约化。零代码变更。

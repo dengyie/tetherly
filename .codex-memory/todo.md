@@ -341,3 +341,10 @@
 - [x] P4-2 修复：CONTROL_CLIENT 状态表「设计稿」→「已实现并上线」（M0–M5 全落地 v0.2.56–v0.2.64），日期/基线/里程碑表逐行补 ✅
 - [x] 零缺陷验证：FILE_TRANSFER_MODULE（DragControlMsg 1KiB/MOTW Zone.Identifier×3/Edge Strip gateway）逐条与代码相符
 - [x] 登记 plan §8（最新在前，§213 之上）+ 本 todo + session-log；提交 + CI
+
+## §215（2026-11-22）legacy SSE 收尾条件深审 — 完成
+- [x] 复核 §214 勘误收尾条件可行性：18 个 CLI watcher 全部 raw JSON + v["kind"] 解析（34 处），零类型化消费
+- [x] v1 Event 仅 12 资源变体；project() 穷举 97 UiEvent 但 ~40 诊断 kind 走 Vec::new() 丢弃臂（project.rs:130 自证）——16 个代表性 kind 双向 grep 实证
+- [x] 结论：§214 收尾条件为伪条件，迁移不可行；真实前提=诊断事件 v1 契约化（Event::Diagnostic 或事件族）
+- [x] 修复：LEGACY_API_MAP 勘误块 §215 修订（/api/events 定性为常设 CLI 诊断通道，不视为债务）+ CONTROL_CLIENT M5 行同步；plan 历史段保持原样由 §215 仲裁
+- [x] 零代码变更；登记 plan §8 + 本 todo + session-log；提交 + CI
