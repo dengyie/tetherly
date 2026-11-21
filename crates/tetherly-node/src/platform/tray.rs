@@ -536,7 +536,7 @@ mod windows_tray {
                 xor[d + 3] = RGBA[s + 3];
             }
         }
-        let and_mask = vec![0u8; SIDE * SIDE / 8];
+        let and_mask = [0u8; SIDE * SIDE / 8];
         let icon = unsafe {
             CreateIcon(
                 std::ptr::null_mut(),
