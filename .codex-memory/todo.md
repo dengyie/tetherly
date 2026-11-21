@@ -275,3 +275,19 @@
 - §200 drag/action/camera/media（~1980 行）：一处 P3 confirmed 修复——MediaCommandFrame::from_payload 裸 serde 直通，id/target_player 未消毒进入 UiEvent → legacy /api/events SSE 广播；修复为解码即 sanitize + 回归测试。
 - drag/action/camera 三模块零缺陷：1KiB 帧预算、ADR-008 命令不上 wire、camera validate 双道门、FSM 严格 id+phase 匹配。
 - 验证：core 342（+1）全绿；clippy 双形态 0 error；fmt 过。待提交 CI。
+
+## 2026-11-21 §201 core/ 信任与会话面深审（纯审查，零代码缺陷）
+- 范围：session.rs / hello.rs / bind.rs / pin.rs / otp.rs / allowlist.rs / liveness.rs 全读 + allowlist 下游取证（clipboard.rs:302 → platform.rs:228 SystemOpener；规则仅经本地 Admin API ancs_allow 录入，非 wire 可达；allowlist 非持久化，lifecycle.rs:523 启动为空）。
+- 结论：7 模块全部 clean。P4 观察两项备查：otp find_keywords to_lowercase 字节漂移（评分质量，冻结不改）；allowlist 无 "://" URL 绕过 scheme 检查（管理员本地输入健壮性，非可利用）。
+- 登记：docs/REVIEW_REMEDIATION_PLAN.md §8 §201 条目已插入（§199 前）。
+- 下一步：§202 core 根目录剩余小模块（battery/bench/dedup/device_id/error/focus/insertion/keymap/locate/overlay/persist/ports/recommend/replay/screen/screen_font/virtual_display/wire）+ tetherly-crypto crate 收尾。
+
+## 2026-11-21 §202 core/ 根目录剩余小模块收官（纯审查，零代码缺陷）
+- 范围：ports/bench/virtual_display/locate/keymap/focus/recommend/overlay/battery/dedup/device_id/error/insertion/persist/replay/screen/screen_font/text/wire 全读（handoff §186 已覆盖）。至此 tetherly-core 全 crate 审毕。
+- 结论：全部 clean。bench/virtual_display 解码直通但 node ingest 防线完备（runtime/virtual_display.rs:116/230 sanitize+validate；runtime/bench.rs:122/352/375 validate 前置；FrameAck 双匹配）。ReplayGuard wrap-safe、TokenBucket 饱和时钟。P4 三项备查（announce 无 sanitize 但仅 debug 日志、FocusStateFrame 直通但无暴露面、iface 启发误报）。
+- 登记：docs/REVIEW_REMEDIATION_PLAN.md §8 §202 条目已插入（§201 前）。
+
+## 2026-11-21 §203 tetherly-crypto 全 crate 深审（纯审查，零代码缺陷）
+- 范围：noise/pairbind/identity/spake/aead/kdf/vectors/error/lib 全读（959 行）。深度 review 迭代核心四 crate（core/net/node UI 面/crypto）收官。
+- 结论：全部 clean。IK prologue Hello 绑定 + remote_static 顶替防护测试钉死；PairBind 方向分离 nonce + verify_strict；Identity 双标量不混用 + ZeroizeOnDrop；AEAD counter nonce；Argon2id 冻结参数；vectors #[cfg(test)] 门控；lib.rs forbid(unsafe_code)。P4 两项备查（aead 错误名不副实映射 PairBind、handshake_hash 快照式缓存）。
+- 登记：docs/REVIEW_REMEDIATION_PLAN.md §8 §203 条目已插入（§202 前），§202 标题行修复。

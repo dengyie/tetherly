@@ -1746,3 +1746,6 @@
 ## 2026-11-21 §200 media.rs P3 修复
 - RED 证据固定于 git HEAD 原文；GREEN：test_media_command_frame_decode_sanitizes_hostile_fields + core 342 全绿。
 - 登记 plan §8 §200 条目；待 CI 门禁后闭环。
+- §201 信任与会话面（session/hello/bind/pin/otp/allowlist/liveness）纯审查收官，零代码缺陷；两项 P4 备查（otp 字节漂移、allowlist scheme fail-open 且取证确认非 wire 可达）。计划 §8 已登记。
+- §202 core 根目录剩余 19 模块纯审查收官，零代码缺陷；tetherly-core 全 crate 审毕。计划 §8 已登记。
+- §203 tetherly-crypto 全 crate 纯审查收官，零代码缺陷。核心四 crate 全部审毕。
