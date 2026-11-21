@@ -67,6 +67,41 @@ describe("app flows over MockTransport", () => {
     expect(screen.getAllByText("本机").length).toBeGreaterThan(0);
   });
 
+  it("flow: PIN card generates when inactive and shows when active (§223)", async () => {
+    const t = new MockTransport((method, path) => {
+      if (path === "/api/v1/pairing/pin/rotate") return { pin: "482913", expires_in_secs: 180 };
+      if (method === "GET" && path === "/api/v1/pairing/pin") return { pin: "482913", expires_in_secs: 120 };
+      return {};
+    });
+    render(App, { transport: t });
+    t.setLinkState("live");
+    t.emit({ id: 1, type: "snapshot", data: snapshot([device("d1", "DESKTOP")]) });
+    await waitFor(() => expect(screen.getByText("DESKTOP")).toBeTruthy());
+
+    // Inactive: no GET (it would 404); the primary action generates, and
+    // rotate/revoke have nothing to act on.
+    expect((screen.getByRole("button", { name: "轮换" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "撤销" }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(screen.getByRole("button", { name: "生成 PIN" }));
+    await waitFor(() => expect(screen.getByText("482913")).toBeTruthy());
+    expect(t.calls.filter((c) => c.path.startsWith("/api/v1/pairing"))).toEqual([
+      { method: "POST", path: "/api/v1/pairing/pin/rotate", body: undefined },
+    ]);
+
+    // Active (daemon pushed pairing.changed): the same button reads the grant.
+    t.emit({ id: 2, type: "pairing.changed", data: { pin_active: true, pin_expires_in_secs: 180 } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "显示 PIN" })).toBeTruthy());
+    expect((screen.getByRole("button", { name: "撤销" }) as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByRole("button", { name: "显示 PIN" }));
+    await waitFor(() => expect(t.calls.some((c) => c.method === "GET" && c.path === "/api/v1/pairing/pin")).toBe(true));
+    expect(screen.getByText("482913")).toBeTruthy();
+
+    // Window closed elsewhere: digits disappear and the card returns to 生成.
+    t.emit({ id: 3, type: "pairing.changed", data: { pin_active: false, pin_expires_in_secs: 0 } });
+    await waitFor(() => expect(screen.queryByText("482913")).toBeNull());
+    expect(screen.getByRole("button", { name: "生成 PIN" })).toBeTruthy();
+  });
+
   it("flow: snapshot triggers REST hydration of the event-fed sections", async () => {
     // Real daemon: the burst is the Snapshot alone, so 设置/布局 would stay on
     // "等待…" forever without the GET fallback (§220).

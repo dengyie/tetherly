@@ -1816,3 +1816,8 @@ v0.2.71 双端部署（health 0.2.71，受保护进程未动）后用 Playwright
 - 来源：v0.2.72 真机（Mac 直连 + Windows 经 `ssh -L '[::1]:45716:127.0.0.1:45716'` 隧道）Playwright 写流程走查。边缘环绕 Switch 往返正常；推动阻力 slider 键盘 ArrowRight 15→20 后 ArrowLeft 不生效，API 停在 20（已 PATCH 回 15）。根因：`disabled={busy}` 在 PATCH 在途时禁用了获焦控件，Chrome 会 blur 被 disabled 的元素，下一个按键落到 body。
 - 修法：Layout 四个 range + 四个 Switch、Settings 三个 Switch 改 `aria-busy={busy|saving}`（控件保持可聚焦；整页按钮「同步到对端/恢复自动/断开」仍 disabled）。新增 layout.test「keeps sliders and switches focusable while a PATCH is in flight」（MockTransport 挂起 Promise，断言 disabled=false、aria-busy=true、activeElement 不变、同步按钮仍 disabled）+ 新建 settings.test.ts（3 例：switch/name PATCH 精确体 + 空名/同名不发、pending 时 switch 仍获焦、等待态两张卡各一条占位）。vitest 66 / svelte-check 0 / playwright 5 / dist 重建。
 - 走查工具教训：Windows 侧浏览器走查若隧道本地端口 ≠ 45716，module script / CSS 的 Origin 是 forbidden header，Playwright route 改写无效 → daemon `origin_allowed` 端口不匹配回 403 `cross-origin request rejected`（curl 不带 Origin 所以 200，误以为产品 bug）。正确做法：隧道绑 `[::1]:45716`（Mac daemon 只占 IPv4 127.0.0.1:45716），浏览器直接打开 `http://[::1]:45716`，Origin 端口天然匹配。
+
+## §223 概览页配对 PIN 卡：未激活时「显示 PIN」打 GET 404（2026-11-22）
+
+- 来源：v0.2.72 真机 PIN 走查（Mac + Windows 同现）：PIN 未激活时点「显示 PIN」→ `GET /api/v1/pairing/pin` 404 `no active pairing PIN`，toast 报错、控制台红；「轮换」才真正生成（201）；「撤销」204 正常。daemon 语义本就是 GET 只读当前 grant、生成走 POST rotate，是客户端按钮语义错位，不改 daemon。
+- 修法：Overview `pinActive = $derived(pairing.pairing?.pin_active)`；主按钮未激活时文案「生成 PIN」（key 图标）走 rotate，激活时「显示 PIN」走 GET；轮换/撤销在未激活时 disabled；pairing.changed 报 active→inactive（过期/他处撤销）时清掉已显示的数字（只在 true→false 边沿清，避开生成后事件晚到的竞态）。flows.test 新增「PIN card generates when inactive and shows when active」全流程（生成→显示→关闭）。vitest 67 / playwright 5 / svelte-check 0 / dist 重建。

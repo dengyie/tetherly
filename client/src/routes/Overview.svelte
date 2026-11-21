@@ -45,11 +45,22 @@
     });
     pinBusy = false;
   }
-  const showPin = () => runPin(async () => (await api.pin()).pin);
+  const pinActive = $derived(pairing.pairing?.pin_active === true);
+  // `GET /pairing/pin` is 404 while no PIN is active (§223): with nothing to
+  // show, the primary action generates one instead of surfacing that error.
+  const showPin = () => runPin(async () => (pinActive ? await api.pin() : await api.rotatePin()).pin);
   const rotatePin = () => runPin(async () => (await api.rotatePin()).pin);
   const revokePin = () => runPin(async () => {
     await api.revokePin();
     return "";
+  });
+  // Drop the displayed digits once the daemon reports the window closed
+  // (expiry or a revoke from elsewhere); never on the inactive→active edge,
+  // which races the pairing.changed event right after generation.
+  let wasActive = false;
+  $effect(() => {
+    if (wasActive && !pinActive) pin = "";
+    wasActive = pinActive;
   });
   const releaseInput = () => withToast(() => api.releaseInput(), "已收回键鼠");
 </script>
@@ -120,9 +131,9 @@
       </div>
     {/if}
     <div class="mt-3 flex flex-wrap gap-2">
-      <button type="button" class="btn btn-primary" disabled={pinBusy} onclick={showPin}><Icon name="eye" size={14} />显示 PIN</button>
-      <button type="button" class="btn" disabled={pinBusy} onclick={rotatePin}><Icon name="refresh" size={14} />轮换</button>
-      <button type="button" class="btn btn-danger" disabled={pinBusy} onclick={revokePin}><Icon name="x" size={14} />撤销</button>
+      <button type="button" class="btn btn-primary" disabled={pinBusy} onclick={showPin}><Icon name={pinActive ? "eye" : "key"} size={14} />{pinActive ? "显示 PIN" : "生成 PIN"}</button>
+      <button type="button" class="btn" disabled={pinBusy || !pinActive} onclick={rotatePin}><Icon name="refresh" size={14} />轮换</button>
+      <button type="button" class="btn btn-danger" disabled={pinBusy || !pinActive} onclick={revokePin}><Icon name="x" size={14} />撤销</button>
     </div>
   </section>
 </div>
