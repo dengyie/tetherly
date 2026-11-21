@@ -2684,7 +2684,7 @@ pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
     report
 }
 
-/// §217: macOS is not a starvation-free analogue — an input-sharing daemon
+/// §218: macOS is not a starvation-free analogue — an input-sharing daemon
 /// competes with miner/encoder-class CPU loads exactly like the Windows one
 /// (production: high system CPU made the Mac controller's mouse on the
 /// Windows peer visibly laggy; the screen pump runs zstd/OpenH264 encoding
@@ -2695,39 +2695,26 @@ pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
 /// call is reported honestly, never fatal.
 #[cfg(target_os = "macos")]
 pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
-    // Mirrors `sys/qos.h` (libc does not export the QoS API):
-    // USER_INTERACTIVE=0x21 > USER_INITIATED=0x19 > DEFAULT=0x15 >
-    // UTILITY=0x11 > BACKGROUND=0x09 > UNSPECIFIED=0x00.
-    #[repr(i32)]
-    enum QosClass {
-        UserInitiated = 0x19,
-    }
-    unsafe extern "C" {
-        fn pthread_set_qos_class_self_np(qos_class: i32, relative_priority: i32) -> i32;
-        fn qos_class_self() -> i32;
-    }
     let mut report = DaemonResponsiveness::default();
     unsafe {
-        let before = qos_class_self();
-        report.priority_was_low = before < QosClass::UserInitiated as i32;
+        let before = qos_sys::qos_class_self();
+        const USER_INITIATED: i32 = qos_sys::QOS_CLASS_USER_INITIATED;
+        report.priority_was_low = before < USER_INITIATED;
         // Never demote an already-elevated thread (Windows
         // daemon_priority_needs_raise alignment: High/Realtime stay).
         if report.priority_was_low {
-            report.priority_ok = pthread_set_qos_class_self_np(QosClass::UserInitiated as i32, 0)
-                == 0
-                && qos_class_self() >= QosClass::UserInitiated as i32;
+            report.priority_ok = qos_sys::pthread_set_qos_class_self_np(USER_INITIATED, 0) == 0
+                && qos_sys::qos_class_self() >= USER_INITIATED;
         } else {
             report.priority_ok = true;
         }
-        // No EcoQoS/working-set analogue on this side; report the same
-        // "nothing held back" shape as a successful Windows run.
-        report.throttling_disabled = true;
-        report.working_set_pinned = true;
+        // Honest report: this platform has no EcoQoS analogue and installs
+        // no working-set floor — those fields stay false here (review §218).
     }
     report
 }
 
-/// §217: lift the CALLING thread to `userInteractive` QoS. The CGEvent tap
+/// §218: lift the CALLING thread to `userInteractive` QoS. The CGEvent tap
 /// runloop must sit above the daemon's own encoder/pump load (its callback
 /// latency is the first deadline in the input chain — WindowServer delivers
 /// HID events to the tap synchronously, and a starved tap both delays
@@ -2736,15 +2723,26 @@ pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
 /// the thread is at the class after the call.
 #[cfg(target_os = "macos")]
 pub fn set_current_thread_user_interactive() -> bool {
-    const QOS_CLASS_USER_INTERACTIVE: i32 = 0x21;
-    unsafe extern "C" {
-        fn pthread_set_qos_class_self_np(qos_class: i32, relative_priority: i32) -> i32;
-        fn qos_class_self() -> i32;
-    }
-    // SAFETY: documented pthread QoS setter, applies to the caller only.
+    // SAFETY: documented pthread QoS setter + pure class read, both apply
+    // to the caller only.
     unsafe {
-        qos_class_self() >= QOS_CLASS_USER_INTERACTIVE
-            || pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0
+        qos_sys::qos_class_self() >= qos_sys::QOS_CLASS_USER_INTERACTIVE
+            || qos_sys::pthread_set_qos_class_self_np(qos_sys::QOS_CLASS_USER_INTERACTIVE, 0) == 0
+    }
+}
+
+/// Raw `sys/qos.h` + `pthread/qos.h` surface for this module (libc does not
+/// export the QoS API). Single declaration site — every QoS call here goes
+/// through this block. Constants mirror `sys/qos.h`:
+/// USER_INTERACTIVE=0x21 > USER_INITIATED=0x19 > DEFAULT=0x15 >
+/// UTILITY=0x11 > BACKGROUND=0x09 > UNSPECIFIED=0x00.
+#[cfg(target_os = "macos")]
+mod qos_sys {
+    pub const QOS_CLASS_USER_INTERACTIVE: i32 = 0x21;
+    pub const QOS_CLASS_USER_INITIATED: i32 = 0x19;
+    unsafe extern "C" {
+        pub(crate) fn pthread_set_qos_class_self_np(qos_class: i32, relative_priority: i32) -> i32;
+        pub(crate) fn qos_class_self() -> i32;
     }
 }
 
@@ -2753,6 +2751,21 @@ pub fn set_current_thread_user_interactive() -> bool {
     // No per-thread analogue wired on other platforms; the Windows hook
     // thread inherits the process lift from `raise_daemon_responsiveness`.
     false
+}
+
+/// §218: tokio `on_thread_start` hook — per-WORKER-THREAD lift to
+/// `userInitiated` QoS. Deliberately NOT `raise_daemon_responsiveness`:
+/// on macOS that function is a per-thread QoS call, but on Windows it is a
+/// PROCESS-level lift (priority class + working-set pin + image lock) that
+/// `cmd_core::run` already applied exactly once at startup — rerunning it
+/// from every worker thread would redo the whole working-set/image-lock
+/// sweep N times for nothing. No-op off macOS: the Windows hook threads
+/// inherit the one-shot process lift.
+pub fn lift_current_thread_user_initiated() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = raise_daemon_responsiveness();
+    }
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -3662,7 +3675,7 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     std::thread::Builder::new()
         .name("tetherly-input-tap".into())
         .spawn(move || {
-            // §217: the tap callback runs synchronously on WindowServer's
+            // §218: the tap callback runs synchronously on WindowServer's
             // HID delivery; under high CPU it must out-priority the
             // daemon's own screen-encoder/pump load or mouse roams queue
             // behind them. Applied before the runloop starts.
@@ -4753,7 +4766,7 @@ mod daemon_responsiveness_tests {
         assert!(report.image_locked_bytes > 0, "{report:?}");
     }
 
-    // §217: macOS lifts the calling thread to userInitiated QoS (the
+    // §218: macOS lifts the calling thread to userInitiated QoS (the
     // analogue of the Windows AboveNormal lift) and reports it; only
     // other off-Windows platforms stay a no-op. The test runner may
     // already run above the class (xctest/userInteractive) — then the
@@ -4764,15 +4777,17 @@ mod daemon_responsiveness_tests {
         let report = raise_daemon_responsiveness();
         assert!(report.priority_ok, "{report:?}");
         // Read-back through the same API the fix uses.
-        const QOS_CLASS_USER_INITIATED: i32 = 0x19;
-        unsafe extern "C" {
-            fn qos_class_self() -> i32;
-        }
         // SAFETY: pure read of the calling thread's class.
         assert!(
-            unsafe { qos_class_self() } >= QOS_CLASS_USER_INITIATED,
+            unsafe { qos_sys::qos_class_self() } >= qos_sys::QOS_CLASS_USER_INITIATED,
             "{report:?}"
         );
+        // Honest report shape (review §218): no EcoQoS/working-set analogue
+        // exists on this platform, so those fields must stay false — the
+        // startup log would otherwise claim a floor macOS never installed.
+        assert!(!report.throttling_disabled, "{report:?}");
+        assert!(!report.working_set_pinned, "{report:?}");
+        assert_eq!(report.image_locked_bytes, 0);
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -4784,22 +4799,18 @@ mod daemon_responsiveness_tests {
         );
     }
 
-    // §217: the per-thread userInteractive lift for the tap runloop takes
+    // §218: the per-thread userInteractive lift for the tap runloop takes
     // on the calling thread (macOS only; other platforms honestly report
     // no per-thread analogue).
     #[cfg(target_os = "macos")]
     #[test]
     fn set_current_thread_user_interactive_takes() {
         assert!(set_current_thread_user_interactive());
-        const QOS_CLASS_USER_INTERACTIVE: i32 = 0x21;
-        unsafe extern "C" {
-            fn qos_class_self() -> i32;
-        }
         // SAFETY: pure read of the calling thread's class.
-        assert!(unsafe { qos_class_self() } >= QOS_CLASS_USER_INTERACTIVE);
+        assert!(unsafe { qos_sys::qos_class_self() } >= qos_sys::QOS_CLASS_USER_INTERACTIVE);
     }
 
-    // §217 RED proof: a freshly spawned pthread inherits a class BELOW
+    // §218 RED proof: a freshly spawned pthread inherits a class BELOW
     // userInitiated (DEFAULT), the daemon-lift branch actually fires there,
     // and the per-thread userInteractive lift also takes. In-process the
     // main test thread may already run at userInteractive (33), which is
@@ -4809,29 +4820,33 @@ mod daemon_responsiveness_tests {
     fn qos_lifts_fire_on_a_fresh_thread() {
         let (tx, rx) = std::sync::mpsc::channel::<(i32, bool, i32, bool)>();
         std::thread::spawn(move || {
-            unsafe extern "C" {
-                fn qos_class_self() -> i32;
-            }
             // SAFETY: pure reads + documented QoS setters, caller-thread only.
             unsafe {
-                let before = qos_class_self();
+                let before = qos_sys::qos_class_self();
                 let report = raise_daemon_responsiveness();
-                let after_lift = qos_class_self();
+                let after_lift = qos_sys::qos_class_self();
                 let interactive = set_current_thread_user_interactive();
                 let _ = tx.send((
                     before,
                     report.priority_ok,
-                    after_lift.max(if interactive { 0x21 } else { after_lift }),
+                    after_lift.max(if interactive {
+                        qos_sys::QOS_CLASS_USER_INTERACTIVE
+                    } else {
+                        after_lift
+                    }),
                     interactive,
                 ));
             }
         });
         let (before, lifted_ok, final_class, interactive) = rx.recv().expect("worker reported");
         // The fresh thread starts below userInitiated (DEFAULT=0x15 or
-        // UNSPECIFIED) — proving the starvation premise §217 fixes.
-        assert!(before < 0x19, "fresh thread QoS {before}");
+        // UNSPECIFIED) — proving the starvation premise §218 fixes.
+        assert!(
+            before < qos_sys::QOS_CLASS_USER_INITIATED,
+            "fresh thread QoS {before}"
+        );
         assert!(lifted_ok);
-        assert!(final_class >= 0x19);
+        assert!(final_class >= qos_sys::QOS_CLASS_USER_INITIATED);
         assert!(interactive);
     }
 }

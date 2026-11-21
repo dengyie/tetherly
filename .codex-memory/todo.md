@@ -364,3 +364,10 @@
 - 修复：macOS QoS 落地（pthread_set_qos_class_self_np USER_INITIATED 0x19 + 回读 + 不降级）；set_current_thread_user_interactive（0x21）；runtime on_thread_start 全 worker 提升 + tap/捕获线程 userInteractive。
 - 测试：qos_lifts_fire_on_a_fresh_thread（RED 证明新线程起于 DEFAULT）等 3 新测试；lib 331 全绿；clippy -D warnings / fmt 过。
 - 常量教训：QoS 值以 sys/qos.h 为准（0x19/0x21），凭记忆 0x20 被 RED 抓 EINVAL。
+
+## §218-b (2026-11-22) §218 review 跟进四项根因修复
+- ① 注释 §217→§218 十处（3 文件 sed，改号时漏了代码层）。
+- ② 新增 lift_current_thread_user_initiated 供 tokio on_thread_start——macOS 按线程提升；修复 Windows 上 per-worker 重复跑进程级 SetPriorityClass/working-set pin/image lock（原直接调 raise_daemon_responsiveness）。
+- ③ macOS 报告字段改事实值：throttling_disabled/working_set_pinned=false、image_locked_bytes=0，测试断言（原硬编码 true 是假情报）。
+- ④ qos_sys 模块收口 QoS extern（原三处重复）；capture worker 提升失败补 debug 日志（对齐 tap）。
+- 门禁：lib 331 全绿 + clippy 0 error + fmt 过。

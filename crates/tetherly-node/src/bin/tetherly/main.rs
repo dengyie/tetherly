@@ -152,15 +152,18 @@ fn main() -> Result<()> {
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            // §217: every runtime worker gets the userInitiated lift — the
+            // §218: every runtime worker gets the userInitiated lift — the
             // screen pump runs its zstd/OpenH264 encode inline on these
             // threads and, at default QoS, starves the input capture chain
             // under high CPU (macOS mouse-on-Windows lag). The tap thread
             // gets the higher userInteractive class separately in
-            // start_input_hooks.
-            .on_thread_start(|| {
-                tetherly_node::platform::raise_daemon_responsiveness();
-            })
+            // start_input_hooks. macOS-only: raise_daemon_responsiveness is
+            // a per-thread QoS call here, while on Windows it is a
+            // PROCESS-level lift (SetPriorityClass + working-set pin +
+            // image lock) that cmd_core::run already applied exactly once —
+            // rerunning it per worker thread would redo the whole
+            // working-set/image-lock sweep N times for nothing.
+            .on_thread_start(tetherly_node::platform::lift_current_thread_user_initiated)
             .build()?;
 
         std::thread::spawn(move || {
@@ -181,10 +184,8 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        // §217: same worker lift as the tray daemon arm (see above).
-        .on_thread_start(|| {
-            tetherly_node::platform::raise_daemon_responsiveness();
-        })
+        // §218: same per-worker lift as the tray daemon arm (see above).
+        .on_thread_start(tetherly_node::platform::lift_current_thread_user_initiated)
         .build()?;
     rt.block_on(async { dispatch(cli).await })
 }
