@@ -334,3 +334,10 @@
 - [x] 15 处 P4 漂移修复（EN 7 + zh 8）：crate 数 6→7+viewer、pair→dial 命令、PIN 端点方法、重复段落、Rust 1.80→1.82、zh 图框线
 - [x] plan 速读段基线 v0.2.65→v0.2.69
 - 验证：East Asian width 实测图框 4 行全 79；grep 残留清零；端点/命令逐一对路由表与 cli.rs 核对
+
+## §214（2026-11-21）docs/ 三文档深审 — 完成
+- [x] 全读 LEGACY_API_MAP.md(273) / CONTROL_CLIENT_DEVELOPMENT.md(406) / MODULE_FILE_TRANSFER_UI_AND_DRAG_DROP.md(382)
+- [x] P4-1 修复：LEGACY_API_MAP 补 §214 勘误（/api/events + /api/events/stream 存活，18 个 CLI 调用点消费原生 UiEvent，v1 EventEnvelope 语义不同；收尾条件=CLI watcher 迁移后删除）+ CONTROL_CLIENT M5 行注记
+- [x] P4-2 修复：CONTROL_CLIENT 状态表「设计稿」→「已实现并上线」（M0–M5 全落地 v0.2.56–v0.2.64），日期/基线/里程碑表逐行补 ✅
+- [x] 零缺陷验证：FILE_TRANSFER_MODULE（DragControlMsg 1KiB/MOTW Zone.Identifier×3/Edge Strip gateway）逐条与代码相符
+- [x] 登记 plan §8（最新在前，§213 之上）+ 本 todo + session-log；提交 + CI

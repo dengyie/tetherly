@@ -6,6 +6,8 @@
 
 **M5 收敛完成（§169，2026-11-19）：legacy `/api/*` 路由面已整体删除（uihttp.rs 429 arms + 27 个 api_*.rs 模块 + requires_token 特权表），v0.2.63 起 daemon 只服务 `/`、`/assets/*` 与 `/api/v1/*`。下文批次表保留作迁移史存档与 v1 语义差异对照；`hub.legacy` 命中计数与 diagnostics 的 `legacy_routes` 观测字段保留至外部旧版客户端流量归零。**
 
+> **§214 勘误（2026-11-21）：唯一存活的 legacy 路由是 `GET /api/events` 与 `GET /api/events/stream`**（uihttp.rs，§174 起 Read tier 强制、无 wildcard CORS）。保留原因：`bins/tetherly-cli` 与 daemon 内置 CLI 共 18 个 watch/monitor 调用点经 `loopback_events_connect` 消费**原生 `UiEvent` 的 `kind` 标签格式**；v1 `/api/v1/events` 发的是投影后的 `EventEnvelope`（`seq` + 类型化 event），语义不同，CLI 未迁移前此流不能删。收尾条件：全部 CLI watcher 切到 `loopback_v1_events_connect` 后，随下一轮收敛删除本路由与 `loopback_legacy_events_connect*`，届时本表「整体删除」表述才完全成立。
+
 ## 已迁移（v1 对应端点）
 
 | 旧路由 | v1 | 轮次 |

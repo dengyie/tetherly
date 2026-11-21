@@ -1784,3 +1784,6 @@
 - 本机 Android 门禁踩坑三连：①sdkmanager 12.0 无法解析仓库 XML v4（报「XML 文件結構…」）→ 直接 curl dl.google.com 的 build-tools_r34-macosx.zip + platform-35_r02.zip 解包进 ~/Library/Android/sdk/{build-tools/34.0.0,platforms/android-35}；②gradle 走 maven 下载遇 "Remote host terminated the handshake" → 系统代理 127.0.0.1:7897 需以 -Dhttps.proxyHost/-Dhttps.proxyPort 传给 gradle CLI（GRADLE_OPTS/JAVA_TOOL_OPTIONS 不生效于该路径）；③无 gradle 安装时用 ~/.gradle/wrapper/dists 里已有的 8.13 + Android Studio 自带 JBR（JAVA_HOME）。
 - 2026-11-21 §212：scripts/workflows 全读收官。Batch 5 主干（tag checkout/版本契约/immutable publish/Windows rollback 锚点/全量 /api/v1）逐项验证在位；修 4×P4（两处 digest 缺口、sed 锚点、arch gate）+1 注释漂移。教训：release.yml 版本提取 sed 此前靠键序巧合（`.*"` 会吃段内任意带数字引号行）——用 `^version = "` / `^  "version": "` 行首锚；package-macos-app.sh 与 deploy.sh 消费同一 CI 产物但只后者验 digest，「同一产物多入口必须同标准」。
 - 2026-11-21 §213：仓库门面收官。教训：README Quick Start 的 `tetherly-cli pair` 从未存在（CLI 无 pair 子命令，配对经 daemon `dial` 走 loopback API）——门面文档的命令示例必须从 cli.rs 枚举反查而非凭记忆；zh 架构图 CJK 框线用 East Asian width 脚本验证，不靠目测。
+
+## §214 docs/ 三文档深审（2026-11-21）
+文档面收官：三文档全读 ~1,061 行，逐条对照代码。核心发现：两文档「legacy /api/* 整体删除」表述不准——GET /api/events + /api/events/stream 因 18 个 CLI 调用点消费原生 UiEvent（v1 为投影 EventEnvelope，语义不同）而存活，已补勘误块 + 收尾条件；CONTROL_CLIENT_DEVELOPMENT 状态漂移（设计稿→已上线）已修；FILE_TRANSFER_MODULE 零缺陷。登记 plan §8，提交 + CI 跟踪。

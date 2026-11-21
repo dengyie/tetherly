@@ -2,10 +2,10 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 设计稿（已完成调研，尚未实现）。决策见 [ADR-139](adr/139-control-client-architecture.md) |
-| 日期 | 2026-11-15 |
-| 基线版本 | v0.2.55 |
-| 取代 | `ui/index.html`（ADR 前的第一阶段 loopback 控制台）。也改写 `ui/README.md` 中"下一步 Tauri/React 外壳"的旧计划 |
+| 状态 | **已实现并上线**（M0–M5 全部完成：v0.2.56 契约 → v0.2.58 门面+SPA → v0.2.62 Tauri 壳 → v0.2.64 切换 → §169 legacy 收敛；§210 深审通过）。设计决策见 [ADR-139](adr/139-control-client-architecture.md) |
+| 日期 | 2026-11-15（设计稿）；2026-11-21（状态勘误，§214） |
+| 基线版本 | v0.2.55（设计时）；实现随 v0.2.56–v0.2.64 分阶段交付 |
+| 取代 | ~~`ui/index.html`~~（已随 §168 删除；本设计稿中的「旧控制台」均已成历史） |
 | 关联 | ADR-133（四向拓扑）、ADR-134（托盘）、ADR-137（托盘弹出面板 / 文件拖放）、ADR-138（远程桌面），DEVELOPMENT §126 |
 
 ---
@@ -348,10 +348,10 @@ export interface Transport {
 |---|---|---|
 | **M0 契约基础** ✅ v0.2.56（§127；schemars 推迟到 M5） | 新建 `tetherly-api` crate（DTO、`Event`、`Snapshot`、错误码），接入 `ts-rs` 和 `schemars`；`/api/v1/health` 和 `/system`；v1 的读写两级鉴权；CI 加类型漂移检查 | `cargo test` 覆盖 DTO 序列化往返；CI 绿 |
 | **M1 事件流** ✅ v0.2.57（§128；旧路由计数随 M2 diagnostics） | `project()` 投影函数、`ProjectionState` 快照、`seq` 环形缓冲、`Last-Event-ID` 续传、主题过滤、高频节流；旧 `/api/*` 冻结 | 单元测试：投影纯函数、序号连续、缓冲溢出后重新发快照、节流；集成测试：断线续传 |
-| **M2 门面 + Web SPA** | 实现 §4.2 全部端点；`client/` 工程搭好，包括 Transport、store、设计系统和 7 个页面；daemon 在 `/next/` 托管新 SPA，旧控制台留在 `/` | vitest 覆盖 reducer 和 store；Playwright 对接 MockTransport 跑主要流程；在真实 daemon 上冒烟测试 |
-| **M3 Tauri 桌面壳** | `src-tauri`：请求代理、事件流转发、token 读取（含 Windows 客户端 token 签发）、托盘、托盘面板、自启、系统通知、深链接；CI 的 release 产物增加 `.dmg` 和 `.msi` | 两端安装运行；托盘状态和事件同步；daemon 重启后客户端自动恢复；内存占用 < 120 MB |
-| **M4 切换** | `/` 改为新 SPA，旧控制台移到 `/legacy/` 保留两个版本；daemon 内置托盘的双击动作改为优先唤起客户端（深链接 `tetherly://open`），失败时再打开浏览器；`popover.rs` 退役 | 生产两端连续使用一周没有回退 |
-| **M5 收敛** | 删除 `ui/index.html` 和 `/legacy/`；旧 `/api/*` 别名逐个下线（先在日志中记录调用方，确认 CLI 和 Android 已迁移后再删）；Android Compose 改版 | 路由数从约 555 降到约 60（v1）加 CLI 必需路由；`uihttp.rs` 显著变小 |
+| **M2 门面 + Web SPA** ✅ v0.2.58–v0.2.61（§130–§133，Svelte 5，先 `/next/` 托管） | 实现 §4.2 全部端点；`client/` 工程搭好，包括 Transport、store、设计系统和 7 个页面；daemon 在 `/next/` 托管新 SPA，旧控制台留在 `/` | vitest 覆盖 reducer 和 store；Playwright 对接 MockTransport 跑主要流程；在真实 daemon 上冒烟测试 |
+| **M3 Tauri 桌面壳** ✅ v0.2.62（§134–§138） | `src-tauri`：请求代理、事件流转发、token 读取（含 Windows 客户端 token 签发）、托盘、托盘面板、自启、系统通知、深链接；CI 的 release 产物增加 `.dmg` 和 `.msi` | 两端安装运行；托盘状态和事件同步；daemon 重启后客户端自动恢复；内存占用 < 120 MB |
+| **M4 切换** ✅ v0.2.64（§139，§210 复核通过） | `/` 改为新 SPA，旧控制台移到 `/legacy/` 保留两个版本；daemon 内置托盘的双击动作改为优先唤起客户端（深链接 `tetherly://open`），失败时再打开浏览器；`popover.rs` 退役 | 生产两端连续使用一周没有回退 |
+| **M5 收敛** ✅ §141–§142 + §156/§161–§166 + §168–§169（legacy 路由面整体删除；`/api/events` 单独保留至 CLI watcher 迁移，见 LEGACY_API_MAP §214 勘误） | 删除 `ui/index.html` 和 `/legacy/`；旧 `/api/*` 别名逐个下线（先在日志中记录调用方，确认 CLI 和 Android 已迁移后再删）；Android Compose 改版（§171 已落地） | 路由数从约 555 降到约 60（v1）加 CLI 必需路由；`uihttp.rs` 显著变小 |
 
 每个阶段都按项目现有的发布流程执行：TDD、fmt、clippy（含 windows-gnu）、test、版本号、CI、tag、deploy 和两端验证；两端都只部署 CI 产物。Tauri 客户端是新增产物，**不替换 daemon 二进制**，daemon 的部署流程不变。
 
