@@ -335,41 +335,48 @@ pub fn next_url(ui_port: u16, token: Option<&str>) -> String {
     }
 }
 
+#[cfg(windows)]
+#[path = "apitoken_win.rs"]
+mod win;
+
 /// M4: the shell owns the tray surface (§6.3), so tray clicks prefer the
 /// Tauri client over the browser: open the `tetherly://open` deep link
 /// first (the shell shows its main window; the bundler registered the
 /// scheme), falling back to the tokenized dashboard URL when no client is
-/// installed (spawn error — the browser path never refuses, matching
-/// `tetherly dashboard --open`).
+/// installed. On Windows the deep link is only attempted when the scheme
+/// is registered, because `start`/`ShellExecute` answer "success" for an
+/// unknown scheme while showing the "You'll need a new app" dialog (the
+/// §228 "open main window errors" report); both launches go through
+/// `ShellExecuteW` so the console-less tray panel child never flashes a
+/// `cmd` window. The browser path never refuses, matching
+/// `tetherly dashboard --open`.
 pub fn open_client_or_dashboard(ui_port: u16, token: Option<&str>) -> bool {
     #[cfg(target_os = "macos")]
-    let client = std::process::Command::new("open")
+    let client_ok = std::process::Command::new("open")
         .arg("tetherly://open")
-        .status();
+        .status()
+        .is_ok_and(|s| s.success());
     #[cfg(windows)]
-    let client = std::process::Command::new("cmd")
-        .args(["/C", "start", "", "tetherly://open"])
-        .status();
+    let client_ok = win::client_scheme_registered() && win::shell_open("tetherly://open");
     #[cfg(not(any(target_os = "macos", windows)))]
-    let client: Result<std::process::ExitStatus, std::io::Error> =
-        std::process::Command::new("xdg-open")
-            .arg("tetherly://open")
-            .status();
-    match client {
-        Ok(s) if s.success() => true,
-        _ => {
-            let url = dashboard_url(ui_port, token);
-            #[cfg(target_os = "macos")]
-            let browser = std::process::Command::new("open").arg(&url).spawn();
-            #[cfg(windows)]
-            let browser = std::process::Command::new("cmd")
-                .args(["/C", "start", "", &url])
-                .spawn();
-            #[cfg(not(any(target_os = "macos", windows)))]
-            let browser = std::process::Command::new("xdg-open").arg(&url).spawn();
-            browser.is_ok()
-        }
+    let client_ok = std::process::Command::new("xdg-open")
+        .arg("tetherly://open")
+        .status()
+        .is_ok_and(|s| s.success());
+    if client_ok {
+        return true;
     }
+    let url = dashboard_url(ui_port, token);
+    #[cfg(target_os = "macos")]
+    let opened = std::process::Command::new("open").arg(&url).spawn().is_ok();
+    #[cfg(windows)]
+    let opened = win::shell_open(&url);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let opened = std::process::Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .is_ok();
+    opened
 }
 
 #[cfg(test)]
