@@ -182,6 +182,26 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // §227: the Windows tray panel child owns the main thread as a COM STA
+    // with a plain Win32 message pump — no tokio runtime, exit code from the
+    // pump (0 closed, 2 WebView2 unavailable → dashboard opened instead).
+    #[cfg(windows)]
+    if let Cmd::TrayPanel {
+        ui_port,
+        anchor_hwnd,
+        anchor_x,
+        anchor_y,
+    } = &cli.cmd
+    {
+        let code = tetherly_node::platform::tray::run_tray_panel_process(
+            *ui_port,
+            *anchor_hwnd,
+            *anchor_x,
+            *anchor_y,
+        );
+        std::process::exit(code);
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         // §218: same per-worker lift as the tray daemon arm (see above).

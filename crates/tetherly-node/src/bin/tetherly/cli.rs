@@ -1000,4 +1000,22 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// §227 (Windows, internal): host the tray popup panel in this process.
+    /// Spawned by the daemon's tray thread as the console user, because
+    /// WebView2 cannot run under LocalSystem. Not for interactive use; the
+    /// API token arrives in `TETHERLY_API_TOKEN`.
+    #[command(hide = true)]
+    TrayPanel {
+        /// UI API port of the running daemon (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+        /// The daemon's tray window handle (anchors the panel to its icon).
+        #[arg(long, default_value_t = 0)]
+        anchor_hwnd: usize,
+        /// Fallback anchor point (screen px) when the shell cannot locate the icon.
+        #[arg(long, default_value_t = 0)]
+        anchor_x: i32,
+        #[arg(long, default_value_t = 0)]
+        anchor_y: i32,
+    },
 }

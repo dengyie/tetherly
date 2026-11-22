@@ -840,42 +840,64 @@ mod macos_tray {
 pub use macos_tray::run_macos_tray_on_main_thread;
 
 #[cfg(target_os = "macos")]
-pub fn spawn_tray(_ui_port: u16, _device_alias: String) -> Option<TrayHandle> {
+pub fn spawn_tray(
+    _ui_port: u16,
+    _device_alias: String,
+    _data_dir: std::path::PathBuf,
+) -> Option<TrayHandle> {
     None
 }
 
-/// Windows left-click panel (§226): WebView2 host for the SPA `#tray` route.
-/// A sibling of `windows_tray` rather than a child so the `#[path]` resolves
-/// next to this file; it reaches the tray's shared items via
-/// `super::windows_tray`.
+/// Windows left-click panel (§226/§227): WebView2 host for the SPA `#tray`
+/// route, run in a user-context child process (`tetherly tray-panel`) because
+/// WebView2 refuses to start under the LocalSystem daemon. A sibling of
+/// `windows_tray` rather than a child so the `#[path]` resolves next to this
+/// file; it reaches the tray's shared items via `super::windows_tray`.
 #[cfg(windows)]
 #[path = "tray_win_panel.rs"]
 mod windows_tray_panel;
 
+/// Entry point of the `tetherly tray-panel` child (§227).
+#[cfg(windows)]
+pub use windows_tray_panel::run_tray_panel_process;
+
 #[cfg(windows)]
 mod windows_tray {
-    use super::windows_tray_panel as panel;
+    use super::windows_tray_panel::launcher as panel;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    };
     use windows_sys::Win32::Graphics::Gdi::{
         CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
         DIB_RGB_COLORS,
+    };
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_USERS,
+        KEY_READ, REG_DWORD,
+    };
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTSGetActiveConsoleSessionId, WTSQueryUserToken,
     };
     use windows_sys::Win32::UI::HiDpi::{
         SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows_sys::Win32::UI::Shell::{
-        Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+        Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+        NOTIFYICONDATAW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-        DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
-        LoadIconW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer,
-        TrackPopupMenuEx, TranslateMessage, HICON, HMENU, ICONINFO, IDI_APPLICATION, MF_GRAYED,
-        MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND,
-        WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW,
+        DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
+        GetSystemMetrics, LoadIconW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
+        SetTimer, TrackPopupMenuEx, TranslateMessage, HICON, HMENU, ICONINFO, IDI_APPLICATION,
+        MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
+        WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE,
+        WM_TIMER, WNDCLASSEXW,
     };
 
     const WM_TRAYICON: u32 = WM_APP + 42;
@@ -896,14 +918,6 @@ mod windows_tray {
     /// A tray click while the panel is open deactivates (hides) it before
     /// the click is delivered; a toggle inside this window stays a close.
     pub(super) const RETOGGLE_GUARD_MS: u64 = 300;
-    pub(super) static LAST_HIDE_MS: AtomicU64 = AtomicU64::new(0);
-
-    pub(super) fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
     /// Visibility-poll timer id (§6.3 tray takeover) and cadence.
     const VIS_TIMER_ID: usize = 0xC0FF_EE02;
     const VIS_POLL_MS: u32 = 500;
@@ -921,33 +935,50 @@ mod windows_tray {
         );
     }
 
-    /// The mac47054639 brand mark as an `HICON` at the shell's small-icon
-    /// size. Each embedded `assets/brand/tray-{16,20,24,32,48}.rgba` is
-    /// rasterised for its own size (strokes dilated before the downscale), so
-    /// the nearest asset at or above `SM_CXSMICON` is crisp instead of a
-    /// blurred 32px thumbnail. GDI gets a top-down 32bpp DIB section holding
-    /// premultiplied BGRA (`CreateIconIndirect` honours the alpha channel)
-    /// plus an all-zero 1bpp mask. The old path fed bottom-up rows to
-    /// `CreateIcon`, whose XOR bitmap is top-down — hence the upside-down
-    /// icon this replaces. Falls back to the stock application icon if GDI
-    /// refuses, so the tray never vanishes over a cosmetic failure.
-    pub(super) fn brand_icon() -> HICON {
+    /// The mac47054639 brand mark as a monochrome template `HICON` at the
+    /// shell's small-icon size — the Windows twin of the macOS
+    /// `isTemplate` status item (§227). Each embedded
+    /// `assets/brand/tray-mono-{16,20,24,32,48}.a8` is the glyph's coverage
+    /// (alpha only, 1 byte/pixel) rasterised for its own size, so the nearest
+    /// asset at or above `SM_CXSMICON` is crisp instead of a blurred
+    /// thumbnail. The ink is white on a dark taskbar and black on a light one
+    /// (`light_taskbar`), like every system tray glyph. GDI gets a top-down
+    /// 32bpp DIB section holding premultiplied BGRA (`CreateIconIndirect`
+    /// honours the alpha channel) plus an all-zero 1bpp mask. Falls back to
+    /// the stock application icon if GDI refuses, so the tray never vanishes
+    /// over a cosmetic failure.
+    pub(super) fn brand_icon(light_taskbar: bool) -> HICON {
         const ASSETS: [(usize, &[u8]); 5] = [
-            (16, include_bytes!("../../../../assets/brand/tray-16.rgba")),
-            (20, include_bytes!("../../../../assets/brand/tray-20.rgba")),
-            (24, include_bytes!("../../../../assets/brand/tray-24.rgba")),
-            (32, include_bytes!("../../../../assets/brand/tray-32.rgba")),
-            (48, include_bytes!("../../../../assets/brand/tray-48.rgba")),
+            (
+                16,
+                include_bytes!("../../../../assets/brand/tray-mono-16.a8"),
+            ),
+            (
+                20,
+                include_bytes!("../../../../assets/brand/tray-mono-20.a8"),
+            ),
+            (
+                24,
+                include_bytes!("../../../../assets/brand/tray-mono-24.a8"),
+            ),
+            (
+                32,
+                include_bytes!("../../../../assets/brand/tray-mono-32.a8"),
+            ),
+            (
+                48,
+                include_bytes!("../../../../assets/brand/tray-mono-48.a8"),
+            ),
         ];
         let fallback = || unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
 
         let want = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as usize;
-        let (side, rgba) = ASSETS
+        let (side, alpha) = ASSETS
             .iter()
             .copied()
             .find(|(s, _)| *s >= want)
             .unwrap_or(ASSETS[ASSETS.len() - 1]);
-        if rgba.len() != side * side * 4 {
+        if alpha.len() != side * side {
             return fallback();
         }
 
@@ -976,13 +1007,16 @@ mod windows_tray {
         // SAFETY: the section was just allocated for `side*side` 32bpp pixels
         // and is owned by this thread until `DeleteObject` below.
         let dst = unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, side * side * 4) };
+        // Premultiplied BGRA: for white ink every channel equals the
+        // coverage; for black ink the colour channels stay zero.
+        let ink = if light_taskbar { 0u8 } else { 255u8 };
         // `chunks_exact` rather than `as_chunks`: the workspace MSRV is 1.82.
-        for (d, s) in dst.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
-            let a = s[3] as u32;
-            d[0] = ((s[2] as u32 * a + 127) / 255) as u8;
-            d[1] = ((s[1] as u32 * a + 127) / 255) as u8;
-            d[2] = ((s[0] as u32 * a + 127) / 255) as u8;
-            d[3] = s[3];
+        for (d, &a) in dst.chunks_exact_mut(4).zip(alpha.iter()) {
+            let c = ((ink as u32 * a as u32 + 127) / 255) as u8;
+            d[0] = c;
+            d[1] = c;
+            d[2] = c;
+            d[3] = a;
         }
 
         // 1bpp mask, rows padded to a WORD; all zero = colour bitmap decides.
@@ -1012,6 +1046,124 @@ mod windows_tray {
         }
     }
 
+    /// `SystemUsesLightTheme` under `…\Themes\Personalize` — the taskbar
+    /// (not the apps) theme, which is what decides the tray glyph's ink.
+    /// Read from `HKCU` for a user-context daemon; a LocalSystem daemon has
+    /// no meaningful HKCU, so it reads the console user's hive under
+    /// `HKEY_USERS\<SID>` instead. Anything unreadable counts as dark (the
+    /// Windows default and what every production host here runs).
+    pub(super) fn taskbar_is_light() -> bool {
+        const SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+        let (root, path): (HKEY, String) = if crate::cred::process_runs_as_local_system() {
+            match console_user_sid() {
+                Some(sid) => (HKEY_USERS, format!(r"{sid}\{SUBKEY}")),
+                None => return false,
+            }
+        } else {
+            (HKEY_CURRENT_USER, SUBKEY.to_string())
+        };
+        let path_w = to_wide(&path);
+        let value_w = to_wide("SystemUsesLightTheme");
+        let mut key: HKEY = std::ptr::null_mut();
+        if unsafe { RegOpenKeyExW(root, path_w.as_ptr(), 0, KEY_READ, &mut key) } != ERROR_SUCCESS {
+            return false;
+        }
+        let mut kind: u32 = 0;
+        let mut data: u32 = 0;
+        let mut len: u32 = std::mem::size_of::<u32>() as u32;
+        let rc = unsafe {
+            RegQueryValueExW(
+                key,
+                value_w.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                (&mut data as *mut u32).cast(),
+                &mut len,
+            )
+        };
+        unsafe {
+            RegCloseKey(key);
+        }
+        rc == ERROR_SUCCESS && kind == REG_DWORD && data != 0
+    }
+
+    /// String SID of the user logged on at the physical console (the one
+    /// whose taskbar shows our icon), via the WTS user token.
+    fn console_user_sid() -> Option<String> {
+        unsafe {
+            let session = WTSGetActiveConsoleSessionId();
+            if session == u32::MAX {
+                return None;
+            }
+            let mut token: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+            if WTSQueryUserToken(session, &mut token) == 0 {
+                return None;
+            }
+            let mut needed: u32 = 0;
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+            if needed == 0 {
+                CloseHandle(token);
+                return None;
+            }
+            let mut buf = vec![0u8; needed as usize];
+            let ok = GetTokenInformation(
+                token,
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            );
+            CloseHandle(token);
+            if ok == 0 {
+                return None;
+            }
+            let user = &*(buf.as_ptr() as *const TOKEN_USER);
+            let mut str_sid: *mut u16 = std::ptr::null_mut();
+            if ConvertSidToStringSidW(user.User.Sid, &mut str_sid) == 0 || str_sid.is_null() {
+                return None;
+            }
+            let mut n = 0usize;
+            while *str_sid.add(n) != 0 {
+                n += 1;
+            }
+            let out = String::from_utf16_lossy(std::slice::from_raw_parts(str_sid, n));
+            windows_sys::Win32::Foundation::LocalFree(str_sid.cast());
+            Some(out)
+        }
+    }
+
+    /// The icon currently installed in the notification area and the theme
+    /// it was drawn for, so `WM_SETTINGCHANGE` can swap ink without a redraw
+    /// storm (only when the taskbar theme actually flipped).
+    static CURRENT_ICON: AtomicUsize = AtomicUsize::new(0);
+    static CURRENT_LIGHT: AtomicBool = AtomicBool::new(false);
+
+    /// Re-read the taskbar theme and, if it flipped, rebuild the glyph and
+    /// hand it to the shell (`NIM_MODIFY`, icon only — the tip and callback
+    /// stay). Called on the tray thread from `WM_SETTINGCHANGE`.
+    unsafe fn refresh_icon_for_theme(hwnd: HWND) {
+        let light = taskbar_is_light();
+        if CURRENT_LIGHT.swap(light, Ordering::SeqCst) == light {
+            return;
+        }
+        let icon = brand_icon(light);
+        let mut nid = std::mem::zeroed::<NOTIFYICONDATAW>();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = TRAY_ICON_ID;
+        nid.uFlags = NIF_ICON;
+        nid.hIcon = icon;
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+        let old = CURRENT_ICON.swap(icon as usize, Ordering::SeqCst) as HICON;
+        // The shell copies the icon on NIM_ADD/NIM_MODIFY, and the hidden
+        // tray window never paints its class icon, so the old handle is
+        // free to go.
+        if !old.is_null() {
+            DestroyIcon(old);
+        }
+        tracing::info!(light, "tray icon re-inked for the taskbar theme");
+    }
+
     static GLOBAL_UI_PORT: AtomicU16 = AtomicU16::new(45716);
 
     unsafe extern "system" fn tray_wnd_proc(
@@ -1025,10 +1177,11 @@ mod windows_tray {
                 let event = lparam as u32;
                 let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
                 if event == WM_LBUTTONUP {
-                    // §226: left click toggles the WebView2 panel (the SPA
-                    // `#tray` route, like the macOS NSPanel). Without a usable
-                    // WebView2 runtime it degrades to the ADR-139 M4 path:
-                    // Tauri client deep link, else the browser console.
+                    // §226/§227: left click toggles the WebView2 panel (the
+                    // SPA `#tray` route, like the macOS NSPanel), hosted by a
+                    // user-context child process. If no child can be spawned
+                    // it degrades to the ADR-139 M4 path: Tauri client deep
+                    // link, else the browser console.
                     if !panel::toggle(hwnd, port) {
                         open_main(port);
                     }
@@ -1049,9 +1202,7 @@ mod windows_tray {
                     let exit_str = to_wide("退出 Tetherly");
 
                     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_STATUS, status_str.as_ptr());
-                    if panel::available() {
-                        AppendMenuW(menu, MF_STRING, IDM_PANEL, panel_str.as_ptr());
-                    }
+                    AppendMenuW(menu, MF_STRING, IDM_PANEL, panel_str.as_ptr());
                     AppendMenuW(menu, MF_STRING, IDM_DASHBOARD, dash_str.as_ptr());
                     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_ROAMING, roam_str.as_ptr());
@@ -1081,6 +1232,12 @@ mod windows_tray {
                 DestroyWindow(hwnd);
                 0
             }
+            // §227: the taskbar theme flipped (Settings → Colours); re-ink
+            // the monochrome glyph. Any WM_SETTINGCHANGE is cheap to check.
+            WM_SETTINGCHANGE => {
+                refresh_icon_for_theme(hwnd);
+                0
+            }
             // §6.3 tray takeover: poll the shared visibility flag and add /
             // delete the notification-area icon accordingly.
             WM_TIMER if wparam as u32 as usize == VIS_TIMER_ID => {
@@ -1092,6 +1249,12 @@ mod windows_tray {
                     nid.hWnd = hwnd;
                     nid.uID = TRAY_ICON_ID;
                     if want {
+                        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+                        nid.uCallbackMessage = WM_TRAYICON;
+                        nid.hIcon = CURRENT_ICON.load(Ordering::SeqCst) as HICON;
+                        let tip = to_wide("Tetherly · 运行中");
+                        let len = tip.len().min(nid.szTip.len() - 1);
+                        nid.szTip[..len].copy_from_slice(&tip[..len]);
                         Shell_NotifyIconW(NIM_ADD, &nid);
                     } else {
                         Shell_NotifyIconW(NIM_DELETE, &nid);
@@ -1116,7 +1279,11 @@ mod windows_tray {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
             let class_name = to_wide("TetherlyTrayClass");
-            let icon: HICON = brand_icon();
+            let light = taskbar_is_light();
+            let icon: HICON = brand_icon(light);
+            CURRENT_LIGHT.store(light, Ordering::SeqCst);
+            CURRENT_ICON.store(icon as usize, Ordering::SeqCst);
+            tracing::info!(light, "tray icon inked for the taskbar theme");
 
             let wndclass = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -1166,7 +1333,7 @@ mod windows_tray {
             nid.uID = TRAY_ICON_ID;
             nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
             nid.uCallbackMessage = WM_TRAYICON;
-            nid.hIcon = icon;
+            nid.hIcon = CURRENT_ICON.load(Ordering::SeqCst) as HICON;
 
             let tip = to_wide("Tetherly · 运行中");
             let len = tip.len().min(nid.szTip.len() - 1);
@@ -1408,8 +1575,15 @@ mod windows_tray {
     }
 }
 
+/// `data_dir` is forwarded to the §227 panel child (`--data-dir`) so it logs
+/// beside the daemon and can read the token file if the env var is lost.
 #[cfg(windows)]
-pub fn spawn_tray(ui_port: u16, _device_alias: String) -> Option<TrayHandle> {
+pub fn spawn_tray(
+    ui_port: u16,
+    _device_alias: String,
+    data_dir: std::path::PathBuf,
+) -> Option<TrayHandle> {
+    windows_tray_panel::launcher::set_data_dir(data_dir);
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::Builder::new()
         .name("tetherly-tray".into())
@@ -1424,7 +1598,11 @@ pub fn spawn_tray(ui_port: u16, _device_alias: String) -> Option<TrayHandle> {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn spawn_tray(_ui_port: u16, _device_alias: String) -> Option<TrayHandle> {
+pub fn spawn_tray(
+    _ui_port: u16,
+    _device_alias: String,
+    _data_dir: std::path::PathBuf,
+) -> Option<TrayHandle> {
     None
 }
 
@@ -1434,7 +1612,7 @@ mod tests {
 
     #[test]
     fn test_tray_spawn_and_stop() {
-        let handle = spawn_tray(45716, "TEST-PEER".into());
+        let handle = spawn_tray(45716, "TEST-PEER".into(), std::env::temp_dir());
         #[cfg(windows)]
         {
             assert!(handle.is_some());

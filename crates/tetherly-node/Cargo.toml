@@ -73,6 +73,8 @@ windows-sys = { version = "0.59", features = [
     # SystemOpener: launch "open" targets as the console user, not SYSTEM.
     "Win32_System_RemoteDesktop",
     "Win32_System_Environment",
+    # §227: taskbar light/dark theme for the monochrome tray glyph.
+    "Win32_System_Registry",
     # Tray panel (§226, src/platform/tray.rs windows_tray): per-DPI icon
     # size, DIB-section icon build, work-area/monitor anchoring, DWM rounded
     # corners on the popup.

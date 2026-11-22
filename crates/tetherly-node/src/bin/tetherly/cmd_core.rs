@@ -380,6 +380,7 @@ pub(crate) async fn run(
     };
     let ui_port = cfg.ui_port;
     let device_name = cfg.name.clone();
+    let tray_data_dir = cfg.data_dir.clone();
     // Input sharing is latency-critical: lift the daemon out of the
     // launcher-inherited BelowNormal class and pin a resident floor before
     // any hook starts (see platform::raise_daemon_responsiveness).
@@ -603,7 +604,7 @@ pub(crate) async fn run(
         }
     });
     // Spawn cross-platform desktop system tray presence (Mac status bar / Windows notification area)
-    let _tray = tetherly_node::platform::tray::spawn_tray(ui_port, device_name);
+    let _tray = tetherly_node::platform::tray::spawn_tray(ui_port, device_name, tray_data_dir);
 
     // §6.3 tray takeover watchdog: while a shell claims `tray_owner=client`
     // the built-in tray hides; if the shell goes silent past the reclaim

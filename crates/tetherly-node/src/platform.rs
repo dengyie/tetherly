@@ -149,6 +149,40 @@ fn opener_command_line(rundll32: &str, url: &str) -> Option<String> {
 /// rather than falling back to SYSTEM when no user token is available.
 #[cfg(windows)]
 fn open_as_console_user(url: &str) -> Result<(), CoreError> {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let rundll32 = format!(r"{root}\System32\rundll32.exe");
+    let line = opener_command_line(&rundll32, url)
+        .ok_or_else(|| CoreError::OpenRefused("unsafe characters in open target".into()))?;
+    let child = spawn_as_console_user(&rundll32, &line, &[])?;
+    // SAFETY: both handles were returned by CreateProcessAsUserW to us alone.
+    unsafe {
+        windows_sys::Win32::Foundation::CloseHandle(child.thread);
+        windows_sys::Win32::Foundation::CloseHandle(child.process);
+    }
+    Ok(())
+}
+
+/// A process started by [`spawn_as_console_user`]: the caller owns (and
+/// closes) both handles.
+#[cfg(windows)]
+pub(crate) struct ConsoleUserChild {
+    pub(crate) process: windows_sys::Win32::Foundation::HANDLE,
+    pub(crate) thread: windows_sys::Win32::Foundation::HANDLE,
+    pub(crate) pid: u32,
+}
+
+/// Start `app` with the raw command line `line` on the console user's
+/// desktop (`winsta0\default`) under that user's token and environment,
+/// plus `extra_env` appended to the block (§227: the tray-panel child gets
+/// its API token this way, never on the command line). No console window.
+/// Refuses when there is no interactive console session or the token is
+/// unavailable — the SYSTEM daemon never falls back to launching UI itself.
+#[cfg(windows)]
+pub(crate) fn spawn_as_console_user(
+    app: &str,
+    line: &str,
+    extra_env: &[(&str, &str)],
+) -> Result<ConsoleUserChild, CoreError> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::Environment::{
         CreateEnvironmentBlock, DestroyEnvironmentBlock,
@@ -163,13 +197,9 @@ fn open_as_console_user(url: &str) -> Result<(), CoreError> {
 
     let refused =
         |what: &str| CoreError::OpenRefused(format!("{what}: {}", std::io::Error::last_os_error()));
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    let rundll32 = format!(r"{root}\System32\rundll32.exe");
-    let line = opener_command_line(&rundll32, url)
-        .ok_or_else(|| CoreError::OpenRefused("unsafe characters in open target".into()))?;
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let app = wide(&rundll32);
-    let mut cmd = wide(&line);
+    let app_w = wide(app);
+    let mut cmd = wide(line);
     let mut desktop = wide(r"winsta0\default");
 
     // SAFETY: plain Win32 calls; every handle / environment block acquired
@@ -186,43 +216,73 @@ fn open_as_console_user(url: &str) -> Result<(), CoreError> {
         if WTSQueryUserToken(session, &mut token) == 0 {
             return Err(refused("WTSQueryUserToken"));
         }
-        let mut env: *mut core::ffi::c_void = std::ptr::null_mut();
-        let have_env = CreateEnvironmentBlock(&mut env, token, 0) != 0;
+        let mut raw_env: *mut core::ffi::c_void = std::ptr::null_mut();
+        let have_env = CreateEnvironmentBlock(&mut raw_env, token, 0) != 0;
+        // Copy the user's block and append ours: a block is `VAR=value\0`
+        // entries ending in an extra `\0`. Order is not significant.
+        let env_block: Option<Vec<u16>> = have_env.then(|| {
+            let mut out = Vec::new();
+            let mut p = raw_env as *const u16;
+            loop {
+                let mut len = 0usize;
+                while *p.add(len) != 0 {
+                    len += 1;
+                }
+                if len == 0 {
+                    break;
+                }
+                out.extend_from_slice(std::slice::from_raw_parts(p, len));
+                out.push(0);
+                p = p.add(len + 1);
+            }
+            for (k, v) in extra_env {
+                out.extend(format!("{k}={v}").encode_utf16());
+                out.push(0);
+            }
+            out.push(0);
+            out
+        });
+        if have_env {
+            DestroyEnvironmentBlock(raw_env);
+        }
         let mut si: STARTUPINFOW = std::mem::zeroed();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         si.lpDesktop = desktop.as_mut_ptr();
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
         let flags = CREATE_NO_WINDOW
-            | if have_env {
+            | if env_block.is_some() {
                 CREATE_UNICODE_ENVIRONMENT
             } else {
                 0
             };
+        let env_ptr = env_block
+            .as_ref()
+            .map(|b| b.as_ptr() as *mut core::ffi::c_void)
+            .unwrap_or(std::ptr::null_mut());
         let ok = CreateProcessAsUserW(
             token,
-            app.as_ptr(),
+            app_w.as_ptr(),
             cmd.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             0,
             flags,
-            if have_env { env } else { std::ptr::null_mut() },
+            env_ptr,
             std::ptr::null(),
             &si,
             &mut pi,
         );
         let err = (ok == 0).then(|| refused("CreateProcessAsUserW"));
-        if have_env {
-            DestroyEnvironmentBlock(env);
-        }
         CloseHandle(token);
         if let Some(e) = err {
             return Err(e);
         }
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+        Ok(ConsoleUserChild {
+            process: pi.hProcess,
+            thread: pi.hThread,
+            pid: pi.dwProcessId,
+        })
     }
-    Ok(())
 }
 
 impl Opener for SystemOpener {

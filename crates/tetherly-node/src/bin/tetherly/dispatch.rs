@@ -540,6 +540,11 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Blocked { json, ui_port } => {
             cmd_peers::blocked(json, ui_port).await?;
         }
+        // Handled in `main` before the runtime exists (it needs the main
+        // thread as a COM STA); reaching here means a non-Windows host.
+        Cmd::TrayPanel { .. } => {
+            anyhow::bail!("tray-panel is a Windows-only internal command");
+        }
     }
     Ok(())
 }

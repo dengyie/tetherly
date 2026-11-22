@@ -404,3 +404,10 @@
 - [x] v0.2.77 发版 + 双端部署（home-win PID 30856，受保护进程 3/3，日志无 icon 回退 warn）。
 - [ ] 真机：用户肉眼确认 home-win 图标正向清晰 + 左键面板弹出（无远程截图通道）。
 - [ ] 真机：v0.2.76 部署后肉眼确认菜单栏字形深/浅色反色正确。
+
+## §227 (2026-11-23) Windows 托盘单色图标 + 面板子进程化
+- [x] 根因：WebView2 不能在 LocalSystem 下建控制器（0x8000FFFF）→ 面板改为控制台用户子进程 `tetherly tray-panel`（令牌走 env），守护进程只做拉起/判活/关闭。
+- [x] 图标改单色模板 `.a8`，墨色随任务栏主题，`WM_SETTINGCHANGE` 热换。
+- [x] 门禁：mac fmt/clippy/tests 绿；msvc scratch clippy 绿。
+- [ ] CI check(windows) 绿（platform.rs Win32 改动仅此处校验）→ bump v0.2.78 → tag → release → deploy all → home-win 日志出现子进程 "tray panel: child spawned" / "WebView2 ready"。
+- [ ] 真机：用户肉眼确认黑白图标 + 左键面板弹出不再报错。
