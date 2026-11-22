@@ -401,5 +401,6 @@
 - [x] 图标：多尺寸 top-down 预乘 BGRA DIB + CreateIconIndirect（修 CreateIcon bottom-up 颠倒、单档 32px 发糊）；托盘线程 PerMonitorV2。
 - [x] 左键 WebView2 面板（tray_win_panel.rs，webview2-com 0.39 + windows 0.62 别名 windows062），`tetherlyTray` 全局桥垫片，traybridge.ts 先探 globalThis；运行时缺失降级开浏览器。
 - [x] msvc 交叉校验：scratch crate symlink 真源 `cargo check/clippy --target x86_64-pc-windows-msvc -D warnings` 绿；Tauri 壳 GLYPH 改引 tray-32.rgba。
-- [ ] 真机：v0.2.77 部署后用户肉眼确认 home-win 图标正向清晰 + 左键面板弹出。
+- [x] v0.2.77 发版 + 双端部署（home-win PID 30856，受保护进程 3/3，日志无 icon 回退 warn）。
+- [ ] 真机：用户肉眼确认 home-win 图标正向清晰 + 左键面板弹出（无远程截图通道）。
 - [ ] 真机：v0.2.76 部署后肉眼确认菜单栏字形深/浅色反色正确。
