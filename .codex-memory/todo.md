@@ -416,5 +416,5 @@
 - [x] 根因：home-win 未注册 `tetherly://` scheme（HKCR/HKCU/HKLM Classes 全无，机上没装 Tauri 客户端），`cmd /C start "" tetherly://open` 弹 OpenWith「需要新应用打开此 tetherly 链接」却返回 0 → `open_client_or_dashboard` 误判成功，浏览器 dashboard 回退永不执行；另 CREATE_NO_WINDOW 子进程里起 `cmd` 会闪控制台。
 - [x] 修法：新 `apitoken_win.rs`（`client_scheme_registered()` RegOpenKeyExW `HKCR\tetherly\shell\open\command`；`shell_open()` ShellExecuteW "open"，返回值 >32 为成功）；`open_client_or_dashboard` Windows 分支只在 scheme 已注册时才试深链，否则直接 ShellExecuteW 开 `dashboard_url`（带 `#token=`）。mac/linux 分支语义不变。
 - [x] 门禁：msvc scratch clippy 绿（apitoken 改文件模块 + symlink apitoken_win.rs）；mac fmt/clippy/tests 绿。966c83a 推 main。
-- [ ] bump v0.2.80（b21cfd7）→ CI → tag → release → deploy all → home-win 日志无 error，Chrome 打开 `http://127.0.0.1:45716/#token=…`。
+- [x] bump v0.2.80（b21cfd7）→ CI 45053142761 六 job 绿 → tag → release 45054109452 绿 12 资产 → `deploy.sh --target all --tag v0.2.80` exit 0：Mac health 0.2.80；home-win 热重启 old_pid 32284 → new_pid 8360（SYSTEM，Session 1），health 0.2.80，受保护进程 3/3 不动，token 已轮换重取；日志启动即 `tray icon inked light=false`，无 error；Session 1 无残留 OpenWith/面板子进程。
 - [ ] 真机：用户点「打开主窗口」应直接开浏览器 dashboard，不再弹「需要新应用」。
