@@ -229,6 +229,63 @@ fn vault_enabled_for(_dir: &Path) -> bool {
     vault_available()
 }
 
+/// String SID of the user logged on at the physical console (the one
+/// whose taskbar shows our icon), via the WTS user token. `None` with
+/// nobody logged on or without the privilege WTSQueryUserToken needs
+/// (only LocalSystem holds SE_TCB_NAME).
+#[cfg(windows)]
+pub(crate) fn console_user_sid() -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTSGetActiveConsoleSessionId, WTSQueryUserToken,
+    };
+    // SAFETY: the WTS token handle is closed on every path after use; the
+    // TOKEN_USER view points into `buf`, sized by the first query; the
+    // string SID is LocalAlloc'd by ConvertSidToStringSidW and freed here.
+    unsafe {
+        let session = WTSGetActiveConsoleSessionId();
+        if session == u32::MAX {
+            return None;
+        }
+        let mut token: HANDLE = std::ptr::null_mut();
+        if WTSQueryUserToken(session, &mut token) == 0 {
+            return None;
+        }
+        let mut needed: u32 = 0;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        if needed == 0 {
+            CloseHandle(token);
+            return None;
+        }
+        let mut buf = vec![0u8; needed as usize];
+        let ok = GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        );
+        CloseHandle(token);
+        if ok == 0 {
+            return None;
+        }
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut str_sid: *mut u16 = std::ptr::null_mut();
+        if ConvertSidToStringSidW(user.User.Sid, &mut str_sid) == 0 || str_sid.is_null() {
+            return None;
+        }
+        let mut n = 0usize;
+        while *str_sid.add(n) != 0 {
+            n += 1;
+        }
+        let out = String::from_utf16_lossy(std::slice::from_raw_parts(str_sid, n));
+        LocalFree(str_sid.cast());
+        Some(out)
+    }
+}
+
 /// True when this process's primary token is LocalSystem (`S-1-5-18`).
 ///
 /// Windows only. Best effort: any token API failure returns false, which

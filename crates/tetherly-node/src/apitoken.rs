@@ -174,6 +174,15 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 /// user-profile ACL (which grants the interactive user) applies.
 #[cfg(windows)]
 fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    create_private_with_sddl(path, PRIVATE_SDDL)
+}
+
+/// SDDL of [`create_private`]: protected, SYSTEM + Administrators + owner.
+const PRIVATE_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)";
+
+/// [`create_private`] with an explicit SDDL DACL string (no trailing NUL).
+#[cfg(windows)]
+fn create_private_with_sddl(path: &Path, sddl: &str) -> std::io::Result<std::fs::File> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::{LocalFree, INVALID_HANDLE_VALUE};
@@ -185,9 +194,7 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
         CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE,
     };
 
-    let sddl: Vec<u16> = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)\0"
-        .encode_utf16()
-        .collect();
+    let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: sddl is NUL-terminated; sd receives a LocalAlloc'd descriptor
     // that is freed below on every path.
@@ -248,10 +255,10 @@ pub fn read(data_dir: &Path) -> Option<String> {
 
 /// Mint the §4.4 client token (grants [`Tier::Write`]) and replace
 /// `<data_dir>/client.token` with it, same `CREATE_NEW` discipline as
-/// [`issue`]. Unix: 0600. Windows: protected DACL granting full control to
-/// the console user's SID and SYSTEM only — the caller passes the console
-/// user's LOCALAPPDATA as `data_dir`, so the file is readable by the shell
-/// running as that user and by the SYSTEM daemon, nobody else.
+/// [`issue`]. Unix: 0600. Windows: protected DACL ([`client_token_sddl`]):
+/// full control for SYSTEM, Administrators and the owner, read for the
+/// console user — the caller passes the console user's LOCALAPPDATA as
+/// `data_dir`, so the shell running as that user can read it.
 pub fn issue_client(data_dir: &Path) -> std::io::Result<String> {
     let mut raw = [0u8; 32];
     getrandom::getrandom(&mut raw).map_err(std::io::Error::other)?;
@@ -302,13 +309,34 @@ fn create_client_private(path: &Path) -> std::io::Result<std::fs::File> {
     create_private(path)
 }
 
-/// Windows client-token DACL: full control for SYSTEM, Administrators and
-/// the file owner (the console user, because the daemon writes into *their*
-/// LOCALAPPDATA with `--data-dir`); no inherited ACEs. The generic
-/// `api.token` DACL already is exactly that, so it is reused.
+/// Windows client-token DACL: [`client_token_sddl`] for the console user.
+/// The production daemon runs as LocalSystem, so the file's *owner* is
+/// SYSTEM and the `OW` ACE alone never reached the shell running as the
+/// console user (§233: "no client.token or api.token", client exits).
 #[cfg(windows)]
 fn create_client_private(path: &Path) -> std::io::Result<std::fs::File> {
-    create_private(path)
+    let sid = crate::cred::console_user_sid();
+    create_private_with_sddl(path, &client_token_sddl(sid.as_deref()))
+}
+
+/// Protected DACL for `client.token`: the [`create_private`] ACEs plus
+/// read for the console user's SID — or, with nobody at the console yet
+/// (daemon started at boot before logon), for INTERACTIVE (`IU`), which is
+/// the set of principals that could run the shell at all. A SID that is
+/// not a plain `S-1-<digits>-…` string is treated as absent so it can
+/// never splice extra ACEs into the descriptor.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn client_token_sddl(console_sid: Option<&str>) -> String {
+    let well_formed = |sid: &&str| {
+        sid.strip_prefix("S-1-").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .split('-')
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        })
+    };
+    let reader = console_sid.filter(well_formed).unwrap_or("IU");
+    format!("{PRIVATE_SDDL}(A;;FR;;;{reader})")
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -392,6 +420,34 @@ pub fn open_client_or_dashboard(ui_port: u16, token: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_token_sddl_grants_console_user_read_when_daemon_owns_the_file() {
+        // §233: the SYSTEM daemon owns client.token, so OWNER RIGHTS alone
+        // left the console user's shell unable to read it.
+        let sddl = super::client_token_sddl(Some("S-1-5-21-111-222-333-1001"));
+        assert_eq!(
+            sddl,
+            "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FR;;;S-1-5-21-111-222-333-1001)"
+        );
+    }
+
+    #[test]
+    fn client_token_sddl_falls_back_to_interactive_users_without_console_user() {
+        let sddl = super::client_token_sddl(None);
+        assert_eq!(sddl, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FR;;;IU)");
+    }
+
+    #[test]
+    fn client_token_sddl_rejects_malformed_sid_instead_of_injecting_aces() {
+        for bad in ["", "S-1-5-21-1)(A;;FA;;;WD", "WD", "S-1-", "S-1-5-x"] {
+            assert_eq!(
+                super::client_token_sddl(Some(bad)),
+                "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FR;;;IU)",
+                "{bad:?}"
+            );
+        }
+    }
+
     #[test]
     fn v1_tiers_classify_health_open_reads_read_writes_write_admin_admin() {
         use super::{v1_required_tier as t, Tier};

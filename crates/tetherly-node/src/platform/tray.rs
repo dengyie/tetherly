@@ -916,21 +916,14 @@ mod windows_tray {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, WPARAM,
-    };
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
         CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
         DIB_RGB_COLORS,
     };
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_USERS,
         KEY_READ, REG_DWORD,
-    };
-    use windows_sys::Win32::System::RemoteDesktop::{
-        WTSGetActiveConsoleSessionId, WTSQueryUserToken,
     };
     use windows_sys::Win32::UI::HiDpi::{
         SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -1104,7 +1097,7 @@ mod windows_tray {
     pub(super) fn taskbar_is_light() -> bool {
         const SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
         let (root, path): (HKEY, String) = if crate::cred::process_runs_as_local_system() {
-            match console_user_sid() {
+            match crate::cred::console_user_sid() {
                 Some(sid) => (HKEY_USERS, format!(r"{sid}\{SUBKEY}")),
                 None => return false,
             }
@@ -1134,51 +1127,6 @@ mod windows_tray {
             RegCloseKey(key);
         }
         rc == ERROR_SUCCESS && kind == REG_DWORD && data != 0
-    }
-
-    /// String SID of the user logged on at the physical console (the one
-    /// whose taskbar shows our icon), via the WTS user token.
-    fn console_user_sid() -> Option<String> {
-        unsafe {
-            let session = WTSGetActiveConsoleSessionId();
-            if session == u32::MAX {
-                return None;
-            }
-            let mut token: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
-            if WTSQueryUserToken(session, &mut token) == 0 {
-                return None;
-            }
-            let mut needed: u32 = 0;
-            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
-            if needed == 0 {
-                CloseHandle(token);
-                return None;
-            }
-            let mut buf = vec![0u8; needed as usize];
-            let ok = GetTokenInformation(
-                token,
-                TokenUser,
-                buf.as_mut_ptr().cast(),
-                needed,
-                &mut needed,
-            );
-            CloseHandle(token);
-            if ok == 0 {
-                return None;
-            }
-            let user = &*(buf.as_ptr() as *const TOKEN_USER);
-            let mut str_sid: *mut u16 = std::ptr::null_mut();
-            if ConvertSidToStringSidW(user.User.Sid, &mut str_sid) == 0 || str_sid.is_null() {
-                return None;
-            }
-            let mut n = 0usize;
-            while *str_sid.add(n) != 0 {
-                n += 1;
-            }
-            let out = String::from_utf16_lossy(std::slice::from_raw_parts(str_sid, n));
-            windows_sys::Win32::Foundation::LocalFree(str_sid.cast());
-            Some(out)
-        }
     }
 
     /// The icon currently installed in the notification area and the theme
