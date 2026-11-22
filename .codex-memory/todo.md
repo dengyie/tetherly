@@ -418,3 +418,8 @@
 - [x] 门禁：msvc scratch clippy 绿（apitoken 改文件模块 + symlink apitoken_win.rs）；mac fmt/clippy/tests 绿。966c83a 推 main。
 - [x] bump v0.2.80（b21cfd7）→ CI 45053142761 六 job 绿 → tag → release 45054109452 绿 12 资产 → `deploy.sh --target all --tag v0.2.80` exit 0：Mac health 0.2.80；home-win 热重启 old_pid 32284 → new_pid 8360（SYSTEM，Session 1），health 0.2.80，受保护进程 3/3 不动，token 已轮换重取；日志启动即 `tray icon inked light=false`，无 error；Session 1 无残留 OpenWith/面板子进程。
 - [ ] 真机：用户点「打开主窗口」应直接开浏览器 dashboard，不再弹「需要新应用」。
+
+## §229 (2026-11-23) Windows 面板「键鼠在本机」判断反了
+- [x] 根因：`Input.seat` 是节点视角——controller 的 `remote`=「我的光标跑到对端」，target 的 `remote`=「controller 光标进入本屏」（runtime/input.rs pump `client.focused()`）；Tray.svelte/Overview.svelte 一律按 controller 语义渲染，所以 Windows(target) 两种状态全反：Mac 光标在 Mac 时 Windows seat=local 显示「键鼠在本机」。实证：Mac `/api/v1/input` seat=local channel_open=true role=controller；Windows seat=local channel_open=false role=target。
+- [x] 修法：`tetherly_api::Input` 新增 `role: Option<String>` + `cursor_here: bool`（`model::input_cursor_here(role, seat)`：receiving 角色取 seat==remote，其余取 seat==local；四角色+无隧道单测）；`TETHERLY_API_BLESS=1 cargo test -p tetherly-api bindings` 重生成 api.ts；store 新增 `cursorAway/isDriving/isDriven/peerName`（peer id→设备名）；Tray/Overview 全按 `cursor_here` 标注，「收回/Ctrl+Alt+Esc」仅 controller 显示，被驱动的 target 显示「<peer> 正在控制本机」。
+- [x] TDD：tray.test / flows.test 先红（target 角色用例）后绿；fixtures/contract 补字段；`client/dist` 重建（release.yml 会校验 dist 不陈旧）。门禁：fmt/clippy/workspace tests/pnpm check+test+build 全绿。1ebd600 推 main。
