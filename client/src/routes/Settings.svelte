@@ -26,6 +26,27 @@
     );
   }
 
+  // Four-finger swipe bindings: each direction is a free choice over the
+  // seven intents; the PATCH echoes the whole map back.
+  const GESTURE_ACTIONS: ReadonlyArray<{ value: string; label: string }> = [
+    { value: "app_switch_next", label: "下一个窗口" },
+    { value: "app_switch_prev", label: "上一个窗口" },
+    { value: "overview_toggle", label: "桌面总览（任务视图）" },
+    { value: "desktop_left", label: "虚拟桌面左移" },
+    { value: "desktop_right", label: "虚拟桌面右移" },
+    { value: "show_desktop", label: "显示桌面" },
+    { value: "none", label: "无操作" },
+  ];
+  async function patchGestureBinding(gesture: "swipe4_left" | "swipe4_right" | "swipe4_up" | "swipe4_down", action: string) {
+    await withToast(
+      () =>
+        api.patchGestureMap({ [gesture]: action }).then((m) => {
+          gestureMap = m;
+        }),
+      "手势映射已更新",
+    );
+  }
+
   // Local draft mirrors the event-fed store; PATCH result arrives back as a
   // settings.changed event, so edits only need to be held here between
   // submit and the round-trip.
@@ -113,8 +134,32 @@
     <div class="empty">等待手势配置…</div>
   {:else}
     <div class="row">
-      <div class="main"><div class="name">四指滑动连续切换</div><div class="sub">开启后一次滑动按住 Alt，连续滑动沿同方向循环切换窗口；关闭则每次滑动直接 Alt+Tab 切一次。默认右滑=下一个窗口、左滑=上一个窗口。仅 Windows 宿主生效。</div></div>
+      <div class="main"><div class="name">四指滑动连续切换</div><div class="sub">开启后一次滑动按住 Alt，连续滑动沿同方向循环切换窗口；关闭则每次滑动直接 Alt+Tab 切一次。仅 Windows 宿主生效。</div></div>
       <Switch checked={gestureMap.app_switch_mode === "sticky_chord"} label="四指滑动连续切换" onchange={(v) => patchGestureMode(v)} />
+    </div>
+    <div class="row">
+      <div class="main"><div class="name">四指左滑</div></div>
+      <select class="input" aria-label="四指左滑动作" onchange={(e) => void patchGestureBinding("swipe4_left", e.currentTarget.value)}>
+        {#each GESTURE_ACTIONS as a}<option value={a.value} selected={gestureMap.swipe4_left === a.value}>{a.label}</option>{/each}
+      </select>
+    </div>
+    <div class="row">
+      <div class="main"><div class="name">四指右滑</div></div>
+      <select class="input" aria-label="四指右滑动作" onchange={(e) => void patchGestureBinding("swipe4_right", e.currentTarget.value)}>
+        {#each GESTURE_ACTIONS as a}<option value={a.value} selected={gestureMap.swipe4_right === a.value}>{a.label}</option>{/each}
+      </select>
+    </div>
+    <div class="row">
+      <div class="main"><div class="name">四指上滑</div></div>
+      <select class="input" aria-label="四指上滑动作" onchange={(e) => void patchGestureBinding("swipe4_up", e.currentTarget.value)}>
+        {#each GESTURE_ACTIONS as a}<option value={a.value} selected={gestureMap.swipe4_up === a.value}>{a.label}</option>{/each}
+      </select>
+    </div>
+    <div class="row">
+      <div class="main"><div class="name">四指下滑</div></div>
+      <select class="input" aria-label="四指下滑动作" onchange={(e) => void patchGestureBinding("swipe4_down", e.currentTarget.value)}>
+        {#each GESTURE_ACTIONS as a}<option value={a.value} selected={gestureMap.swipe4_down === a.value}>{a.label}</option>{/each}
+      </select>
     </div>
   {/if}
 </div>

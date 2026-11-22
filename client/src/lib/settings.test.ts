@@ -37,6 +37,19 @@ describe("settings page", () => {
     ]);
   });
 
+  it("PATCHes a remapped gesture binding and echoes the map back", async () => {
+    const t = mount();
+    // The gesture map self-fetches on mount; flush before the selects exist.
+    await new Promise((r) => setTimeout(r, 0));
+    const sel = screen.getByRole("combobox", { name: "四指左滑动作" }) as HTMLSelectElement;
+    sel.value = "app_switch_next";
+    await fireEvent.change(sel);
+    expect(t.calls).toEqual([
+      { method: "GET", path: "/api/v1/input/gesture", body: undefined },
+      { method: "PATCH", path: "/api/v1/input/gesture", body: { swipe4_left: "app_switch_next" } },
+    ]);
+  });
+
   it("keeps a focused switch enabled while its PATCH is pending", async () => {
     const t = mount(settings(), () => new Promise(() => {}));
     const sw = screen.getByRole("switch", { name: "自动重连" }) as HTMLButtonElement;
