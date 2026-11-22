@@ -410,4 +410,11 @@
 - [x] 图标改单色模板 `.a8`，墨色随任务栏主题，`WM_SETTINGCHANGE` 热换。
 - [x] 门禁：mac fmt/clippy/tests 绿；msvc scratch clippy 绿。
 - [x] CI check(windows) 绿 → v0.2.78 已被另一会话占用，改 bump **v0.2.79**（e52b190）→ tag → release 12 资产 → deploy all 绿（Mac/home-win health 0.2.79，受保护进程 3/3，daemon PID 32284 SYSTEM Session 1）→ home-win 日志 `tray icon inked for the taskbar theme light=false`；子进程链用 Session 1 交互任务计划（`Register-ScheduledTask -LogonType Interactive`）直接跑 `tetherly tray-panel --ui-port 45716` 冒烟：`child up` → 230 ms `WebView2 ready` → exit 0。注意 ssh 会话（Session 0）跑子进程必败 0x80070578（无交互桌面），不是 bug。
-- [ ] 真机：用户肉眼确认黑白图标 + 左键面板弹出不再报错（守护进程 SYSTEM→CreateProcessAsUser 拉起子进程这一段只有真点击能覆盖，看日志 `tray panel: child spawned`）。
+- [x] 真机：用户真点击已覆盖 SYSTEM→CreateProcessAsUser 段（日志 17:56:17Z `child spawned pid=29868 as_system=true` → `child up` → `WebView2 ready`）；黑白图标待用户肉眼确认。
+
+## §228 (2026-11-23) Windows 面板「打开主窗口」报错
+- [x] 根因：home-win 未注册 `tetherly://` scheme（HKCR/HKCU/HKLM Classes 全无，机上没装 Tauri 客户端），`cmd /C start "" tetherly://open` 弹 OpenWith「需要新应用打开此 tetherly 链接」却返回 0 → `open_client_or_dashboard` 误判成功，浏览器 dashboard 回退永不执行；另 CREATE_NO_WINDOW 子进程里起 `cmd` 会闪控制台。
+- [x] 修法：新 `apitoken_win.rs`（`client_scheme_registered()` RegOpenKeyExW `HKCR\tetherly\shell\open\command`；`shell_open()` ShellExecuteW "open"，返回值 >32 为成功）；`open_client_or_dashboard` Windows 分支只在 scheme 已注册时才试深链，否则直接 ShellExecuteW 开 `dashboard_url`（带 `#token=`）。mac/linux 分支语义不变。
+- [x] 门禁：msvc scratch clippy 绿（apitoken 改文件模块 + symlink apitoken_win.rs）；mac fmt/clippy/tests 绿。966c83a 推 main。
+- [ ] bump v0.2.80（b21cfd7）→ CI → tag → release → deploy all → home-win 日志无 error，Chrome 打开 `http://127.0.0.1:45716/#token=…`。
+- [ ] 真机：用户点「打开主窗口」应直接开浏览器 dashboard，不再弹「需要新应用」。
