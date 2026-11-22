@@ -537,11 +537,45 @@ mod macos_tray {
         )
     }
 
+    /// Build the panel (if needed) and start loading the SPA page without
+    /// showing it. The first build spawns the WebContent process and the
+    /// page load runs the whole SPA bootstrap — hundreds of ms, far more on
+    /// a loaded host — which used to land on the user's click (§232).
+    fn ensure_panel_loaded(
+        slot: &mut Option<PanelState>,
+        ui_port: u16,
+        mtm: MainThreadMarker,
+    ) -> &mut PanelState {
+        let state = slot.get_or_insert_with(|| build_panel(mtm, ui_port));
+        if !state.loaded {
+            load_panel_page(&state.web, ui_port);
+            state.loaded = true;
+        }
+        state
+    }
+
+    /// §232: pre-warm the panel shortly after the status item appears so the
+    /// click only has to order an already-rendered window front. Skipped
+    /// while the client owns the tray (the built-in item is hidden then).
+    fn prewarm_panel(ui_port: u16, mtm: MainThreadMarker) {
+        if !super::tray_visible() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        PANEL.with(|slot| {
+            ensure_panel_loaded(&mut slot.borrow_mut(), ui_port, mtm);
+        });
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "tray panel pre-warmed"
+        );
+    }
+
     fn toggle_panel(button: &NSStatusBarButton, ui_port: u16, mtm: MainThreadMarker) {
         let now = now_ms();
         PANEL.with(|slot| {
             let mut slot = slot.borrow_mut();
-            let state = slot.get_or_insert_with(|| build_panel(mtm, ui_port));
+            let state = ensure_panel_loaded(&mut slot, ui_port, mtm);
             if state.panel.isVisible() {
                 state.panel.orderOut(None);
                 LAST_HIDE_MS.store(now, Ordering::Relaxed);
@@ -549,10 +583,6 @@ mod macos_tray {
             }
             if now.saturating_sub(LAST_HIDE_MS.load(Ordering::Relaxed)) < RETOGGLE_GUARD_MS {
                 return;
-            }
-            if !state.loaded {
-                load_panel_page(&state.web, ui_port);
-                state.loaded = true;
             }
             state
                 .panel
@@ -613,6 +643,13 @@ mod macos_tray {
             #[unsafe(method(quitTetherly:))]
             fn quit_tetherly(&self, _sender: &NSMenuItem) {
                 std::process::exit(0);
+            }
+
+            /// §232: one-shot timer shortly after launch — build and load
+            /// the panel off the click path.
+            #[unsafe(method(prewarmPanel:))]
+            fn prewarm_panel_tick(&self, _timer: &objc2_foundation::NSTimer) {
+                prewarm_panel(self.ivars().ui_port, self.mtm());
             }
 
             /// §6.3 tray takeover: run-loop timer tick — fold the shared
@@ -820,6 +857,18 @@ mod macos_tray {
                 );
             objc2_foundation::NSRunLoop::currentRunLoop()
                 .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+            // §232: pre-warm the panel once the run loop is up (1.5 s keeps
+            // it off the daemon's own startup path).
+            let warm =
+                objc2_foundation::NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                    1.5,
+                    &target,
+                    sel!(prewarmPanel:),
+                    None,
+                    false,
+                );
+            objc2_foundation::NSRunLoop::currentRunLoop()
+                .addTimer_forMode(&warm, objc2_foundation::NSRunLoopCommonModes);
         }
 
         // The status item and target must outlive `app.run()` (which never
