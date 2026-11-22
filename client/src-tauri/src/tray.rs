@@ -156,10 +156,10 @@ pub fn tint(state: TrayState) -> (u8, u8, u8) {
 }
 
 /// The 32×32 embedded tray glyph: the mango brand mark
-/// (`assets/brand/tray-32x32.rgba`, straight-alpha RGBA, top-down), copied
+/// (`assets/brand/tray-32.rgba`, straight-alpha RGBA, top-down), copied
 /// into a `const` so no asset file is loaded at runtime.
 /// [`TrayState::tinted_icon`] paints the state badge over its corner.
-pub const GLYPH: [u8; 32 * 32 * 4] = *include_bytes!("../../../assets/brand/tray-32x32.rgba");
+pub const GLYPH: [u8; 32 * 32 * 4] = *include_bytes!("../../../assets/brand/tray-32.rgba");
 
 /// State badge geometry: centre and radius (pixels) of the dot painted by
 /// [`TrayState::tinted_icon`]. A 1px dark ring keeps it legible on both light

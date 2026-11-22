@@ -37,8 +37,9 @@
     - `退出 Tetherly`
 - **Windows 任务栏通知区 (`Shell_NotifyIconW`)**：
   * 在 Session 2 交互上下文中注册轻量隐藏窗口（`WNDCLASSEXW`）与消息泵循环（`GetMessageW` / `DispatchMessageW`）。
-  * 单击/双击托盘图标：拉起默认浏览器访问 `http://127.0.0.1:45716`。
-  * 右键弹出原生菜单（`TrackPopupMenuEx`）：`Tetherly · 运行中` / `打开控制台 (127.0.0.1:45716)` / `键鼠漫游：活跃` / `退出 Tetherly`（§225 起去 emoji，与 macOS 菜单同风格；WebView2 面板暂未实现）。
+  * 图标（§226 起）：`assets/brand/tray-{16,20,24,32,48}.rgba` 多尺寸品牌位图，按 `GetSystemMetrics(SM_CXSMICON)` 取最近的 ≥ 尺寸，`CreateDIBSection`（负 `biHeight` = 自上而下、预乘 BGRA）+ 全零 1bpp 掩码 → `CreateIconIndirect`；托盘线程 `SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)`。此前 `CreateIcon` 把 RGBA 翻成 bottom-up 再喂 XOR 位（XOR 位本身是 top-down）导致图标上下颠倒，且只有 32px 一档被系统缩成 16px 而发糊。
+  * 单击托盘图标（§226 起）：切换 Magpie 风格面板——`WS_POPUP|WS_EX_TOOLWINDOW|WS_EX_TOPMOST` 无边框窗（DWM 圆角）内嵌 WebView2（`webview2-com 0.39`，透明底色，用户数据目录 `%LOCALAPPDATA%\tetherly\webview2`），加载 `http://127.0.0.1:<ui>/#tray&token=…`（380×468，`Shell_NotifyIconGetRect` 锚定图标、按工作区推断任务栏方位并夹取）。`AddScriptToExecuteOnDocumentCreated` 注入 `globalThis.tetherlyTray.postMessage` 垫片转发到 `chrome.webview.postMessage`，面板收 `open-main`/`close`/`quit`/`resize` 与 macOS 同协议；失去激活（`WM_ACTIVATE` `WA_INACTIVE`）即隐藏。WebView2 运行时缺失时一次性降级：单击直接开浏览器控制台。双击：收起面板并打开主界面。
+  * 右键弹出原生菜单（`TrackPopupMenuEx`）：`Tetherly · 运行中` / `打开控制台 (127.0.0.1:45716)` / `键鼠漫游：活跃` / `退出 Tetherly`（§225 起去 emoji，与 macOS 菜单同风格；§226 起当 WebView2 可用时在状态行后多一项 `打开面板`）。
 
 ### 2. 零扰民权限治理与持久化 App Bundle 规范
 

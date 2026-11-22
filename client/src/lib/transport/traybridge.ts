@@ -21,7 +21,19 @@ type TrayAction =
 // own WebKit bridge never exposes that name, so this probe is unambiguous.
 type WebKitBridge = { messageHandlers?: { tetherlyTray?: { postMessage(message: string): void } } };
 
-function webkitBridge(): { postMessage(message: string): void } | null {
+type TrayBridge = { postMessage(message: string): void };
+
+// Daemon tray panel on Windows (§226): the WebView2 host installs a
+// `globalThis.tetherlyTray` shim (over `chrome.webview.postMessage`) before
+// any document script runs. Probed first because the Tauri shell on Windows
+// also runs in WebView2 and uses `chrome.webview` for its own IPC — only the
+// daemon panel defines this global.
+function globalBridge(): TrayBridge | null {
+  const b = (globalThis as { tetherlyTray?: Partial<TrayBridge> }).tetherlyTray;
+  return b && typeof b.postMessage === "function" ? (b as TrayBridge) : null;
+}
+
+function webkitBridge(): TrayBridge | null {
   return (globalThis as { webkit?: WebKitBridge }).webkit?.messageHandlers?.tetherlyTray ?? null;
 }
 
@@ -41,11 +53,11 @@ export const TRAY_ACTION_CHANNEL = "tetherly://tray-action";
 export const emitter = {
   send(action: string, extra: Record<string, unknown> = {}): void {
     const t = tauriEvent();
-    const wk = webkitBridge();
+    const bridge = globalBridge() ?? webkitBridge();
     const payload = { action, ...extra };
-    if (wk) {
+    if (bridge) {
       try {
-        wk.postMessage(JSON.stringify(payload));
+        bridge.postMessage(JSON.stringify(payload));
       } catch {
         /* handler torn down mid-flight */
       }

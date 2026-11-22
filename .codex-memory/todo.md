@@ -25,7 +25,7 @@
 - [x] **§222 布局/设置页 slider/Switch busy 期间改 aria-busy（不再 disabled 吞键盘）**：真机键盘走查发现 PATCH 在途 disabled 会 blur 获焦控件；layout.test +1、settings.test.ts 新建 3 例；vitest 66 / playwright 5 绿。
 - [x] **§221 布局页本机分辨率自动探测（v0.2.73）**：platform::local_display_probe（mac CoreGraphics 点尺寸+scale / Windows screen_size）→ TopologyLayout.display_manual + apply_display_probe 纯函数（启动/报告/广播前刷新，input 热路径不碰）；契约 Layout.display_auto / TopologyConfigPatch.display_auto（几何 PATCH 自动固定，display_auto:true 恢复并重探）；布局页「自动检测/手动设置」徽标 + 恢复自动按钮。node 354 / api 43 / vitest 62 / playwright 5 绿。待验：Windows session-0 探测值是否为真实桌面尺寸。
 - [x] **§220 v0.2.71 真机深测修复（v0.2.72）**：SSE 外壳剥离（transport.ts unwrapEventData + src-tauri events.rs unwrap_payload）、HttpTransport 双前缀 404、Tauri seq→id、tray SnapshotSlice.general 可选、stores/hydrate.ts 快照后 REST 补水五段（daemon 首发只有 snapshot）；e2e mock 对齐真 wire；vitest 61 / playwright 5 / tauri cargo 21 / clippy / fmt 绿；真机双端九页全有数据。待改进：布局页本机分辨率改为 daemon 探测回填。
-- [x] **§219 mango 品牌图标 + 主题（v0.2.71）**：assets/brand/ 存源图 1024 与派生 tray-32x32.rgba / menubar-72x72.png；client/src-tauri/icons/* 全套由 `cargo tauri icon` 重生成；SPA logo（brand.ts 复用 128x128.png）+ data-URI favicon；Tailwind 主题 indigo/violet → brand(#f87800)/leaf(#50b010)；Tauri 壳托盘 GLYPH 改品牌位图 + 右下状态徽标；daemon Windows 托盘 CreateIcon(32bpp BGRA) 品牌图标、macOS 菜单栏 NSImage 18pt；package-macos-app.sh 写 CFBundleIconFile。附带修 release.yml build-linux：§212 arch 门禁用 `file` 但 bullseye 容器未装（v0.2.70 publish 因此 skipped，发布不可追加 → v0.2.71 重发）。
+- [x] **§219 mango 品牌图标 + 主题（v0.2.71）**：assets/brand/ 存源图 1024 与派生 tray-32x32.rgba（§226 起改为 tray-{16,20,24,32,48}.rgba） / menubar-72x72.png；client/src-tauri/icons/* 全套由 `cargo tauri icon` 重生成；SPA logo（brand.ts 复用 128x128.png）+ data-URI favicon；Tailwind 主题 indigo/violet → brand(#f87800)/leaf(#50b010)；Tauri 壳托盘 GLYPH 改品牌位图 + 右下状态徽标；daemon Windows 托盘 CreateIcon(32bpp BGRA) 品牌图标、macOS 菜单栏 NSImage 18pt；package-macos-app.sh 写 CFBundleIconFile。附带修 release.yml build-linux：§212 arch 门禁用 `file` 但 bullseye 容器未装（v0.2.70 publish 因此 skipped，发布不可追加 → v0.2.71 重发）。
 - [x] **§217 桌面客户端重做（awesome-ui kit，本地 GREEN，随 v0.2.70 发布）**：分支 feat/desktop-client-redesign → main；设计稿与计划在 docs/superpowers/。门禁 svelte-check 0/0、vitest 54、playwright 5（e2e mock 根路径修复）、build:ci dist 零差异。v0.2.70 同时携带 §179–§216 未发布修复。真机：双端 dashboard 新 UI 观感、布局编辑器连边/同步为 manual 观察项。
 - [x] 详细合同见 [`docs/REVIEW_REMEDIATION_PLAN.md`](../docs/REVIEW_REMEDIATION_PLAN.md)；发布 checklist 现场证据已全部记录于其 §8。
 
@@ -395,5 +395,11 @@
 ## §225 (2026-11-22) 菜单栏 UI 抄 Magpie 面板
 - [x] macOS 状态项 template 字形 + 左键 frosted WKWebView 面板（`#tray&token=`、`tetherlyTray` 桥、内容自适应高度）+ 右键干净菜单；SPA Tray 路由重写；Tauri 壳 resize 跟随；ADR-134 更新。
 - [x] 隔离第二节点冒烟截图通过（380×338 空态面板）。
-- [ ] Windows：WebView2 托盘面板（当前仅去 emoji 的文本菜单）。
+- [x] Windows：WebView2 托盘面板（§226，v0.2.77）。
+
+## §226 (2026-11-22) Windows 托盘面板 + 图标颠倒/发糊修复
+- [x] 图标：多尺寸 top-down 预乘 BGRA DIB + CreateIconIndirect（修 CreateIcon bottom-up 颠倒、单档 32px 发糊）；托盘线程 PerMonitorV2。
+- [x] 左键 WebView2 面板（tray_win_panel.rs，webview2-com 0.39 + windows 0.62 别名 windows062），`tetherlyTray` 全局桥垫片，traybridge.ts 先探 globalThis；运行时缺失降级开浏览器。
+- [x] msvc 交叉校验：scratch crate symlink 真源 `cargo check/clippy --target x86_64-pc-windows-msvc -D warnings` 绿；Tauri 壳 GLYPH 改引 tray-32.rgba。
+- [ ] 真机：v0.2.77 部署后用户肉眼确认 home-win 图标正向清晰 + 左键面板弹出。
 - [ ] 真机：v0.2.76 部署后肉眼确认菜单栏字形深/浅色反色正确。

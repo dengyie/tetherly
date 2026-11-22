@@ -844,22 +844,38 @@ pub fn spawn_tray(_ui_port: u16, _device_alias: String) -> Option<TrayHandle> {
     None
 }
 
+/// Windows left-click panel (§226): WebView2 host for the SPA `#tray` route.
+/// A sibling of `windows_tray` rather than a child so the `#[path]` resolves
+/// next to this file; it reaches the tray's shared items via
+/// `super::windows_tray`.
+#[cfg(windows)]
+#[path = "tray_win_panel.rs"]
+mod windows_tray_panel;
+
 #[cfg(windows)]
 mod windows_tray {
+    use super::windows_tray_panel as panel;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS,
+    };
+    use windows_sys::Win32::UI::HiDpi::{
+        SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
     use windows_sys::Win32::UI::Shell::{
         Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-        DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage,
-        RegisterClassExW, SetForegroundWindow, SetTimer, TrackPopupMenuEx, TranslateMessage, HICON,
-        HMENU, IDI_APPLICATION, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, TPM_RIGHTBUTTON, WM_APP,
-        WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
-        WNDCLASSEXW,
+        AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+        DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
+        LoadIconW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer,
+        TrackPopupMenuEx, TranslateMessage, HICON, HMENU, ICONINFO, IDI_APPLICATION, MF_GRAYED,
+        MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND,
+        WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW,
     };
 
     const WM_TRAYICON: u32 = WM_APP + 42;
@@ -867,53 +883,131 @@ mod windows_tray {
     const IDM_DASHBOARD: usize = 1002;
     const IDM_ROAMING: usize = 1003;
     const IDM_EXIT: usize = 1004;
+    const IDM_PANEL: usize = 1005;
     /// The notification-area icon's id (matches `nid.uID` below).
-    const TRAY_ICON_ID: u32 = 100;
+    pub(super) const TRAY_ICON_ID: u32 = 100;
+
+    /// Panel geometry in logical (96-dpi) pixels — the macOS panel's numbers,
+    /// so the SPA tray route lays out identically on both desktops.
+    pub(super) const PANEL_W: f64 = 380.0;
+    pub(super) const PANEL_H: f64 = 468.0;
+    pub(super) const PANEL_MIN_H: f64 = 200.0;
+    pub(super) const PANEL_MAX_H: f64 = 640.0;
+    /// A tray click while the panel is open deactivates (hides) it before
+    /// the click is delivered; a toggle inside this window stays a close.
+    pub(super) const RETOGGLE_GUARD_MS: u64 = 300;
+    pub(super) static LAST_HIDE_MS: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
     /// Visibility-poll timer id (§6.3 tray takeover) and cadence.
     const VIS_TIMER_ID: usize = 0xC0FF_EE02;
     const VIS_POLL_MS: u32 = 500;
 
-    fn to_wide(s: &str) -> Vec<u16> {
+    pub(super) fn to_wide(s: &str) -> Vec<u16> {
         OsStr::new(s).encode_wide().chain(Some(0)).collect()
     }
 
-    /// The mac47054639 brand mark as an `HICON`, built from the embedded
-    /// `assets/brand/tray-32x32.rgba` (straight-alpha RGBA, top-down). GDI
-    /// wants bottom-up BGRA XOR bits plus a 1bpp AND mask; at 32bpp the mask
-    /// is all-zero and the alpha channel drives transparency. Falls back to
-    /// the stock application icon if GDI refuses, so the tray never vanishes
-    /// over a cosmetic failure.
-    fn brand_icon() -> HICON {
-        const SIDE: usize = 32;
-        const RGBA: &[u8; SIDE * SIDE * 4] =
-            include_bytes!("../../../../assets/brand/tray-32x32.rgba");
-        let mut xor = vec![0u8; SIDE * SIDE * 4];
-        for y in 0..SIDE {
-            let src_row = (SIDE - 1 - y) * SIDE * 4;
-            let dst_row = y * SIDE * 4;
-            for x in 0..SIDE {
-                let s = src_row + x * 4;
-                let d = dst_row + x * 4;
-                xor[d] = RGBA[s + 2];
-                xor[d + 1] = RGBA[s + 1];
-                xor[d + 2] = RGBA[s];
-                xor[d + 3] = RGBA[s + 3];
-            }
+    /// Open the Tauri client (deep link) or, failing that, the browser
+    /// console — ADR-139 M4, with the §146 per-port token.
+    fn open_main(port: u16) {
+        crate::apitoken::open_client_or_dashboard(
+            port,
+            tetherly_loopback::api_token_for(port).as_deref(),
+        );
+    }
+
+    /// The mac47054639 brand mark as an `HICON` at the shell's small-icon
+    /// size. Each embedded `assets/brand/tray-{16,20,24,32,48}.rgba` is
+    /// rasterised for its own size (strokes dilated before the downscale), so
+    /// the nearest asset at or above `SM_CXSMICON` is crisp instead of a
+    /// blurred 32px thumbnail. GDI gets a top-down 32bpp DIB section holding
+    /// premultiplied BGRA (`CreateIconIndirect` honours the alpha channel)
+    /// plus an all-zero 1bpp mask. The old path fed bottom-up rows to
+    /// `CreateIcon`, whose XOR bitmap is top-down — hence the upside-down
+    /// icon this replaces. Falls back to the stock application icon if GDI
+    /// refuses, so the tray never vanishes over a cosmetic failure.
+    pub(super) fn brand_icon() -> HICON {
+        const ASSETS: [(usize, &[u8]); 5] = [
+            (16, include_bytes!("../../../../assets/brand/tray-16.rgba")),
+            (20, include_bytes!("../../../../assets/brand/tray-20.rgba")),
+            (24, include_bytes!("../../../../assets/brand/tray-24.rgba")),
+            (32, include_bytes!("../../../../assets/brand/tray-32.rgba")),
+            (48, include_bytes!("../../../../assets/brand/tray-48.rgba")),
+        ];
+        let fallback = || unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
+
+        let want = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as usize;
+        let (side, rgba) = ASSETS
+            .iter()
+            .copied()
+            .find(|(s, _)| *s >= want)
+            .unwrap_or(ASSETS[ASSETS.len() - 1]);
+        if rgba.len() != side * side * 4 {
+            return fallback();
         }
-        let and_mask = [0u8; SIDE * SIDE / 8];
-        let icon = unsafe {
-            CreateIcon(
+
+        let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = side as i32;
+        // Negative height = top-down rows, matching the asset layout.
+        info.bmiHeader.biHeight = -(side as i32);
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let color = unsafe {
+            CreateDIBSection(
                 std::ptr::null_mut(),
-                SIDE as i32,
-                SIDE as i32,
-                1,
-                32,
-                and_mask.as_ptr(),
-                xor.as_ptr(),
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
             )
         };
+        if color.is_null() || bits.is_null() {
+            return fallback();
+        }
+        // SAFETY: the section was just allocated for `side*side` 32bpp pixels
+        // and is owned by this thread until `DeleteObject` below.
+        let dst = unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, side * side * 4) };
+        let (dst, _) = dst.as_chunks_mut::<4>();
+        let (src, _) = rgba.as_chunks::<4>();
+        for (d, s) in dst.iter_mut().zip(src) {
+            let a = s[3] as u32;
+            d[0] = ((s[2] as u32 * a + 127) / 255) as u8;
+            d[1] = ((s[1] as u32 * a + 127) / 255) as u8;
+            d[2] = ((s[0] as u32 * a + 127) / 255) as u8;
+            d[3] = s[3];
+        }
+
+        // 1bpp mask, rows padded to a WORD; all zero = colour bitmap decides.
+        let stride = side.div_ceil(16) * 2;
+        let zeros = vec![0u8; stride * side];
+        let mask = unsafe { CreateBitmap(side as i32, side as i32, 1, 1, zeros.as_ptr().cast()) };
+        if mask.is_null() {
+            unsafe {
+                DeleteObject(color);
+            }
+            return fallback();
+        }
+
+        let mut icon_info: ICONINFO = unsafe { std::mem::zeroed() };
+        icon_info.fIcon = 1;
+        icon_info.hbmMask = mask;
+        icon_info.hbmColor = color;
+        let icon = unsafe { CreateIconIndirect(&icon_info) };
+        unsafe {
+            DeleteObject(mask);
+            DeleteObject(color);
+        }
         if icon.is_null() {
-            unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) }
+            fallback()
         } else {
             icon
         }
@@ -930,29 +1024,35 @@ mod windows_tray {
         match msg {
             WM_TRAYICON => {
                 let event = lparam as u32;
-                if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
-                    // ADR-139 M4: left click (and double click) prefer the
-                    // Tauri client (deep link), falling back to the browser
-                    // console; the tray popover is retired. §146: per-port
-                    // token entry, not the process global.
-                    let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
-                    crate::apitoken::open_client_or_dashboard(
-                        port,
-                        tetherly_loopback::api_token_for(port).as_deref(),
-                    );
+                let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
+                if event == WM_LBUTTONUP {
+                    // §226: left click toggles the WebView2 panel (the SPA
+                    // `#tray` route, like the macOS NSPanel). Without a usable
+                    // WebView2 runtime it degrades to the ADR-139 M4 path:
+                    // Tauri client deep link, else the browser console.
+                    if !panel::toggle(hwnd, port) {
+                        open_main(port);
+                    }
+                } else if event == WM_LBUTTONDBLCLK {
+                    panel::hide();
+                    open_main(port);
                 } else if event == WM_RBUTTONUP {
+                    panel::hide();
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt);
                     SetForegroundWindow(hwnd);
 
-                    let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
                     let menu: HMENU = CreatePopupMenu();
                     let status_str = to_wide("Tetherly · 运行中");
+                    let panel_str = to_wide("打开面板");
                     let dash_str = to_wide(&format!("打开控制台 (127.0.0.1:{port})"));
                     let roam_str = to_wide("键鼠漫游：活跃");
                     let exit_str = to_wide("退出 Tetherly");
 
                     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_STATUS, status_str.as_ptr());
+                    if panel::available() {
+                        AppendMenuW(menu, MF_STRING, IDM_PANEL, panel_str.as_ptr());
+                    }
                     AppendMenuW(menu, MF_STRING, IDM_DASHBOARD, dash_str.as_ptr());
                     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_ROAMING, roam_str.as_ptr());
@@ -966,12 +1066,13 @@ mod windows_tray {
             }
             WM_COMMAND => {
                 let id = wparam & 0xFFFF;
+                let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
                 if id == IDM_DASHBOARD {
-                    let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
-                    crate::apitoken::open_client_or_dashboard(
-                        port,
-                        tetherly_loopback::api_token_for(port).as_deref(),
-                    );
+                    open_main(port);
+                } else if id == IDM_PANEL {
+                    if !panel::toggle(hwnd, port) {
+                        open_main(port);
+                    }
                 } else if id == IDM_EXIT {
                     std::process::exit(0);
                 }
@@ -1010,6 +1111,10 @@ mod windows_tray {
     pub fn run_windows_tray(ui_port: u16, rx: std::sync::mpsc::Receiver<()>) {
         unsafe {
             GLOBAL_UI_PORT.store(ui_port, Ordering::Relaxed);
+            // §226: the panel sizes itself from `GetDpiForWindow`, which only
+            // reports the real monitor DPI on a per-monitor-aware thread. The
+            // daemon exe carries no DPI manifest, so opt this thread in.
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
             let class_name = to_wide("TetherlyTrayClass");
             let icon: HICON = brand_icon();
