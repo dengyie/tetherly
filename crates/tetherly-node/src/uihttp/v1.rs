@@ -41,6 +41,7 @@ use tetherly_api::{
     Event,
     FocusPolicyPatch,
     FocusSetRequest,
+    GestureMapPatch,
     HandoffInboxActionRequest,
     HandoffPolicyPatch,
     HandoffSendRequest,
@@ -332,6 +333,7 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/input/tunnel" => Some(&["GET"]),
         "/api/v1/input/tunnel/attach" | "/api/v1/input/tunnel/release" => Some(&["POST"]),
         "/api/v1/input/policy" => Some(&["GET", "PATCH"]),
+        "/api/v1/input/gesture" => Some(&["GET", "PATCH"]),
         // §165: handoff (URL/resource inbox) domain.
         "/api/v1/handoff" | "/api/v1/handoff/inbox" => Some(&["GET", "DELETE"]),
         "/api/v1/handoff/send" | "/api/v1/handoff/send/multi" => Some(&["POST"]),
@@ -906,6 +908,8 @@ pub(super) async fn route(
         ("POST", "/api/v1/input/tunnel/release") => post_input_release(node, query, body).await,
         ("GET", "/api/v1/input/policy") => Ok(json(200, &crate::apiv1::model::input_policy(node))),
         ("PATCH", "/api/v1/input/policy") => patch_input_policy(node, query, body).await,
+        ("GET", "/api/v1/input/gesture") => Ok(json(200, &crate::apiv1::model::gesture_map(node))),
+        ("PATCH", "/api/v1/input/gesture") => patch_input_gesture(node, body).await,
         // §165: handoff (URL/resource inbox) domain.
         ("POST", "/api/v1/handoff/send") => post_handoff_send(node, query, body).await,
         ("POST", "/api/v1/handoff/send/multi") => post_handoff_send_multi(node, query, body).await,
@@ -3043,6 +3047,18 @@ async fn patch_input_policy(node: &Node, query: Option<&str>, body: &[u8]) -> Ha
         policy.allowed_types.clear();
     }
     match crate::apiv1::model::set_input_policy(node, policy) {
+        Ok(rep) => Ok(json(200, &rep)),
+        Err(e) => Err(core_error(e)),
+    }
+}
+
+/// `PATCH /input/gesture`: sparse update of the four-finger gesture map
+/// (per-gesture intents + the Windows app-switch injection mode). Strict
+/// JSON — a `deny_unknown_fields` patch body rejects typos outright instead
+/// of silently no-oping, mirroring the other policy PATCH shapes.
+async fn patch_input_gesture(node: &Node, body: &[u8]) -> Handled {
+    let patch = parse_body_strict::<GestureMapPatch>(body)?;
+    match crate::apiv1::model::set_gesture_map(node, patch) {
         Ok(rep) => Ok(json(200, &rep)),
         Err(e) => Err(core_error(e)),
     }

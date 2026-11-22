@@ -3415,9 +3415,15 @@ impl Node {
                 // target platform) falls back to the plain per-swipe sequence,
                 // and any such swipe first COMMITS a held chord so the
                 // interrupting gesture starts from a clean modifier state.
+                // Gated on `app_switch_mode`: the default `per_swipe` keeps
+                // the classic commit-every-swipe Alt+Tab; only `sticky_chord`
+                // opts into the hold-and-tap shape.
+                let sticky_mode =
+                    map.app_switch_mode == tetherly_core::gesture_map::AppSwitchMode::StickyChord;
                 let mut events: Vec<InputEvent> = Vec::new();
                 let mut chord_advanced = false;
-                if target_is_windows
+                if sticky_mode
+                    && target_is_windows
                     && matches!(
                         action,
                         tetherly_core::gesture_map::GestureAction::AppSwitchNext
@@ -3508,8 +3514,32 @@ impl Node {
     /// The active gesture→intent map. Config override when the user (or the
     /// UI) has saved one, otherwise the defaults that mirror macOS trackpad
     /// semantics.
-    fn gesture_map(&self) -> tetherly_core::gesture_map::GestureMap {
+    pub fn gesture_map(&self) -> tetherly_core::gesture_map::GestureMap {
         self.shared.gesture_map.lock().expect("gesture_map").clone()
+    }
+
+    /// Replace the gesture→intent table wholesale and persist it. In-memory
+    /// swap first, file second (same order as the policy setters: a failed
+    /// disk write leaves the old file for the next start; the runtime keeps
+    /// serving what was accepted). A held sticky chord from the previous
+    /// table is dropped — a mid-edit commit of a gesture the user may have
+    /// just silenced is worse than an uncommitted overlay (its Alt-up lands
+    /// via the silence timer only in chord mode; in per_swipe mode the chord
+    /// is inert, so dropping is the only correct cleanup).
+    pub fn set_gesture_map(
+        &self,
+        map: tetherly_core::gesture_map::GestureMap,
+    ) -> Result<(), CoreError> {
+        {
+            let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
+            if chord.is_active() {
+                let _ = chord.take_commit();
+            }
+        }
+        crate::store::save_gesture_map(&self.shared.cfg.data_dir, &map)
+            .map_err(|e| CoreError::File(format!("failed to save gesture_map.json: {e}")))?;
+        *self.shared.gesture_map.lock().expect("gesture_map") = map;
+        Ok(())
     }
 
     /// Best-effort platform string for the current input peer (from the live
@@ -6685,25 +6715,9 @@ mod tests {
         node.drive_gesture_swipe(1)
             .expect("controller swipe must forward");
 
-        // direction>0 = AppSwitchPrev chord: Alt down first (HELD — no
-        // Alt-up in the whole burst), Shift down, then the Tab tap. The old
-        // per-swipe Shift+Alt+Tab+ups shape committed on every Alt release
-        // (Windows commit key), bouncing between two windows; the sticky
-        // chord is the macOS-continuity shape.
-        let alt_down = rx.recv().await.expect("Alt down queued");
-        let ev = InputEvent::from_frame(&alt_down).expect("frame is an input event");
-        assert!(
-            matches!(
-                ev.kind,
-                InputKind::Key {
-                    code: 0xA4,
-                    down: true,
-                    ..
-                }
-            ),
-            "first event of a forwarded right-swipe must be Alt down (chord hold), got {:?}",
-            ev.kind
-        );
+        // direction>0 = AppSwitchPrev in the DEFAULT per_swipe mode: the
+        // complete Shift+Alt+Tab+ups sequence — one committed reverse switch
+        // per swipe.
         let shift_down = rx.recv().await.expect("Shift down queued");
         let ev = InputEvent::from_frame(&shift_down).expect("frame is an input event");
         assert!(
@@ -6715,37 +6729,42 @@ mod tests {
                     ..
                 }
             ),
-            "second event must be Shift down, got {:?}",
+            "first event of a forwarded right-swipe must be Shift down, got {:?}",
             ev.kind
         );
-        // The burst ends with Tab up: the modifier downs must never be
-        // followed by their ups within one swipe.
-        let mut saw_tab_up = false;
+        let alt_down = rx.recv().await.expect("Alt down queued");
+        let ev = InputEvent::from_frame(&alt_down).expect("frame is an input event");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA4,
+                    down: true,
+                    ..
+                }
+            ),
+            "second event must be Alt down, got {:?}",
+            ev.kind
+        );
+        // The full per-swipe burst ends with BOTH modifier ups.
+        let mut saw_alt_up = false;
         while let Ok(frame) = rx.try_recv() {
             let ev = InputEvent::from_frame(&frame).expect("frame is an input event");
             if matches!(
                 ev.kind,
                 InputKind::Key {
-                    code: 0x09,
+                    code: 0xA4,
                     down: false,
                     ..
                 }
             ) {
-                saw_tab_up = true;
+                saw_alt_up = true;
             }
-            assert!(
-                !matches!(
-                    ev.kind,
-                    InputKind::Key {
-                        code: 0xA4,
-                        down: false,
-                        ..
-                    }
-                ),
-                "chord swipe must not release Alt (that commits the switch)"
-            );
         }
-        assert!(saw_tab_up, "the Tab tap must complete within the swipe");
+        assert!(
+            saw_alt_up,
+            "per_swipe mode commits within the swipe (Alt up)"
+        );
     }
 
     // Vertical swipe (direction 0) forwards Win+Tab — Task View, the Mission
@@ -6931,6 +6950,169 @@ mod tests {
         );
     }
 
+    // DEFAULT mode (per_swipe): each swipe injects the COMPLETE
+    // Alt down / Tab tap / Alt up sequence — one committed switch per swipe,
+    // the classic single-step behavior (and the shipped default). The chord
+    // machinery must stay entirely out of the way: no held state, second
+    // swipe is another full sequence, not a bare Tab tap.
+    #[tokio::test]
+    async fn test_gesture_per_swipe_default_commits_every_swipe() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-psdef");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-pspeer");
+        let peer_id = other.identity().device_id().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(peer_id);
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+        }
+
+        // Default map ships per_swipe — assert it so this test tracks the
+        // contract, not the field.
+        assert_eq!(
+            node.gesture_map().app_switch_mode,
+            tetherly_core::gesture_map::AppSwitchMode::PerSwipe
+        );
+
+        // First swipe: Alt down … Alt up within the SAME burst.
+        node.drive_gesture_swipe(-1).expect("first swipe");
+        let alt_down = rx.recv().await.expect("Alt down");
+        assert!(matches!(
+            InputEvent::from_frame(&alt_down).unwrap().kind,
+            InputKind::Key {
+                code: 0xA4,
+                down: true,
+                ..
+            }
+        ));
+        let mut saw_alt_up = false;
+        let mut saw_tab = false;
+        while let Ok(frame) = rx.try_recv() {
+            let ev = InputEvent::from_frame(&frame).unwrap();
+            if matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x09,
+                    down: true,
+                    ..
+                }
+            ) {
+                saw_tab = true;
+            }
+            if matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA4,
+                    down: false,
+                    ..
+                }
+            ) {
+                saw_alt_up = true;
+            }
+        }
+        assert!(saw_tab, "per-swipe burst contains the Tab tap");
+        assert!(
+            saw_alt_up,
+            "per_swipe commits immediately: Alt up lands in the same swipe"
+        );
+
+        // Second swipe: another COMPLETE sequence (Alt down again), not a
+        // bare Tab tap — the sticky chord is inert in this mode.
+        node.drive_gesture_swipe(-1).expect("second swipe");
+        let alt_down2 = rx.recv().await.expect("second Alt down");
+        assert!(matches!(
+            InputEvent::from_frame(&alt_down2).unwrap().kind,
+            InputKind::Key {
+                code: 0xA4,
+                down: true,
+                ..
+            }
+        ));
+    }
+
+    // Mode switch at runtime: switching the map to sticky_chord changes what
+    // the NEXT swipe injects, and the mode + table persist to disk.
+    #[tokio::test]
+    async fn test_gesture_mode_switch_changes_next_swipe() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-modesw");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-mspeer");
+        let peer_id = other.identity().device_id().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(peer_id);
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+        }
+
+        // Opt into the sticky chord.
+        node.set_gesture_map(tetherly_core::gesture_map::GestureMap {
+            app_switch_mode: tetherly_core::gesture_map::AppSwitchMode::StickyChord,
+            ..Default::default()
+        })
+        .expect("switch to sticky");
+
+        // First swipe: Alt down HELD (no Alt-up in the burst).
+        node.drive_gesture_swipe(-1).expect("chord first swipe");
+        let alt_down = rx.recv().await.expect("Alt down");
+        assert!(matches!(
+            InputEvent::from_frame(&alt_down).unwrap().kind,
+            InputKind::Key {
+                code: 0xA4,
+                down: true,
+                ..
+            }
+        ));
+        while let Ok(frame) = rx.try_recv() {
+            let ev = InputEvent::from_frame(&frame).unwrap();
+            assert!(
+                !matches!(
+                    ev.kind,
+                    InputKind::Key {
+                        code: 0xA4,
+                        down: false,
+                        ..
+                    }
+                ),
+                "sticky_chord mode must NOT commit on the swipe"
+            );
+        }
+
+        // Persistence: the saved file carries the mode.
+        let saved: tetherly_core::gesture_map::GestureMap = serde_json::from_slice(
+            &std::fs::read(dir.join(crate::store::GESTURE_MAP_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved.app_switch_mode,
+            tetherly_core::gesture_map::AppSwitchMode::StickyChord
+        );
+
+        // Switch back to per_swipe: the held chord is dropped (no Alt-up
+        // injected mid-switch — the remote keeps a held Alt only until its
+        // next interaction resolves it), and the next swipe is a full
+        // sequence again.
+        node.set_gesture_map(tetherly_core::gesture_map::GestureMap::default())
+            .expect("switch back to per_swipe");
+        node.drive_gesture_swipe(-1).expect("per_swipe swipe");
+        let alt_down2 = rx.recv().await.expect("second Alt down");
+        assert!(matches!(
+            InputEvent::from_frame(&alt_down2).unwrap().kind,
+            InputKind::Key {
+                code: 0xA4,
+                down: true,
+                ..
+            }
+        ));
+    }
+
     // Sticky app-switch chord (macOS continuity semantics on a Windows
     // target): the first swipe holds Alt with a Tab tap, an extending swipe
     // injects ONLY a Tab tap (no Alt re-press/release — the Windows commit
@@ -6946,6 +7128,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         *node.shared.input_out.lock().unwrap() = Some((1, tx));
         *node.shared.input_peer.lock().unwrap() = Some(peer_id);
+
+        // The chord participates only in sticky_chord mode; the default
+        // per_swipe keeps the classic commit-every-swipe shape. Opt in.
+        node.set_gesture_map(tetherly_core::gesture_map::GestureMap {
+            app_switch_mode: tetherly_core::gesture_map::AppSwitchMode::StickyChord,
+            ..Default::default()
+        })
+        .expect("mode opt-in");
 
         {
             let mut engine = node.shared.input_engine.lock().unwrap();
@@ -7087,6 +7277,14 @@ mod tests {
         *node.shared.input_out.lock().unwrap() = Some((1, tx));
         *node.shared.input_peer.lock().unwrap() = Some(peer_id);
 
+        // The chord participates only in sticky_chord mode; the default
+        // per_swipe keeps the classic commit-every-swipe shape. Opt in.
+        node.set_gesture_map(tetherly_core::gesture_map::GestureMap {
+            app_switch_mode: tetherly_core::gesture_map::AppSwitchMode::StickyChord,
+            ..Default::default()
+        })
+        .expect("mode opt-in");
+
         {
             let mut engine = node.shared.input_engine.lock().unwrap();
             engine.local_move_delta(100, 50, 2, 0);
@@ -7146,6 +7344,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         *node.shared.input_out.lock().unwrap() = Some((1, tx));
         *node.shared.input_peer.lock().unwrap() = Some(peer_id);
+
+        // The chord participates only in sticky_chord mode; the default
+        // per_swipe keeps the classic commit-every-swipe shape. Opt in.
+        node.set_gesture_map(tetherly_core::gesture_map::GestureMap {
+            app_switch_mode: tetherly_core::gesture_map::AppSwitchMode::StickyChord,
+            ..Default::default()
+        })
+        .expect("mode opt-in");
 
         {
             let mut engine = node.shared.input_engine.lock().unwrap();

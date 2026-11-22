@@ -80,6 +80,49 @@ impl GestureId {
     }
 }
 
+/// How the Windows app-switch gesture (swipe mapped to AppSwitchNext/Prev)
+/// injects its key sequence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppSwitchMode {
+    /// Per-swipe complete Alt+Tab (with Alt-up): each swipe commits one
+    /// switch immediately. The classic single-step behavior — and also the
+    /// reason consecutive swipes bounce between two windows (Windows'
+    /// commit key is Alt-up, so a completed sequence restarts the cycle
+    /// from the fresh focus every time).
+    #[default]
+    PerSwipe,
+    /// Sticky chord: the first swipe presses Alt and HOLDS it; extending
+    /// swipes tap only Tab (Shift joins and stays when direction flips);
+    /// silence commits (Alt-up) via the controller's watcher tick. Walks
+    /// the window cycle continuously, macOS-Mission-Control style.
+    StickyChord,
+}
+
+impl AppSwitchMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "per_swipe" => Some(Self::PerSwipe),
+            "sticky_chord" => Some(Self::StickyChord),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PerSwipe => "per_swipe",
+            Self::StickyChord => "sticky_chord",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::PerSwipe => "each swipe switches once (Alt+Tab commit)",
+            Self::StickyChord => "hold Alt across swipes; commit on pause",
+        }
+    }
+}
+
 /// What the user wants to happen on the CONTROLLING target. Intents are
 /// platform-neutral nouns modeled on Touchégg's action taxonomy plus the
 /// window-manager verbs BetterTouchTool exposes; each resolves to a concrete
@@ -456,6 +499,12 @@ pub struct GestureMap {
     pub swipe4_right: GestureAction,
     pub swipe4_up: GestureAction,
     pub swipe4_down: GestureAction,
+    /// Windows app-switch injection shape. Defaults to `per_swipe` so the
+    /// classic single-step Alt+Tab behavior is preserved for existing
+    /// configs (a missing field deserializes to the default); opt into the
+    /// sticky chord for continuous same-direction cycling.
+    #[serde(default)]
+    pub app_switch_mode: AppSwitchMode,
 }
 
 impl Default for GestureMap {
@@ -467,6 +516,7 @@ impl Default for GestureMap {
             // macOS has no default "swipe down" meaning in this family;
             // leave it silenced rather than surprising.
             swipe4_down: GestureAction::None,
+            app_switch_mode: AppSwitchMode::default(),
         }
     }
 }
@@ -730,6 +780,41 @@ mod tests {
         assert_eq!(m, back);
         // serde renames are the storage format — snake_case strings.
         assert!(s.contains("app_switch_next"));
+    }
+
+    /// A gesture_map.json written before `app_switch_mode` existed (v0.2.78
+    /// and earlier) has no such field — it must deserialize to the
+    /// `per_swipe` default, not fail, so an upgrade never breaks an
+    /// existing config.
+    #[test]
+    fn legacy_map_without_mode_defaults_to_per_swipe() {
+        let legacy = r#"{"swipe4_left":"app_switch_next","swipe4_right":"app_switch_prev","swipe4_up":"overview_toggle","swipe4_down":"none"}"#;
+        let m: GestureMap = serde_json::from_str(legacy).unwrap();
+        assert_eq!(m.app_switch_mode, AppSwitchMode::PerSwipe);
+        assert_eq!(m, GestureMap::default());
+    }
+
+    /// The mode round-trips through the storage form and unknown values are
+    /// rejected (an operator typo must not silently fall back).
+    #[test]
+    fn app_switch_mode_roundtrip_and_unknown_rejected() {
+        assert_eq!(
+            AppSwitchMode::parse("per_swipe"),
+            Some(AppSwitchMode::PerSwipe)
+        );
+        assert_eq!(
+            AppSwitchMode::parse("sticky_chord"),
+            Some(AppSwitchMode::StickyChord)
+        );
+        assert_eq!(AppSwitchMode::parse("hold_alt"), None);
+        let m = GestureMap {
+            app_switch_mode: AppSwitchMode::StickyChord,
+            ..GestureMap::default()
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        let back: GestureMap = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.app_switch_mode, AppSwitchMode::StickyChord);
+        assert!(s.contains("sticky_chord"));
     }
 
     // ---- sticky chord (macOS continuity app switch on Windows) ----

@@ -30,6 +30,7 @@ describe("settings page", () => {
     await fireEvent.input(name, { target: { value: "  studio-2  " } });
     await fireEvent.submit(name.closest("form")!);
     expect(t.calls).toEqual([
+      { method: "GET", path: "/api/v1/input/gesture", body: undefined },
       { method: "PATCH", path: "/api/v1/settings", body: { advertise: false } },
       { method: "PATCH", path: "/api/v1/settings", body: { auto_accept: true } },
       { method: "PATCH", path: "/api/v1/settings", body: { name: "studio-2" } },
@@ -41,7 +42,7 @@ describe("settings page", () => {
     const sw = screen.getByRole("switch", { name: "自动重连" }) as HTMLButtonElement;
     sw.focus();
     await fireEvent.click(sw);
-    expect(t.calls).toHaveLength(1);
+    expect(t.calls.filter((c) => c.method === "PATCH")).toHaveLength(1);
     expect(sw.disabled).toBe(false);
     expect(sw.getAttribute("aria-busy")).toBe("true");
     expect(document.activeElement).toBe(sw);

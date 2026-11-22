@@ -11,6 +11,8 @@ import type {
   Health,
   Inbox,
   InboxOpenRequest,
+  GestureMapDto,
+  GestureMapPatch,
   Activity,
   Input,
   Layout,
@@ -116,6 +118,12 @@ export class Api {
   }
   releaseInput(): Promise<void> {
     return this.t.request("POST", "/api/v1/input/release");
+  }
+  gestureMap(): Promise<GestureMapDto> {
+    return this.t.request("GET", "/api/v1/input/gesture");
+  }
+  patchGestureMap(patch: GestureMapPatch): Promise<GestureMapDto> {
+    return this.t.request("PATCH", "/api/v1/input/gesture", patch);
   }
 
   transfers(): Promise<Transfers> {

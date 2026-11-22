@@ -780,6 +780,20 @@ allowed_types: Array<string>, keymap?: string, edge?: string, wheel_speed: numbe
 
 export type InputPolicyPatch = { enabled?: boolean, allow_inbound_control?: boolean, allow_keyboard?: boolean, allow_mouse?: boolean, hotkey_release_enabled?: boolean, idle_timeout_secs?: number, allowed_groups?: Array<string>, allowed_tags?: Array<string>, allowed_types?: Array<string>, keymap?: string, edge?: string, wheel_speed?: number, clear_filters?: boolean, };
 
+export type GestureMapDto = {
+/**
+ * `GestureAction` snake_case strings per physical gesture.
+ */
+swipe4_left: string, swipe4_right: string, swipe4_up: string, swipe4_down: string,
+/**
+ * Windows app-switch injection shape: `per_swipe` (each swipe commits
+ * one Alt+Tab switch) or `sticky_chord` (Alt held across swipes, Tab
+ * tapped per swipe, committed on pause).
+ */
+app_switch_mode: string, };
+
+export type GestureMapPatch = { swipe4_left?: string, swipe4_right?: string, swipe4_up?: string, swipe4_down?: string, app_switch_mode?: string, };
+
 export type InputAttachRequest = { peer?: string, edge?: string, x?: number, y?: number, };
 
 export type InputReleaseRequest = { reason?: string, };

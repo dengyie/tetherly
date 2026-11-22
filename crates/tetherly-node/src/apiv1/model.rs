@@ -75,6 +75,8 @@ use tetherly_api::{
     FocusState,
     FocusStateDto,
     FocusSyncReport,
+    GestureMapDto,
+    GestureMapPatch,
     HandoffDispatchItem,
     HandoffInbox,
     HandoffInboxActionReport,
@@ -2056,6 +2058,66 @@ pub fn set_input_policy(
 ) -> Result<InputPolicyDto, CoreError> {
     let rep = node.set_input_policy(policy)?;
     Ok(input_policy_dto(rep.policy))
+}
+
+// ---- four-finger gesture map domain ----
+
+fn gesture_map_dto(m: tetherly_core::gesture_map::GestureMap) -> GestureMapDto {
+    GestureMapDto {
+        swipe4_left: m.swipe4_left.as_str().into(),
+        swipe4_right: m.swipe4_right.as_str().into(),
+        swipe4_up: m.swipe4_up.as_str().into(),
+        swipe4_down: m.swipe4_down.as_str().into(),
+        app_switch_mode: m.app_switch_mode.as_str().into(),
+    }
+}
+
+pub fn gesture_map(node: &Node) -> GestureMapDto {
+    gesture_map_dto(node.gesture_map())
+}
+
+/// Sparse PATCH: parse every present field against its enum's wire form;
+/// reject unknown values with a message naming the legal set. Validation
+/// happens before any mutation, so a bad patch leaves the table untouched.
+pub fn set_gesture_map(node: &Node, patch: GestureMapPatch) -> Result<GestureMapDto, CoreError> {
+    let parse_action =
+        |name: &str| -> Result<tetherly_core::gesture_map::GestureAction, CoreError> {
+            tetherly_core::gesture_map::GestureAction::parse(name).ok_or_else(|| {
+                CoreError::Json(format!(
+                    "unknown gesture action '{name}' (expected one of {})",
+                    tetherly_core::gesture_map::GestureAction::ALL
+                        .iter()
+                        .map(|a| a.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+        };
+    let parse_mode = |name: &str| -> Result<tetherly_core::gesture_map::AppSwitchMode, CoreError> {
+        tetherly_core::gesture_map::AppSwitchMode::parse(name).ok_or_else(|| {
+            CoreError::Json(format!(
+                "unknown app_switch_mode '{name}' (expected per_swipe|sticky_chord)"
+            ))
+        })
+    };
+    let mut m = node.gesture_map();
+    if let Some(v) = &patch.swipe4_left {
+        m.swipe4_left = parse_action(v)?;
+    }
+    if let Some(v) = &patch.swipe4_right {
+        m.swipe4_right = parse_action(v)?;
+    }
+    if let Some(v) = &patch.swipe4_up {
+        m.swipe4_up = parse_action(v)?;
+    }
+    if let Some(v) = &patch.swipe4_down {
+        m.swipe4_down = parse_action(v)?;
+    }
+    if let Some(v) = &patch.app_switch_mode {
+        m.app_switch_mode = parse_mode(v)?;
+    }
+    node.set_gesture_map(m)?;
+    Ok(gesture_map(node))
 }
 
 // ---- §165: handoff (URL/resource inbox) domain ----

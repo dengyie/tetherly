@@ -3445,6 +3445,40 @@ pub struct InputTunnelDecision {
     pub timestamp_ms: u64,
 }
 
+/// GET/PATCH `/input/gesture`: the four-finger gesture map (gesture →
+/// intent) plus the Windows app-switch injection mode. PATCH is sparse —
+/// absent fields stay; unknown values are rejected by the daemon with a
+/// validation error naming the legal set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct GestureMapDto {
+    /// `GestureAction` snake_case strings per physical gesture.
+    pub swipe4_left: String,
+    pub swipe4_right: String,
+    pub swipe4_up: String,
+    pub swipe4_down: String,
+    /// Windows app-switch injection shape: `per_swipe` (each swipe commits
+    /// one Alt+Tab switch) or `sticky_chord` (Alt held across swipes, Tab
+    /// tapped per swipe, committed on pause).
+    pub app_switch_mode: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct GestureMapPatch {
+    #[cfg_attr(test, ts(optional))]
+    pub swipe4_left: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub swipe4_right: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub swipe4_up: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub swipe4_down: Option<String>,
+    #[cfg_attr(test, ts(optional))]
+    pub app_switch_mode: Option<String>,
+}
+
 /// The input-tunnel governance policy as one flat resource
 /// (legacy `InputTunnelPolicy` with enums folded to strings).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7270,6 +7304,8 @@ mod bindings {
             decl::<InputTunnelDecision>(&cfg),
             decl::<InputPolicyDto>(&cfg),
             decl::<InputPolicyPatch>(&cfg),
+            decl::<GestureMapDto>(&cfg),
+            decl::<GestureMapPatch>(&cfg),
             decl::<InputAttachRequest>(&cfg),
             decl::<InputReleaseRequest>(&cfg),
             decl::<InputStartRequest>(&cfg),

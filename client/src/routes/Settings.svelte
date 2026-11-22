@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Settings } from "../lib/api/gen/api";
+  import { onMount } from "svelte";
+  import type { GestureMapDto, Settings } from "../lib/api/gen/api";
   import type { Api } from "../lib/api/client";
   import { withToast } from "../lib/ui/toast";
   import PageHeader from "../lib/ui/PageHeader.svelte";
@@ -7,6 +8,23 @@
   import ThemeToggle from "../lib/ui/ThemeToggle.svelte";
 
   let { data, api }: { data: Settings | null; api: Api } = $props();
+
+  // Gesture map is not part of the settings event flow; self-fetch once and
+  // update in place from the PATCH response.
+  let gestureMap = $state<GestureMapDto | null>(null);
+  onMount(() => {
+    void withToast(() => api.gestureMap().then((m) => (gestureMap = m)));
+  });
+
+  async function patchGestureMode(sticky: boolean) {
+    await withToast(
+      () =>
+        api.patchGestureMap({ app_switch_mode: sticky ? "sticky_chord" : "per_swipe" }).then((m) => {
+          gestureMap = m;
+        }),
+      sticky ? "已启用连续切换（Alt 保持）" : "已恢复逐次 Alt+Tab",
+    );
+  }
 
   // Local draft mirrors the event-fed store; PATCH result arrives back as a
   // settings.changed event, so edits only need to be held here between
@@ -85,6 +103,18 @@
     <div class="row">
       <div class="main"><div class="name">自动接收文件</div><div class="sub">来自已配对设备的文件直接写入收件箱，无需逐个确认。</div></div>
       <Switch checked={data.transfer.auto_accept} aria-busy={saving} label="自动接收文件" onchange={(v) => patch({ auto_accept: v })} />
+    </div>
+  {/if}
+</div>
+
+<div class="list-title">手势</div>
+<div class="list">
+  {#if !gestureMap}
+    <div class="empty">等待手势配置…</div>
+  {:else}
+    <div class="row">
+      <div class="main"><div class="name">四指滑动连续切换</div><div class="sub">开启后一次滑动按住 Alt，连续滑动沿同方向循环切换窗口；关闭则每次滑动直接 Alt+Tab 切一次。仅 Windows 宿主生效。</div></div>
+      <Switch checked={gestureMap.app_switch_mode === "sticky_chord"} label="四指滑动连续切换" onchange={(v) => patchGestureMode(v)} />
     </div>
   {/if}
 </div>
