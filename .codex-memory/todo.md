@@ -425,3 +425,17 @@
 - [x] TDD：tray.test / flows.test 先红（target 角色用例）后绿；fixtures/contract 补字段；`client/dist` 重建（release.yml 会校验 dist 不陈旧）。门禁：fmt/clippy/workspace tests/pnpm check+test+build 全绿。1ebd600 推 main。
 - [x] bump v0.2.82（c2b15ac）→ CI 45067245415 六 job 绿 → tag → release 45068129834 绿 12 资产 → `deploy.sh --target all --tag v0.2.82` exit 0：Mac health 0.2.82，`/api/v1/events` 快照 `input` = role=controller cursor_here=true；home-win 热重启 old_pid 18608 → new_pid 26632（SYSTEM，Session 1），health 0.2.82，受保护进程 3/3 不动，token 轮换已重取（注意 PowerShell 输出带尾 `\n`，存盘要 `tr -d '\r\n'`），`/api/v1/events` 快照 `input` = role=target cursor_here=false seat=local。注：`GET /api/v1/input` 返回的是 `input_status` 原始报告（无 role/cursor_here），UI 用的 `Input` DTO 只走 events 快照 / `POST /api/v1/input/release`。
 - [ ] 真机：Windows 面板/概览应显示「键鼠在 <mac名>」+「对端推到屏幕边缘即可跨到本机」而非「键鼠在本机」；Mac 光标推进 Windows 后 Windows 显示「键鼠在本机 · MAC 正在控制本机」，Mac 显示「键鼠在 <win名>」+ 收回按钮。
+
+## §231 (2026-11-23) 高负载键鼠卡顿 + 切屏后双光标
+- [x] 根因：macOS 从未真正执行 `CGAssociateMouseAndMouseCursorPosition(false)`——Remote 期间隐藏光标仍跟手，Space 切换后重新显形 → 「两个鼠标同时动」；旧 HID delta + settle 清零 + 两次 echo 闸会吃掉真实位移 → 高负载下卡顿。
+- [x] 修法：macOS 改「位置差 + 每批 recenter」（`clamped_axis_delta` 仅边缘回落 HID delta），warp echo 单发；`maybe_rehide_captured_cursor`（500 ms 限频，计数中性 show/hide 对）；tap 被 TapDisabled 时重启用 + 5 s 限频告警；Windows hook 线程 THREAD_PRIORITY_HIGHEST、worker ABOVE_NORMAL。新测 warp_echo_is_single_shot / clamped_axis_delta / rate_limit_due_after_interval。78a7bf4，随 v0.2.84（另一会话 bump）发布。
+- [ ] 真机：高 CPU 下 Mac↔Windows 键鼠流畅；切屏回 Windows 不再出现双光标；日志 `cursor_rehide` / tap re-enable 计数。
+
+## §230 (2026-11-23) Windows「打开主窗口」与 Mac 一致打开客户端
+- [x] 根因：Windows 从未安装 Tauri 客户端 → `tetherly://` 未注册 → `open_client_or_dashboard` 回落浏览器控制台。Mac 端 `/Applications/Tetherly Client.app` 停在 0.2.60。
+- [x] 修法：deploy.sh `install_client_mac/windows`（SHA256SUMS 校验；Mac ditto 到 `Tetherly Client.app` 绝不覆盖守护进程 `Tetherly.app`；Windows perMachine MSI `/qn`，校验 HKCR scheme 解析到 `C:\Program Files\Tetherly\tetherly-shell.exe`——注册表存 8.3 短名，需 Get-Item 还原长名）；best-effort 不影响守护进程部署。客户端进程名 `tetherly-shell.exe` 与守护进程 `tetherly.exe` 不冲突。壳加 tauri-plugin-single-instance(deep-link)；守护进程记录 open-main 走向。
+- [x] 先用 v0.2.83 资产实测两端安装函数：Mac 0.2.60→0.2.83，home-win msi_exit=0、scheme 正确，受保护进程 3/3。
+
+## §232 (2026-11-23) macOS 菜单栏面板点击卡顿
+- [x] 根因：NSPanel + WKWebView 首次点击才构建并加载 SPA（WebContent 进程拉起 + SPA 启动全落在点击路径）。
+- [x] 修法：托盘启动 1.5 s 后一次性 NSTimer `prewarmPanel:` 隐藏构建+加载（客户端接管托盘时跳过），日志 `tray panel pre-warmed elapsed_ms=`。
