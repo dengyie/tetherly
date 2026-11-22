@@ -15,7 +15,9 @@
         "width": 1000,
         "height": 700,
         "minWidth": 720,
-        "minHeight": 480
+        "minHeight": 480,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
@@ -25,7 +27,9 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["tetherly"]
+        "schemes": [
+          "tetherly"
+        ]
       }
     }
   },

@@ -65,96 +65,102 @@
   const releaseInput = () => withToast(() => api.releaseInput(), "已收回键鼠");
 </script>
 
-<PageHeader title="概览" subtitle="本机状态、输入归属与配对入口" icon="home" />
+<PageHeader subtitle="本机状态、输入归属与配对入口" />
 
 <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-  <div class="stat-tile">
-    <span class="text-[11px] dim">在线设备</span>
-    <AnimatedCounter target={online.length} class="text-2xl font-semibold" />
+  <div class="list row stat"><span class="k">在线设备</span><AnimatedCounter target={online.length} class="v" /></div>
+  <div class="list row stat"><span class="k">已配对</span><AnimatedCounter target={trusted.length} class="v" /></div>
+  <div class="list row stat">
+    <span class="k">输入归属</span>
+    <span class="v truncate {seatRemote ? 'text-amber-600 dark:text-amber-400' : ''}" style="font-size: 16px">{seatLabel}</span>
   </div>
-  <div class="stat-tile">
-    <span class="text-[11px] dim">已配对</span>
-    <AnimatedCounter target={trusted.length} class="text-2xl font-semibold" />
-  </div>
-  <div class="stat-tile">
-    <span class="text-[11px] dim">输入归属</span>
-    <span class="truncate text-base font-semibold {seatRemote ? 'text-amber-600 dark:text-amber-400' : ''}">{seatLabel}</span>
-  </div>
-  <div class="stat-tile">
-    <span class="text-[11px] dim">运行时长</span>
-    <span class="truncate text-base font-semibold">{system.system ? uptime(system.system.uptime_secs) : "…"}</span>
+  <div class="list row stat">
+    <span class="k">运行时长</span>
+    <span class="v truncate" style="font-size: 16px">{system.system ? uptime(system.system.uptime_secs) : "…"}</span>
   </div>
 </div>
 
-<div class="grid gap-4 lg:grid-cols-2">
-  <section class="card">
-    <h2 class="card-title"><Icon name="cpu" size={15} class="text-zinc-400" />本机</h2>
-    {#if system.system}
-      <dl class="m-0 grid grid-cols-[88px_1fr] gap-y-1.5 text-[13px]">
-        <dt class="dim">名称</dt><dd class="m-0 font-medium">{system.system.name}</dd>
-        <dt class="dim">版本</dt><dd class="m-0">{system.system.version}（api {system.system.api}）</dd>
-        <dt class="dim">平台</dt><dd class="m-0">{system.system.platform}</dd>
-        <dt class="dim">对端</dt><dd class="m-0">{system.system.peers.live} 在线 · {system.system.peers.trusted} 已信任</dd>
-        <dt class="dim">设备 ID</dt><dd class="m-0 mono break-all text-xs">{system.system.device_id}</dd>
-      </dl>
-    {:else}
-      <p class="m-0 dim">等待快照…</p>
-    {/if}
-  </section>
-
-  <section class="card">
-    <h2 class="card-title"><Icon name="keyboard" size={15} class="text-zinc-400" />输入归属</h2>
-    <div class="flex items-center justify-between gap-3">
-      <div>
-        <div class="text-sm font-medium">{seatLabel}</div>
-        <p class="m-0 mt-0.5 text-xs dim">
-          {seatRemote ? "键鼠已跨到其他设备，可随时收回。" : "键鼠当前归本机，推到屏幕边缘即可跨屏。"}
-        </p>
-      </div>
-      {#if seatRemote}
-        <button type="button" class="btn" onclick={releaseInput}><Icon name="arrow-left" size={14} />收回</button>
-      {/if}
-    </div>
-    <h2 class="card-title mt-5"><Icon name="key" size={15} class="text-zinc-400" />配对</h2>
-    <div class="flex items-center gap-2 text-xs">
-      {#if pairing.pairing?.pin_active}
-        <StatusIndicator status="online" label="PIN 接受窗口开启中" />
-        <span class="dim">{pairing.pairing.pin_expires_in_secs}s 后关闭</span>
+<div class="grid gap-x-4 lg:grid-cols-2">
+  <div>
+    <div class="list-title">本机</div>
+    <div class="list">
+      {#if system.system}
+        <div class="row compact"><div class="main name">名称</div><span class="val">{system.system.name}</span></div>
+        <div class="row compact"><div class="main name">版本</div><span class="val">{system.system.version} <span class="dim">· api {system.system.api}</span></span></div>
+        <div class="row compact"><div class="main name">平台</div><span class="val">{system.system.platform}</span></div>
+        <div class="row compact"><div class="main name">对端</div><span class="val">{system.system.peers.live} 在线 · {system.system.peers.trusted} 已信任</span></div>
+        <div class="row compact"><div class="main name">设备 ID</div><span class="val mono break-all text-[11px]">{system.system.device_id}</span></div>
       {:else}
-        <StatusIndicator status="offline" label="PIN 未激活" />
+        <div class="empty">等待快照…</div>
       {/if}
     </div>
-    {#if pin}
-      <div class="mt-3 rounded-xl border border-dashed border-brand-300/70 dark:border-brand-700/60 bg-brand-50/60 dark:bg-brand-950/30 px-4 py-3 text-center">
-        <div class="mono text-2xl font-semibold tracking-[0.4em] text-brand-700 dark:text-brand-300">{pin}</div>
-        <div class="mt-1 text-[11px] dim">在另一台设备上输入此 PIN 完成配对</div>
+  </div>
+
+  <div>
+    <div class="list-title">输入归属</div>
+    <div class="list">
+      <div class="row">
+        <span class="ic"><Icon name="keyboard" size={16} /></span>
+        <div class="main">
+          <div class="name">{seatLabel}</div>
+          <div class="sub">{seatRemote ? "键鼠已跨到其他设备，可随时收回。" : "键鼠当前归本机，推到屏幕边缘即可跨屏。"}</div>
+        </div>
+        {#if seatRemote}
+          <button type="button" class="btn btn-sm" onclick={releaseInput}><Icon name="arrow-left" size={13} />收回</button>
+        {/if}
       </div>
-    {/if}
-    <div class="mt-3 flex flex-wrap gap-2">
-      <button type="button" class="btn btn-primary" disabled={pinBusy} onclick={showPin}><Icon name={pinActive ? "eye" : "key"} size={14} />{pinActive ? "显示 PIN" : "生成 PIN"}</button>
-      <button type="button" class="btn" disabled={pinBusy || !pinActive} onclick={rotatePin}><Icon name="refresh" size={14} />轮换</button>
-      <button type="button" class="btn btn-danger" disabled={pinBusy || !pinActive} onclick={revokePin}><Icon name="x" size={14} />撤销</button>
     </div>
-  </section>
+
+    <div class="list-title">
+      配对
+      <span class="acts">
+        {#if pairing.pairing?.pin_active}
+          <StatusIndicator status="online" label="PIN 接受窗口开启中" />
+          <span class="dim mono text-[11.5px]">{pairing.pairing.pin_expires_in_secs}s</span>
+        {:else}
+          <StatusIndicator status="offline" label="PIN 未激活" />
+        {/if}
+      </span>
+    </div>
+    <div class="list">
+      {#if pin}
+        <div class="row justify-center py-4">
+          <div class="text-center">
+            <div class="pin">{pin}</div>
+            <div class="sub mt-1">在另一台设备上输入此 PIN 完成配对</div>
+          </div>
+        </div>
+      {/if}
+      <div class="row">
+        <span class="ic"><Icon name="key" size={16} /></span>
+        <div class="main">
+          <div class="name">配对 PIN</div>
+          <div class="sub">在另一台设备上输入 PIN 即可信任本机。</div>
+        </div>
+        <div class="acts">
+          <button type="button" class="btn btn-sm btn-primary" disabled={pinBusy} onclick={showPin}><Icon name={pinActive ? "eye" : "key"} size={13} />{pinActive ? "显示 PIN" : "生成 PIN"}</button>
+          <button type="button" class="btn btn-sm" disabled={pinBusy || !pinActive} onclick={rotatePin}>轮换</button>
+          <button type="button" class="btn btn-sm btn-text btn-danger" disabled={pinBusy || !pinActive} onclick={revokePin}>撤销</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
-<section class="card">
-  <h2 class="card-title"><Icon name="wifi" size={15} class="text-zinc-400" />在线设备（{online.length}）</h2>
+<div class="list-title">在线设备（{online.length}）</div>
+<div class="list">
   {#if online.length === 0}
     <EmptyState compact icon="monitor" title="没有在线设备" description="已配对设备上线后会出现在这里。" />
   {:else}
-    <ul class="m-0 list-none p-0">
-      {#each online as d (d.id)}
-        <li class="row">
-          <span class="relative flex h-2 w-2 shrink-0">
-            <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60"></span>
-            <span class="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
-          </span>
-          <span class="font-medium">{d.name}</span>
-          <span class="badge">{d.platform ?? "?"}</span>
-          <span class="ml-auto text-xs dim mono">{d.rtt_ms ?? "—"} ms · {d.path ?? ""}</span>
-        </li>
-      {/each}
-    </ul>
+    {#each online as d (d.id)}
+      <div class="row hov">
+        <span class="dot" data-state="online"></span>
+        <div class="main">
+          <div class="name">{d.name}</div>
+          <div class="sub">{d.platform ?? "?"}{d.path ? ` · ${d.path}` : ""}</div>
+        </div>
+        <span class="val mono">{d.rtt_ms ?? "—"} ms</span>
+      </div>
+    {/each}
   {/if}
-</section>
+</div>

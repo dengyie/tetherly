@@ -2,9 +2,9 @@
   import type { Settings } from "../lib/api/gen/api";
   import type { Api } from "../lib/api/client";
   import { withToast } from "../lib/ui/toast";
-  import Icon from "../lib/ui/Icon.svelte";
   import PageHeader from "../lib/ui/PageHeader.svelte";
   import Switch from "../lib/ui/Switch.svelte";
+  import ThemeToggle from "../lib/ui/ThemeToggle.svelte";
 
   let { data, api }: { data: Settings | null; api: Api } = $props();
 
@@ -34,53 +34,57 @@
   }
 </script>
 
-<PageHeader title="设置" subtitle="节点名称、发现与传输策略" icon="settings" />
+<PageHeader subtitle="外观、节点名称、发现与传输策略" />
 
-<section class="card">
-  <h2 class="card-title"><Icon name="sliders" size={15} class="text-zinc-400" />常规</h2>
+<div class="list-title">外观</div>
+<div class="list">
+  <div class="row">
+    <div class="main"><div class="name">主题</div><div class="sub">跟随系统，或固定为浅色 / 深色。</div></div>
+    <ThemeToggle />
+  </div>
+</div>
+
+<div class="list-title">常规</div>
+<div class="list">
   {#if !data}
-    <p class="m-0 dim">等待设置数据…</p>
+    <div class="empty">等待设置数据…</div>
   {:else}
-    <form class="flex flex-wrap items-center gap-2" onsubmit={(e) => { e.preventDefault(); saveName(); }}>
-      <label class="text-xs dim w-24" for="node-name">节点名称</label>
-      <input id="node-name" class="input flex-1 min-w-40 max-w-xs" bind:value={nameDraft} maxlength={64} disabled={saving} placeholder={data.general.name} />
-      <button type="submit" class="btn btn-primary" disabled={saving || !nameDraft.trim() || nameDraft.trim() === data.general.name}>保存</button>
+    <form class="row" onsubmit={(e) => { e.preventDefault(); saveName(); }}>
+      <div class="main"><label class="name" for="node-name">节点名称</label><div class="sub">其他设备在配对与布局中看到的名字。</div></div>
+      <input id="node-name" class="input w-44" bind:value={nameDraft} maxlength={64} disabled={saving} placeholder={data.general.name} />
+      <button type="submit" class="btn btn-sm btn-primary" disabled={saving || !nameDraft.trim() || nameDraft.trim() === data.general.name}>保存</button>
     </form>
-    <ul class="m-0 mt-3 list-none p-0">
-      <li class="row">
-        <div class="flex-1"><div class="text-[13px]">mDNS 广播</div><div class="text-xs dim">在局域网内公布本机，供其他设备发现与配对。</div></div>
-        <Switch checked={data.general.advertise} aria-busy={saving} label="mDNS 广播" onchange={(v) => patch({ advertise: v })} />
-      </li>
-      <li class="row">
-        <div class="flex-1"><div class="text-[13px]">自动重连</div><div class="text-xs dim">链路中断后自动尝试恢复到已配对设备。</div></div>
-        <Switch checked={data.general.reconnect} aria-busy={saving} label="自动重连" onchange={(v) => patch({ reconnect: v })} />
-      </li>
-      <li class="row">
-        <div class="flex-1"><div class="text-[13px]">仅本机回环</div><div class="text-xs dim">由 daemon 启动参数决定，此处只读。</div></div>
-        <span class="badge">{data.general.loopback_only ? "开" : "关"}</span>
-      </li>
-      <li class="row">
-        <div class="flex-1"><div class="text-[13px]">Overlay 组网</div><div class="text-xs dim">跨网段中继能力，由 daemon 配置决定。</div></div>
-        <span class="badge">{data.general.overlay_enabled ? "开" : "关"}</span>
-      </li>
-      <li class="row">
-        <div class="flex-1"><div class="text-[13px]">托盘归属</div><div class="text-xs dim">当前由 {data.general.tray_owner === "client" ? "桌面客户端" : "daemon"} 持有托盘图标。</div></div>
-        <span class="badge mono">{data.general.tray_owner}</span>
-      </li>
-    </ul>
+    <div class="row">
+      <div class="main"><div class="name">mDNS 广播</div><div class="sub">在局域网内公布本机，供其他设备发现与配对。</div></div>
+      <Switch checked={data.general.advertise} aria-busy={saving} label="mDNS 广播" onchange={(v) => patch({ advertise: v })} />
+    </div>
+    <div class="row">
+      <div class="main"><div class="name">自动重连</div><div class="sub">链路中断后自动尝试恢复到已配对设备。</div></div>
+      <Switch checked={data.general.reconnect} aria-busy={saving} label="自动重连" onchange={(v) => patch({ reconnect: v })} />
+    </div>
+    <div class="row">
+      <div class="main"><div class="name">仅本机回环</div><div class="sub">由 daemon 启动参数决定，此处只读。</div></div>
+      <span class="badge">{data.general.loopback_only ? "开启" : "关闭"}</span>
+    </div>
+    <div class="row">
+      <div class="main"><div class="name">Overlay 组网</div><div class="sub">跨网段中继能力，由 daemon 配置决定。</div></div>
+      <span class="badge">{data.general.overlay_enabled ? "开启" : "关闭"}</span>
+    </div>
+    <div class="row">
+      <div class="main"><div class="name">托盘归属</div><div class="sub">当前由 {data.general.tray_owner === "client" ? "桌面客户端" : "daemon"} 持有托盘图标。</div></div>
+      <span class="badge mono">{data.general.tray_owner}</span>
+    </div>
   {/if}
-</section>
+</div>
 
-<section class="card">
-  <h2 class="card-title"><Icon name="download" size={15} class="text-zinc-400" />传输</h2>
+<div class="list-title">传输</div>
+<div class="list">
   {#if !data}
-    <p class="m-0 dim">等待设置数据…</p>
+    <div class="empty">等待设置数据…</div>
   {:else}
-    <ul class="m-0 list-none p-0">
-      <li class="row">
-        <div class="flex-1"><div class="text-[13px]">自动接收文件</div><div class="text-xs dim">来自已配对设备的文件直接写入收件箱，无需逐个确认。</div></div>
-        <Switch checked={data.transfer.auto_accept} aria-busy={saving} label="自动接收文件" onchange={(v) => patch({ auto_accept: v })} />
-      </li>
-    </ul>
+    <div class="row">
+      <div class="main"><div class="name">自动接收文件</div><div class="sub">来自已配对设备的文件直接写入收件箱，无需逐个确认。</div></div>
+      <Switch checked={data.transfer.auto_accept} aria-busy={saving} label="自动接收文件" onchange={(v) => patch({ auto_accept: v })} />
+    </div>
   {/if}
-</section>
+</div>

@@ -22,7 +22,7 @@
 
 <div class="block w-full {className}">
   {#if label || (!indeterminate && showPercent)}
-    <div class="flex items-center justify-between mb-1 text-[11px] font-mono text-zinc-400">
+    <div class="mono mb-1 flex items-center justify-between text-[11px] text-[var(--muted)]">
       <span class="truncate">{label}</span>
       {#if !indeterminate && showPercent}<span class="tabular-nums shrink-0">{Math.round(clamped)}%</span>{/if}
     </div>
@@ -33,7 +33,7 @@
     aria-valuemax="100"
     aria-valuenow={indeterminate ? undefined : Math.round(clamped)}
     aria-label={label || "Progress"}
-    class="h-1 w-full rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden"
+    class="h-1 w-full overflow-hidden rounded-full bg-[var(--seg-track)]"
   >
     {#if indeterminate}
       <div class="h-full w-1/3 rounded-full {bar} animate-pulse"></div>

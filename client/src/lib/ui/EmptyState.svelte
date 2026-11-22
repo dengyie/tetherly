@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Ported from awesome-ui/vanilla/EmptyState.js.
+  // Ported from awesome-ui/vanilla/EmptyState.js; Magpie-flat styling.
   import Icon from "./Icon.svelte";
   let {
     icon = "sparkles",
@@ -20,21 +20,15 @@
   } = $props();
 </script>
 
-<div class="flex flex-col items-center justify-center text-center {compact ? 'px-4 py-6' : 'px-6 py-12'} {className}">
-  <div class="p-3 rounded-2xl bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 {compact ? 'mb-2' : 'mb-4'}">
-    <Icon name={icon} size={compact ? 18 : 24} />
+<div class="flex flex-col items-center justify-center text-center {compact ? 'px-4 py-5' : 'px-6 py-10'} {className}">
+  <div class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--pill)] text-[var(--muted)] {compact ? 'mb-2' : 'mb-3'}">
+    <Icon name={icon} size={compact ? 15 : 17} />
   </div>
-  <div class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">{title}</div>
+  <div class="text-[12.5px] font-medium text-[var(--fg-2)]">{title}</div>
   {#if description}
-    <div class="mt-1 text-xs text-zinc-400 dark:text-zinc-500 max-w-xs">{description}</div>
+    <div class="mt-0.5 max-w-xs text-[11.5px] text-[var(--muted)]">{description}</div>
   {/if}
   {#if actionLabel}
-    <button
-      type="button"
-      class="mt-4 px-3.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium transition-colors cursor-pointer"
-      onclick={() => onaction?.()}
-    >
-      {actionLabel}
-    </button>
+    <button type="button" class="btn btn-primary mt-3" onclick={() => onaction?.()}>{actionLabel}</button>
   {/if}
 </div>

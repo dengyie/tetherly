@@ -80,140 +80,142 @@
   const pol = (patch: Parameters<Api["patchTopologyPolicy"]>[0]) => run(() => api.patchTopologyPolicy(patch));
 </script>
 
-<PageHeader title="布局" subtitle="把设备拖到屏幕的某一侧，键鼠推过去就会跨屏" icon="layout">
-  <button type="button" class="btn btn-sm" disabled={busy || !data} onclick={sync}><Icon name="refresh" size={13} />同步到对端</button>
+<PageHeader subtitle="把设备拖到屏幕的某一侧，键鼠推过去就会跨屏">
+  <button type="button" class="btn btn-sm" disabled={busy || !data} onclick={sync}><Icon name="refresh" size={12} />同步到对端</button>
 </PageHeader>
 
 {#if !data}
-  <section class="card"><EmptyState icon="layout" title="等待布局数据…" description="daemon 推送 layout.changed 后会显示屏幕与边缘配置。" /></section>
+  <div class="list"><EmptyState icon="layout" title="等待布局数据…" description="daemon 推送 layout.changed 后会显示屏幕与边缘配置。" /></div>
 {:else}
-  <div class="grid gap-4 lg:grid-cols-[1fr_280px]">
-    <section class="card">
-      <h2 class="card-title"><Icon name="monitor" size={15} class="text-zinc-400" />屏幕边缘</h2>
-      <div class="grid grid-cols-[128px_1fr_128px] grid-rows-[56px_1fr_56px] items-center justify-items-center gap-2" style="min-height: 280px">
-        {#snippet slot(edge: Edge)}
-          {@const peer = peerOf.get(edge) ?? null}
-          <div
-            class="group relative flex min-h-12 w-full max-w-48 items-center justify-center rounded-xl border-2 border-dashed px-2 py-1.5 text-xs transition
-              {dragOver === edge ? 'border-brand-500 bg-brand-500/10' : peer ? 'border-brand-300/70 bg-brand-500/5 dark:border-brand-700/60' : 'border-zinc-300/80 dark:border-zinc-700/70'}"
-            data-edge={edge}
-            role="group"
-            aria-label="{edgeLabel[edge]}侧"
-            ondragover={(e) => { e.preventDefault(); dragOver = edge; }}
-            ondragleave={() => (dragOver = null)}
-            ondrop={(e) => onDrop(e, edge)}
-          >
-            {#if peer}
-              <span class="inline-flex items-center gap-1.5 truncate font-medium"><Icon name="link" size={12} class="text-brand-500" />{peerName(peer)}</span>
-              <button type="button" class="btn btn-ghost btn-sm absolute -right-2 -top-2 h-6 w-6 !p-0 opacity-0 transition group-hover:opacity-100 focus:opacity-100" aria-label="断开{edgeLabel[edge]}侧" disabled={busy} onclick={() => unlink(edge)}><Icon name="x" size={12} /></button>
-            {:else}
-              <button type="button" class="inline-flex items-center gap-1 dim hover:text-brand-700" disabled={busy} onclick={() => (picking = picking === edge ? null : edge)}><Icon name="plus" size={12} /><span class="whitespace-nowrap">{edgeLabel[edge]}侧 · 未配置</span></button>
-            {/if}
-            {#if picking === edge}
-              <div class="absolute left-1/2 top-full z-30 mt-1 w-44 -translate-x-1/2 rounded-xl border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-700 dark:bg-zinc-900" role="menu">
-                {#if trusted.length === 0}
-                  <div class="px-2 py-1.5 text-xs dim">没有可用的已配对设备</div>
-                {:else}
-                  {#each trusted as d (d.id)}
-                    <button type="button" role="menuitem" class="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800" onclick={() => link(edge, d.id)}>
-                      <span class="inline-flex h-1.5 w-1.5 rounded-full {d.online ? 'bg-emerald-500' : 'bg-zinc-400'}"></span>{d.name}
-                    </button>
-                  {/each}
-                {/if}
-              </div>
-            {/if}
-          </div>
-        {/snippet}
+  <div class="grid gap-x-4 lg:grid-cols-[1fr_260px]">
+    <div>
+      <div class="list-title">屏幕边缘 <span class="acts dim">已连接 {linkedEdges.length} / 4</span></div>
+      <div class="list pad">
+        <div class="grid grid-cols-[128px_1fr_128px] grid-rows-[56px_1fr_56px] items-center justify-items-center gap-2" style="min-height: 272px">
+          {#snippet slot(edge: Edge)}
+            {@const peer = peerOf.get(edge) ?? null}
+            <div
+              class="group relative flex min-h-11 w-full max-w-48 items-center justify-center rounded-[9px] border border-dashed px-2 py-1.5 text-[12px] transition
+                {dragOver === edge ? 'border-[var(--accent)] bg-[var(--accent-soft)]' : peer ? 'border-solid border-[var(--line)] bg-[var(--pill)]' : 'border-[var(--line)]'}"
+              data-edge={edge}
+              role="group"
+              aria-label="{edgeLabel[edge]}侧"
+              ondragover={(e) => { e.preventDefault(); dragOver = edge; }}
+              ondragleave={() => (dragOver = null)}
+              ondrop={(e) => onDrop(e, edge)}
+            >
+              {#if peer}
+                <span class="inline-flex items-center gap-1.5 truncate font-medium"><Icon name="link" size={12} class="text-[var(--accent)]" />{peerName(peer)}</span>
+                <button type="button" class="icon absolute -right-2 -top-2 !h-5 !w-5 bg-[var(--card)] shadow-[var(--seg-edge)] opacity-0 transition group-hover:opacity-100 focus:opacity-100" aria-label="断开{edgeLabel[edge]}侧" disabled={busy} onclick={() => unlink(edge)}><Icon name="x" size={11} /></button>
+              {:else}
+                <button type="button" class="dim inline-flex items-center gap-1 hover:text-[var(--fg)]" disabled={busy} onclick={() => (picking = picking === edge ? null : edge)}><Icon name="plus" size={12} /><span class="whitespace-nowrap">{edgeLabel[edge]}侧 · 未配置</span></button>
+              {/if}
+              {#if picking === edge}
+                <div class="menu absolute left-1/2 top-full z-30 mt-1 w-44 -translate-x-1/2" role="menu">
+                  {#if trusted.length === 0}
+                    <div class="dim px-2 py-1.5 text-[12px]">没有可用的已配对设备</div>
+                  {:else}
+                    {#each trusted as d (d.id)}
+                      <button type="button" role="menuitem" class="menu-item" onclick={() => link(edge, d.id)}>
+                        <span class="dot" data-state={d.online ? "online" : ""}></span>{d.name}
+                      </button>
+                    {/each}
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/snippet}
 
-        <div></div>
-        {@render slot("top")}
-        <div></div>
+          <div></div>
+          {@render slot("top")}
+          <div></div>
 
-        {@render slot("left")}
-        <div class="relative flex items-center justify-center rounded-2xl border border-zinc-300/80 bg-gradient-to-br from-zinc-100 to-zinc-200 shadow-inner dark:border-zinc-700 dark:from-zinc-800 dark:to-zinc-900" style="width: {box.w}px; height: {box.h}px" data-testid="layout-display">
-          <div class="text-center">
-            <div class="text-xs font-semibold">本机</div>
-            <div class="mono text-[11px] dim">{data.display.width} × {data.display.height}</div>
-            <div class="text-[10px] dim">缩放 {Math.round(data.display.scale_factor * 100)}%</div>
-            {#if data.display_auto === true}
-              <span class="badge mt-1 border-brand-200 bg-brand-50 text-brand-700 dark:border-brand-800 dark:bg-brand-950/40 dark:text-brand-300" title="分辨率由 daemon 从系统读取（§221）"><Icon name="monitor" size={11} />自动检测</span>
-            {:else if data.display_auto === false}
-              <!-- `undefined` = older daemon without §221: show neither badge nor the button. -->
-              <span class="badge mt-1" title="分辨率已手动固定；点击恢复自动可重新跟随系统">手动设置</span>
-              <button type="button" class="btn btn-ghost btn-sm mt-1 block w-full text-[11px]" disabled={busy} onclick={() => cfg({ display_auto: true })}><Icon name="refresh" size={11} />恢复自动</button>
-            {/if}
+          {@render slot("left")}
+          <div class="relative flex items-center justify-center rounded-[10px] border border-[var(--line)] bg-[var(--pill)]" style="width: {box.w}px; height: {box.h}px" data-testid="layout-display">
+            <div class="text-center">
+              <div class="text-[12px] font-semibold">本机</div>
+              <div class="dim mono text-[11px]">{data.display.width} × {data.display.height}</div>
+              <div class="dim text-[10.5px]">缩放 {Math.round(data.display.scale_factor * 100)}%</div>
+              {#if data.display_auto === true}
+                <span class="badge badge-accent mt-1" title="分辨率由 daemon 从系统读取（§221）"><Icon name="monitor" size={10} />自动检测</span>
+              {:else if data.display_auto === false}
+                <!-- `undefined` = older daemon without §221: show neither badge nor the button. -->
+                <span class="badge mt-1" title="分辨率已手动固定；点击恢复自动可重新跟随系统">手动设置</span>
+                <button type="button" class="btn btn-sm btn-text mt-1 block w-full" disabled={busy} onclick={() => cfg({ display_auto: true })}><Icon name="refresh" size={11} />恢复自动</button>
+              {/if}
+            </div>
           </div>
+          {@render slot("right")}
+
+          <div></div>
+          {@render slot("bottom")}
+          <div></div>
         </div>
-        {@render slot("right")}
-
-        <div></div>
-        {@render slot("bottom")}
-        <div></div>
+        <p class="dim m-0 mt-2 text-[11.5px]">点击边缘可选择设备，或从右侧列表拖动设备到边缘。</p>
       </div>
-      <p class="m-0 mt-3 text-xs dim">已连接 {linkedEdges.length} / 4 个边缘。点击边缘可选择设备，或从右侧列表拖动设备到边缘。</p>
-    </section>
+    </div>
 
-    <section class="card">
-      <h2 class="card-title"><Icon name="monitor" size={15} class="text-zinc-400" />已配对设备</h2>
-      {#if trusted.length === 0}
-        <EmptyState compact icon="link" title="还没有已配对设备" />
-      {:else}
-        <ul class="m-0 flex list-none flex-col gap-1.5 p-0">
+    <div>
+      <div class="list-title">已配对设备 <span class="acts dim">{trusted.length}</span></div>
+      <div class="list">
+        {#if trusted.length === 0}
+          <EmptyState compact icon="link" title="还没有已配对设备" />
+        {:else}
           {#each trusted as d (d.id)}
-            <li class="flex cursor-grab items-center gap-2 rounded-xl border border-zinc-200/80 bg-white/60 px-3 py-2 text-[13px] active:cursor-grabbing dark:border-zinc-700/70 dark:bg-zinc-900/40" draggable="true" ondragstart={(e) => onDragStart(e, d.id)} data-device-chip={d.id}>
-              <span class="inline-flex h-2 w-2 rounded-full {d.online ? 'bg-emerald-500' : 'bg-zinc-400'}"></span>
-              <span class="truncate font-medium">{d.name}</span>
-              <span class="ml-auto text-[11px] dim">{EDGES.filter((e) => peerOf.get(e) === d.id).map((e) => edgeLabel[e]).join("") || ""}</span>
-            </li>
+            <div class="row hov cursor-grab active:cursor-grabbing" draggable="true" ondragstart={(e) => onDragStart(e, d.id)} data-device-chip={d.id} role="listitem">
+              <span class="dot" data-state={d.online ? "online" : ""}></span>
+              <span class="name truncate">{d.name}</span>
+              <span class="val">{EDGES.filter((e) => peerOf.get(e) === d.id).map((e) => edgeLabel[e]).join("") || ""}</span>
+            </div>
           {/each}
-        </ul>
-      {/if}
-    </section>
+        {/if}
+      </div>
+    </div>
   </div>
 
-  <div class="grid gap-4 lg:grid-cols-2">
-    <section class="card">
-      <h2 class="card-title"><Icon name="sliders" size={15} class="text-zinc-400" />跨屏参数</h2>
-      <div class="flex flex-col gap-3">
-        <label class="flex flex-col gap-1 text-xs">
-          <span class="flex justify-between"><span>推动阻力</span><span class="mono dim">{data.config.resistance_px} px</span></span>
-          <input type="range" min="0" max="200" step="5" value={data.config.resistance_px} aria-busy={busy} onchange={(e) => cfg({ resistance_px: num(e) })} aria-label="推动阻力" />
-        </label>
-        <label class="flex flex-col gap-1 text-xs">
-          <span class="flex justify-between"><span>边缘停留</span><span class="mono dim">{data.config.delay_ms} ms</span></span>
-          <input type="range" min="0" max="1000" step="25" value={data.config.delay_ms} aria-busy={busy} onchange={(e) => cfg({ delay_ms: num(e) })} aria-label="边缘停留" />
-        </label>
-        <label class="flex flex-col gap-1 text-xs">
-          <span class="flex justify-between"><span>角落锁定</span><span class="mono dim">{data.config.corner_lock_size_px} px</span></span>
-          <input type="range" min="0" max="200" step="5" value={data.config.corner_lock_size_px} aria-busy={busy} onchange={(e) => cfg({ corner_lock_size_px: num(e) })} aria-label="角落锁定" />
-        </label>
-        <label class="flex flex-col gap-1 text-xs">
-          <span class="flex justify-between"><span>远端指针速度</span><span class="mono dim">{data.config.remote_speed_percent}%</span></span>
-          <input type="range" min="25" max="300" step="5" value={data.config.remote_speed_percent} aria-busy={busy} onchange={(e) => cfg({ remote_speed_percent: num(e) })} aria-label="远端指针速度" />
-        </label>
+  <div class="grid gap-x-4 lg:grid-cols-2">
+    <div>
+      <div class="list-title">跨屏参数</div>
+      <div class="list">
         <div class="row">
-          <div class="flex-1"><div class="text-[13px]">边缘环绕</div><div class="text-xs dim">从最后一侧推出时回到第一侧。</div></div>
+          <div class="main"><div class="name">推动阻力</div><div class="sub mono">{data.config.resistance_px} px</div></div>
+          <input type="range" class="w-36" min="0" max="200" step="5" value={data.config.resistance_px} aria-busy={busy} onchange={(e) => cfg({ resistance_px: num(e) })} aria-label="推动阻力" />
+        </div>
+        <div class="row">
+          <div class="main"><div class="name">边缘停留</div><div class="sub mono">{data.config.delay_ms} ms</div></div>
+          <input type="range" class="w-36" min="0" max="1000" step="25" value={data.config.delay_ms} aria-busy={busy} onchange={(e) => cfg({ delay_ms: num(e) })} aria-label="边缘停留" />
+        </div>
+        <div class="row">
+          <div class="main"><div class="name">角落锁定</div><div class="sub mono">{data.config.corner_lock_size_px} px</div></div>
+          <input type="range" class="w-36" min="0" max="200" step="5" value={data.config.corner_lock_size_px} aria-busy={busy} onchange={(e) => cfg({ corner_lock_size_px: num(e) })} aria-label="角落锁定" />
+        </div>
+        <div class="row">
+          <div class="main"><div class="name">远端指针速度</div><div class="sub mono">{data.config.remote_speed_percent}%</div></div>
+          <input type="range" class="w-36" min="25" max="300" step="5" value={data.config.remote_speed_percent} aria-busy={busy} onchange={(e) => cfg({ remote_speed_percent: num(e) })} aria-label="远端指针速度" />
+        </div>
+        <div class="row">
+          <div class="main"><div class="name">边缘环绕</div><div class="sub">从最后一侧推出时回到第一侧。</div></div>
           <Switch checked={data.config.wrap_around} aria-busy={busy} label="边缘环绕" onchange={(v) => cfg({ wrap_around: v })} />
         </div>
       </div>
-    </section>
+    </div>
 
-    <section class="card">
-      <h2 class="card-title"><Icon name="shield" size={15} class="text-zinc-400" />策略</h2>
-      <ul class="m-0 list-none p-0">
-        <li class="row">
-          <div class="flex-1"><div class="text-[13px]">启用跨屏</div><div class="text-xs dim">关闭后键鼠不会离开本机。</div></div>
+    <div>
+      <div class="list-title">策略</div>
+      <div class="list">
+        <div class="row">
+          <div class="main"><div class="name">启用跨屏</div><div class="sub">关闭后键鼠不会离开本机。</div></div>
           <Switch checked={data.policy.enabled} aria-busy={busy} label="启用跨屏" onchange={(v) => pol({ enabled: v })} />
-        </li>
-        <li class="row">
-          <div class="flex-1"><div class="text-[13px]">允许被远端控制</div><div class="text-xs dim">其他设备的键鼠可以跨进本机。</div></div>
+        </div>
+        <div class="row">
+          <div class="main"><div class="name">允许被远端控制</div><div class="sub">其他设备的键鼠可以跨进本机。</div></div>
           <Switch checked={data.policy.allow_inbound_control} aria-busy={busy} label="允许被远端控制" onchange={(v) => pol({ allow_inbound_control: v })} />
-        </li>
-        <li class="row">
-          <div class="flex-1"><div class="text-[13px]">自动连接已配对设备</div><div class="text-xs dim">新配对的设备自动占用一个空闲边缘。</div></div>
+        </div>
+        <div class="row">
+          <div class="main"><div class="name">自动连接已配对设备</div><div class="sub">新配对的设备自动占用一个空闲边缘。</div></div>
           <Switch checked={data.policy.auto_link_paired_peers} aria-busy={busy} label="自动连接已配对设备" onchange={(v) => pol({ auto_link_paired_peers: v })} />
-        </li>
-      </ul>
-    </section>
+        </div>
+      </div>
+    </div>
   </div>
 {/if}

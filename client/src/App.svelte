@@ -17,10 +17,7 @@
   import { Api } from "./lib/api/client";
   import type { Transport } from "./lib/transport/transport";
   import { brandLogo, brandName } from "./lib/brand";
-  import Glass from "./lib/ui/Glass.svelte";
   import Icon from "./lib/ui/Icon.svelte";
-  import StatusIndicator from "./lib/ui/StatusIndicator.svelte";
-  import ThemeToggle from "./lib/ui/ThemeToggle.svelte";
   import ToastStack from "./lib/ui/ToastStack.svelte";
   import CommandPalette, { type PaletteItem } from "./lib/ui/CommandPalette.svelte";
   import { applyTheme, type ThemeMode } from "./lib/ui/theme";
@@ -66,17 +63,39 @@
   let page: Page = $state("overview");
   let paletteOpen = $state(false);
 
-  // Order is the product's: everyday pages first, maintenance last.
-  const nav: { id: Page; label: string; icon: string; hint: string }[] = [
-    { id: "overview", label: "概览", icon: "home", hint: "本机状态、输入归属与配对" },
-    { id: "devices", label: "设备", icon: "monitor", hint: "已配对与已屏蔽设备" },
-    { id: "layout", label: "布局", icon: "layout", hint: "屏幕邻接与跨屏参数" },
-    { id: "transfers", label: "传输", icon: "send", hint: "文件传输队列" },
-    { id: "inbox", label: "收件箱", icon: "inbox", hint: "已接收的文件" },
-    { id: "activity", label: "动态", icon: "activity", hint: "通知、消息与投递" },
-    { id: "settings", label: "设置", icon: "settings", hint: "节点名称与共享策略" },
-    { id: "diagnostics", label: "诊断", icon: "terminal", hint: "事件流与日志" },
+  // Magpie-style grouped sidebar (§224): everyday pages first, maintenance
+  // last, 设置 pinned to the bottom like Magpie's 設定.
+  type NavItem = { id: Page; label: string; icon: string; hint: string; group: string };
+  const groups: { label: string; items: NavItem[] }[] = [
+    {
+      label: "使用",
+      items: [
+        { id: "overview", label: "概览", icon: "home", hint: "本机状态、输入归属与配对", group: "使用" },
+        { id: "devices", label: "设备", icon: "monitor", hint: "已配对与已屏蔽设备", group: "使用" },
+        { id: "layout", label: "布局", icon: "layout", hint: "屏幕邻接与跨屏参数", group: "使用" },
+      ],
+    },
+    {
+      label: "传输",
+      items: [
+        { id: "transfers", label: "传输", icon: "send", hint: "文件传输队列", group: "传输" },
+        { id: "inbox", label: "收件箱", icon: "inbox", hint: "已接收的文件", group: "传输" },
+        { id: "activity", label: "动态", icon: "activity", hint: "通知、消息与投递", group: "传输" },
+      ],
+    },
+    {
+      label: "维护",
+      items: [{ id: "diagnostics", label: "诊断", icon: "terminal", hint: "事件流与日志", group: "维护" }],
+    },
   ];
+  const settingsItem: NavItem = { id: "settings", label: "设置", icon: "settings", hint: "外观、节点名称与共享策略", group: "系统" };
+  const nav: NavItem[] = [...groups.flatMap((g) => g.items), settingsItem];
+  const current = $derived(nav.find((n) => n.id === page) ?? nav[0]);
+
+  // macOS Tauri shell draws the traffic lights over the sidebar
+  // (titleBarStyle=Overlay); leave room for them. Windows ignores that flag.
+  const macOverlay = isTauri() && /Mac/i.test(navigator.platform);
+  const daemonAddr = isTauri() ? "127.0.0.1:45716" : location.host;
 
   const paletteItems: PaletteItem[] = $derived([
     ...nav.map((n) => ({ id: `go:${n.id}`, label: n.label, hint: n.hint, group: "页面", icon: n.icon })),
@@ -179,9 +198,6 @@
     resyncing: "重新同步…",
     offline: "连接中断，正在重连",
   };
-  const linkStatus = $derived(
-    $linkState === "live" ? "online" : $linkState === "offline" ? "offline" : "connecting",
-  );
   const linkText: Record<string, string> = {
     connecting: "连接中",
     live: "已连接",
@@ -197,58 +213,60 @@
 <svelte:window onkeydown={isTrayPanel ? undefined : onShellKey} />
 
 {#if isTrayPanel}
-  <div class="shell h-screen app-backdrop" data-tray="panel">
+  <div class="shell h-screen" data-tray="panel">
     <Tray {devices} {input} {transfers} {settings} link={$linkState} {api} />
   </div>
 {:else}
-  <div class="shell flex h-screen overflow-hidden app-backdrop text-zinc-800 dark:text-zinc-100" data-tray="main">
-    <Glass variant="sidebar" intensity="regular" interactive={false} class="w-56 shrink-0 flex flex-col">
-      <div class="flex h-full flex-col">
-        <div class="flex items-center gap-2.5 px-4 pt-4 pb-3">
-          <img src={brandLogo} alt="" width="28" height="28" class="h-7 w-7 rounded-lg shadow-sm" draggable="false" />
-          <div class="min-w-0">
-            <div class="text-sm font-semibold leading-tight tracking-tight">{brandName}</div>
-            <div class="text-[10px] uppercase tracking-wider text-zinc-400">键鼠共享网格</div>
-          </div>
-        </div>
-        <nav class="flex flex-col gap-0.5 px-2 py-1" aria-label="主导航">
-          {#each nav as n (n.id)}
-            <button
-              type="button"
-              class="group/nav flex items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[13px] font-medium transition-colors cursor-pointer {page === n.id
-                ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 shadow-xs'
-                : 'text-zinc-600 dark:text-zinc-400 hover:bg-white/60 dark:hover:bg-zinc-800/60 hover:text-zinc-900 dark:hover:text-zinc-100'}"
-              aria-current={page === n.id ? "page" : undefined}
-              onclick={() => (page = n.id)}
-            >
-              <Icon name={n.icon} size={16} class={page === n.id ? "text-brand-500" : "text-zinc-400 group-hover/nav:text-zinc-600 dark:group-hover/nav:text-zinc-300"} />
+  <div class="shell flex h-screen overflow-hidden" data-tray="main">
+    <aside class="side {macOverlay ? 'pt-9' : ''}">
+      <div class="side-head" data-tauri-drag-region>
+        <img src={brandLogo} alt="" width="22" height="22" draggable="false" />
+        <span>{brandName}</span>
+      </div>
+      <nav class="flex flex-col" aria-label="主导航">
+        {#each groups as g (g.label)}
+          <div class="nav-gl">{g.label}</div>
+          {#each g.items as n (n.id)}
+            <button type="button" class="nav-btn {page === n.id ? 'on' : ''}" title={n.hint} aria-current={page === n.id ? "page" : undefined} onclick={() => (page = n.id)}>
+              <span class="nav-ic"><Icon name={n.icon} size={15} /></span>
               {n.label}
+              <!-- counters are decorative (aria-hidden) so the button's accessible name stays the bare label -->
+              {#if n.id === "devices" && onlineCount > 0}<span class="cnt" aria-hidden="true">{onlineCount}</span>{/if}
+              {#if n.id === "transfers" && activeTransfers > 0}<span class="cnt" aria-hidden="true">{activeTransfers}</span>{/if}
             </button>
           {/each}
-        </nav>
-        <div class="mt-auto px-3 pb-3 pt-2 flex flex-col gap-2">
-          <div class="flex items-center justify-between rounded-xl bg-white/50 dark:bg-zinc-800/50 px-3 py-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-            <span class="inline-flex items-center gap-1.5"><Icon name="monitor" size={13} /><span class="mono">{onlineCount}</span> 在线</span>
-            <span class="inline-flex items-center gap-1.5"><Icon name="send" size={13} /><span class="mono">{activeTransfers}</span> 传输</span>
-          </div>
-          <ThemeToggle compact class="w-full justify-between" />
+        {/each}
+      </nav>
+      <div class="side-foot">
+        <button type="button" class="nav-btn {page === 'settings' ? 'on' : ''}" aria-current={page === "settings" ? "page" : undefined} onclick={() => (page = "settings")}>
+          <span class="nav-ic"><Icon name="settings" size={15} /></span>
+          设置
+        </button>
+        <div class="gw" title="守护进程 {daemonAddr}">
+          <span class="dot" data-state={$linkState}></span>
+          <span>{linkText[$linkState]}</span>
+          <span class="mono truncate">{daemonAddr}</span>
         </div>
       </div>
-    </Glass>
+    </aside>
 
-    <div class="flex min-w-0 flex-1 flex-col">
-      <header class="flex h-12 shrink-0 items-center gap-3 border-b border-zinc-200/70 dark:border-zinc-800/80 bg-white/40 dark:bg-zinc-900/40 backdrop-blur-md px-5">
-        <StatusIndicator status={linkStatus} label={linkText[$linkState]} />
-        <span class="link text-xs text-zinc-500 dark:text-zinc-400" data-state={$linkState}>{stateLabel[$linkState]}</span>
+    <main class="flex min-w-0 flex-1 flex-col">
+      <header class="topbar" data-tauri-drag-region>
+        <div class="crumb">
+          <span>{current.group}</span><i>/</i><h1>{current.label}</h1>
+        </div>
+        <span class="link" data-state={$linkState}>{stateLabel[$linkState]}</span>
         <div class="ml-auto flex items-center gap-2">
-          <button type="button" class="btn btn-ghost btn-sm" aria-label="命令面板" title="命令面板 (⌘K)" onclick={() => (paletteOpen = true)}>
-            <Icon name="search" size={14} />
+          <button type="button" class="search-pill" aria-label="命令面板" title="命令面板 (⌘K)" onclick={() => (paletteOpen = true)}>
+            <Icon name="search" size={13} />
+            <span>搜索或跳转</span>
             <kbd class="kbd">⌘K</kbd>
           </button>
         </div>
       </header>
-      <main class="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-        <div class="mx-auto w-full max-w-4xl flex flex-col gap-4">
+      <div class="min-h-0 flex-1 overflow-y-auto px-5 pb-6 pt-1">
+        <!-- Magpie: content hugs the breadcrumb's left edge and spans the pane, capped for ultra-wide. -->
+        <div class="w-full max-w-[1180px] flex flex-col gap-3">
           {#if page === "overview" && api}
             <Overview {devices} {system} {input} {pairing} {api} />
           {:else if page === "devices" && api}
@@ -267,8 +285,8 @@
             <Diagnostics {api} />
           {/if}
         </div>
-      </main>
-    </div>
+      </div>
+    </main>
     <CommandPalette bind:open={paletteOpen} items={paletteItems} onselect={onPalette} />
   </div>
 {/if}

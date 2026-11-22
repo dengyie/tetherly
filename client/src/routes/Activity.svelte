@@ -13,11 +13,7 @@
     dismissed: "已忽略",
     rejected: "已拒绝",
   };
-  const statusTone: Record<string, string> = {
-    pending: "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-400",
-    opened: "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400",
-    rejected: "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-400",
-  };
+  const statusTone: Record<string, string> = { pending: "badge-warn", opened: "badge-ok", rejected: "badge-err" };
 
   const empty = $derived(
     !data ||
@@ -25,86 +21,88 @@
   );
 </script>
 
-<PageHeader title="动态" subtitle="设备间的通知、消息和投递" icon="activity" />
+<PageHeader subtitle="设备间的通知、消息和投递" />
 
-<div class="grid gap-4 lg:grid-cols-2">
-  <section class="card">
-    <h2 class="card-title"><Icon name="bell" size={15} class="text-zinc-400" />通知候选</h2>
-    {#if (data?.candidates.length ?? 0) === 0}
-      <EmptyState compact icon="bell" title="暂无通知候选" />
-    {:else}
-      <ul class="m-0 list-none p-0">
+<div class="grid gap-x-4 lg:grid-cols-2">
+  <div>
+    <div class="list-title">通知候选 <span class="acts dim">{data?.candidates.length ?? 0}</span></div>
+    <div class="list">
+      {#if (data?.candidates.length ?? 0) === 0}
+        <EmptyState compact icon="bell" title="暂无通知候选" />
+      {:else}
         {#each data?.candidates ?? [] as c (c.id)}
-          <li class="row items-start">
-            <div class="min-w-0 flex-1">
+          <div class="row hov">
+            <span class="ic"><Icon name="bell" size={15} /></span>
+            <div class="main">
               <div class="flex items-center gap-2">
-                <span class="font-medium">{c.app_name || c.app_id}</span>
-                {#if c.has_otp}<span class="badge border-brand-200 bg-brand-50 text-brand-700 dark:border-brand-800 dark:bg-brand-950/40 dark:text-brand-300"><Icon name="key" size={11} />含验证码</span>{/if}
+                <span class="name">{c.app_name || c.app_id}</span>
+                {#if c.has_otp}<span class="badge badge-accent"><Icon name="key" size={10} />含验证码</span>{/if}
               </div>
-              <div class="text-[13px]">{c.title}</div>
-              <div class="text-xs dim">来自 {c.source} · {whenMs(c.expires_ms)} 过期</div>
+              <div class="text-[12.5px]">{c.title}</div>
+              <div class="sub">来自 {c.source} · {whenMs(c.expires_ms)} 过期</div>
             </div>
-          </li>
+          </div>
         {/each}
-      </ul>
-    {/if}
-  </section>
+      {/if}
+    </div>
+  </div>
 
-  <section class="card">
-    <h2 class="card-title"><Icon name="message" size={15} class="text-zinc-400" />待取回复</h2>
-    {#if (data?.replies.length ?? 0) === 0}
-      <EmptyState compact icon="message" title="没有等待取回的快速回复" />
-    {:else}
-      <ul class="m-0 list-none p-0">
+  <div>
+    <div class="list-title">待取回复 <span class="acts dim">{data?.replies.length ?? 0}</span></div>
+    <div class="list">
+      {#if (data?.replies.length ?? 0) === 0}
+        <EmptyState compact icon="message" title="没有等待取回的快速回复" />
+      {:else}
         {#each data?.replies ?? [] as r (r.id)}
-          <li class="row">
-            <span class="font-medium">{r.app_id}</span>
-            <span class="text-xs dim">来自 {r.source}</span>
-          </li>
+          <div class="row hov">
+            <span class="ic"><Icon name="message" size={15} /></span>
+            <div class="main"><div class="name">{r.app_id}</div><div class="sub">来自 {r.source}</div></div>
+          </div>
         {/each}
-      </ul>
-    {/if}
-  </section>
+      {/if}
+    </div>
+  </div>
 
-  <section class="card">
-    <h2 class="card-title"><Icon name="send" size={15} class="text-zinc-400" />直连消息</h2>
-    {#if (data?.messages.length ?? 0) === 0}
-      <EmptyState compact icon="send" title="暂无消息记录" />
-    {:else}
-      <ul class="m-0 list-none p-0">
+  <div>
+    <div class="list-title">直连消息 <span class="acts dim">{data?.messages.length ?? 0}</span></div>
+    <div class="list">
+      {#if (data?.messages.length ?? 0) === 0}
+        <EmptyState compact icon="send" title="暂无消息记录" />
+      {:else}
         {#each data?.messages ?? [] as m (m.id)}
-          <li class="row items-start">
+          <div class="row hov">
             <span class="badge shrink-0">{m.direction === "inbound" ? "收" : "发"}</span>
-            <div class="min-w-0 flex-1">
-              <div class="break-words text-[13px]">{m.text}</div>
-              <div class="text-xs dim">{m.peer} · {whenMs(m.timestamp_ms)}</div>
+            <div class="main">
+              <div class="break-words text-[12.5px]">{m.text}</div>
+              <div class="sub">{m.peer} · {whenMs(m.timestamp_ms)}</div>
             </div>
-            {#if !m.read}<span class="inline-flex h-2 w-2 shrink-0 rounded-full bg-brand-500" title="未读"></span>{/if}
-          </li>
+            {#if !m.read}<span class="dot" data-state="connecting" title="未读"></span>{/if}
+          </div>
         {/each}
-      </ul>
-    {/if}
-  </section>
+      {/if}
+    </div>
+  </div>
 
-  <section class="card">
-    <h2 class="card-title"><Icon name="external-link" size={15} class="text-zinc-400" />资源投递</h2>
-    {#if (data?.handoffs.length ?? 0) === 0}
-      <EmptyState compact icon="external-link" title="暂无来自其他设备的链接投递" />
-    {:else}
-      <ul class="m-0 list-none p-0">
+  <div>
+    <div class="list-title">资源投递 <span class="acts dim">{data?.handoffs.length ?? 0}</span></div>
+    <div class="list">
+      {#if (data?.handoffs.length ?? 0) === 0}
+        <EmptyState compact icon="external-link" title="暂无来自其他设备的链接投递" />
+      {:else}
         {#each data?.handoffs ?? [] as h (h.id)}
-          <li class="row items-start">
-            <div class="min-w-0 flex-1">
-              <div class="truncate font-medium">{h.title || h.url}</div>
-              <div class="text-xs dim">{h.sender_alias || h.sender_id} · {whenMs(h.received_ms)}</div>
+          <div class="row hov">
+            <span class="ic"><Icon name="external-link" size={15} /></span>
+            <div class="main">
+              <div class="name truncate">{h.title || h.url}</div>
+              <div class="sub">{h.sender_alias || h.sender_id} · {whenMs(h.received_ms)}</div>
             </div>
             <span class="badge {statusTone[h.status] ?? ''}">{statusLabel[h.status] ?? h.status}</span>
-          </li>
+          </div>
         {/each}
-      </ul>
-    {/if}
-  </section>
+      {/if}
+    </div>
+  </div>
 </div>
 {#if empty}
-  <p class="m-0 text-center text-xs dim">设备间的通知、消息和投递都会出现在这里。</p>
+  <p class="dim m-0 text-center text-[11.5px]">设备间的通知、消息和投递都会出现在这里。</p>
 {/if}

@@ -26,58 +26,54 @@
   const platformIcon = (p: string | null) => (p === "macos" ? "monitor" : p === "windows" ? "monitor" : p === "android" || p === "ios" ? "mouse" : "cpu");
 </script>
 
-<PageHeader title="设备" subtitle="已配对设备的连接、屏蔽与移除" icon="monitor" />
+<PageHeader subtitle="已配对设备的连接、屏蔽与移除" />
 
-<section class="card">
-  <h2 class="card-title"><Icon name="shield" size={15} class="text-zinc-400" />已配对（{trusted.length}）</h2>
+<div class="list-title">已配对 <span class="acts dim">{trusted.length}</span></div>
+<div class="list">
   {#if trusted.length === 0}
     <EmptyState icon="link" title="还没有已配对设备" description="在另一台设备上拨号即可配对。" />
   {:else}
-    <ul class="m-0 list-none p-0">
-      {#each trusted as d (d.id)}
-        <li class="row flex-wrap">
-          <span class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-zinc-100 dark:bg-zinc-800 text-zinc-500">
-            <Icon name={platformIcon(d.platform)} size={17} />
-          </span>
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <span class="font-medium">{d.name}</span>
-              <StatusIndicator status={d.online ? "online" : "offline"} label={d.online ? "在线" : "离线"} pingMs={d.online ? d.rtt_ms : null} />
-            </div>
-            <div class="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs dim">
-              <span>{d.platform ?? "?"}</span>
-              {#if d.online && d.path}<span>· {d.path}</span>{/if}
-              {#if d.group}<span class="badge">{d.group}</span>{/if}
-              {#each d.caps as c (c)}<span class="badge">{c}</span>{/each}
-            </div>
+    {#each trusted as d (d.id)}
+      <div class="row hov flex-wrap">
+        <span class="ic lg"><Icon name={platformIcon(d.platform)} size={16} /></span>
+        <div class="main">
+          <div class="flex items-center gap-2.5">
+            <span class="name">{d.name}</span>
+            <StatusIndicator status={d.online ? "online" : "offline"} label={d.online ? "在线" : "离线"} pingMs={d.online ? d.rtt_ms : null} />
           </div>
-          <div class="flex items-center gap-1.5">
-            {#if !d.online}
-              <button type="button" class="btn btn-primary btn-sm" disabled={busyId === d.id} onclick={() => connect(d)}>连接</button>
-            {:else}
-              <button type="button" class="btn btn-sm" disabled={busyId === d.id} onclick={() => disconnect(d)}>断开</button>
-            {/if}
-            <button type="button" class="btn btn-sm" disabled={busyId === d.id} onclick={() => block(d)}>屏蔽</button>
-            <button type="button" class="btn btn-danger btn-sm" disabled={busyId === d.id} onclick={() => forget(d)}>忘记</button>
+          <div class="sub flex flex-wrap items-center gap-1.5">
+            <span>{d.platform ?? "?"}</span>
+            {#if d.online && d.path}<span>· {d.path}</span>{/if}
+            {#if d.group}<span class="badge">{d.group}</span>{/if}
+            {#each d.caps as c (c)}<span class="badge">{c}</span>{/each}
           </div>
-        </li>
-      {/each}
-    </ul>
+        </div>
+        <div class="acts">
+          {#if !d.online}
+            <button type="button" class="btn btn-sm btn-primary" disabled={busyId === d.id} onclick={() => connect(d)}>连接</button>
+          {:else}
+            <button type="button" class="btn btn-sm" disabled={busyId === d.id} onclick={() => disconnect(d)}>断开</button>
+          {/if}
+          <button type="button" class="btn btn-sm" disabled={busyId === d.id} onclick={() => block(d)}>屏蔽</button>
+          <button type="button" class="btn btn-sm btn-text btn-danger" disabled={busyId === d.id} onclick={() => forget(d)}>忘记</button>
+        </div>
+      </div>
+    {/each}
   {/if}
-</section>
+</div>
 
 {#if blocked.length > 0}
-  <section class="card">
-    <h2 class="card-title"><Icon name="shield-off" size={15} class="text-zinc-400" />已屏蔽（{blocked.length}）</h2>
-    <ul class="m-0 list-none p-0">
-      {#each blocked as d (d.id)}
-        <li class="row">
-          <span class="inline-flex h-2 w-2 rounded-full bg-zinc-400"></span>
-          <span class="font-medium">{d.name}</span>
-          {#if d.block_reason}<span class="text-xs dim">{d.block_reason}</span>{/if}
-          <button type="button" class="btn btn-sm ml-auto" disabled={busyId === d.id} onclick={() => unblock(d)}>解除屏蔽</button>
-        </li>
-      {/each}
-    </ul>
-  </section>
+  <div class="list-title">已屏蔽 <span class="acts dim">{blocked.length}</span></div>
+  <div class="list">
+    {#each blocked as d (d.id)}
+      <div class="row hov">
+        <span class="ic lg"><Icon name="shield-off" size={15} /></span>
+        <div class="main">
+          <div class="name">{d.name}</div>
+          {#if d.block_reason}<div class="sub">{d.block_reason}</div>{/if}
+        </div>
+        <button type="button" class="btn btn-sm" disabled={busyId === d.id} onclick={() => unblock(d)}>解除屏蔽</button>
+      </div>
+    {/each}
+  </div>
 {/if}

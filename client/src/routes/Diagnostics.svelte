@@ -41,49 +41,53 @@
   });
 </script>
 
-<PageHeader title="诊断" subtitle="事件流、旧路由迁移监控与日志" icon="terminal">
-  <button type="button" class="btn btn-sm" disabled={busy} onclick={refresh}><Icon name="refresh" size={13} class={busy ? "animate-spin" : ""} />刷新</button>
+<PageHeader subtitle="事件流、旧路由迁移监控与日志">
+  <button type="button" class="icon" aria-label="刷新" title="刷新" disabled={busy} onclick={refresh}><Icon name="refresh" size={14} class={busy ? "animate-spin" : ""} /></button>
 </PageHeader>
 
-<div class="grid gap-4 lg:grid-cols-2">
-  <section class="card">
-    <h2 class="card-title"><Icon name="activity" size={15} class="text-zinc-400" />事件流</h2>
-    {#if diag}
-      <p class="m-0 text-[13px]">当前 seq：<span class="mono">{diag.event_seq}</span></p>
-      <h3 class="mb-1.5 mt-3 text-xs font-semibold dim">旧路由命中（迁移监控）</h3>
-      {#if diag.legacy_routes.length === 0}
-        <p class="m-0 text-xs dim">没有旧 /api/* 命中</p>
+<div class="grid gap-x-4 lg:grid-cols-2">
+  <div>
+    <div class="list-title">事件流</div>
+    <div class="list">
+      {#if diag}
+        <div class="row compact"><div class="main name">当前 seq</div><span class="val mono">{diag.event_seq}</span></div>
+        <div class="row compact"><div class="main name">旧路由命中 <span class="dim font-normal">迁移监控</span></div><span class="val mono">{diag.legacy_routes.length}</span></div>
+        {#if diag.legacy_routes.length > 0}
+          <div class="row-group border-t border-[var(--line-2)]">
+            <table class="w-full border-collapse text-[11.5px]">
+              <thead><tr class="dim text-left"><th class="px-3.5 py-1.5 font-medium">方法</th><th class="py-1.5 pr-2 font-medium">路由</th><th class="py-1.5 pr-2 font-medium">调用方</th><th class="py-1.5 pr-3 font-medium">次数</th></tr></thead>
+              <tbody>
+                {#each diag.legacy_routes as h}
+                  <tr class="border-t border-[var(--line-2)]"><td class="mono px-3.5 py-1.5">{h.method}</td><td class="mono py-1.5 pr-2">{h.route}</td><td class="py-1.5 pr-2">{h.caller}</td><td class="mono py-1.5 pr-3">{h.count}</td></tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
       {:else}
-        <table class="w-full border-collapse text-xs">
-          <thead><tr class="text-left dim"><th class="py-1 pr-2 font-medium">方法</th><th class="py-1 pr-2 font-medium">路由</th><th class="py-1 pr-2 font-medium">调用方</th><th class="py-1 font-medium">次数</th></tr></thead>
-          <tbody>
-            {#each diag.legacy_routes as h}
-              <tr class="border-t border-zinc-100 dark:border-zinc-800"><td class="mono py-1 pr-2">{h.method}</td><td class="mono py-1 pr-2">{h.route}</td><td class="py-1 pr-2">{h.caller}</td><td class="mono py-1">{h.count}</td></tr>
-            {/each}
-          </tbody>
-        </table>
+        <div class="empty">{busy ? "加载中…" : "等待数据…"}</div>
       {/if}
-    {:else}
-      <p class="m-0 dim">{busy ? "加载中…" : "等待数据…"}</p>
-    {/if}
-  </section>
+    </div>
+  </div>
 
-  <section class="card">
-    <h2 class="card-title"><Icon name="sliders" size={15} class="text-zinc-400" />日志级别</h2>
-    <form class="flex gap-2" onsubmit={(e) => { e.preventDefault(); void applyFilter(); }}>
-      <input class="input flex-1 mono" placeholder="例如 info,tetherly_node=debug" bind:value={filterInput} aria-label="日志过滤器" />
-      <button type="submit" class="btn btn-primary" disabled={busy || !filterInput.trim()}>应用</button>
-      <button type="button" class="btn" disabled={busy} onclick={resetFilter}>恢复默认</button>
-    </form>
-    <p class="m-0 mt-2 text-xs dim">tracing EnvFilter 语法；留空则沿用启动时的级别。</p>
-  </section>
+  <div>
+    <div class="list-title">日志级别</div>
+    <div class="list">
+      <form class="row flex-wrap" onsubmit={(e) => { e.preventDefault(); void applyFilter(); }}>
+        <input class="input mono min-w-0 flex-1" placeholder="例如 info,tetherly_node=debug" bind:value={filterInput} aria-label="日志过滤器" />
+        <button type="submit" class="btn btn-sm btn-primary" disabled={busy || !filterInput.trim()}>应用</button>
+        <button type="button" class="btn btn-sm" disabled={busy} onclick={resetFilter}>恢复默认</button>
+      </form>
+      <div class="note">tracing EnvFilter 语法；留空则沿用启动时的级别。</div>
+    </div>
+  </div>
 </div>
 
-<section class="card">
-  <h2 class="card-title"><Icon name="code" size={15} class="text-zinc-400" />日志尾部</h2>
+<div class="list-title">日志尾部 <span class="acts dim">{logs?.lines.length ?? 0} 行</span></div>
+<div class="list">
   {#if logs && logs.lines.length > 0}
-    <pre class="m-0 max-h-96 overflow-auto rounded-xl bg-zinc-950 p-3 text-[11px] leading-relaxed text-zinc-200 mono">{logs.lines.join("\n")}</pre>
+    <pre class="log">{logs.lines.join("\n")}</pre>
   {:else}
     <EmptyState compact icon="code" title={busy ? "加载中…" : "暂无日志"} />
   {/if}
-</section>
+</div>
