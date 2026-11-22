@@ -409,5 +409,5 @@
 - [x] 根因：WebView2 不能在 LocalSystem 下建控制器（0x8000FFFF）→ 面板改为控制台用户子进程 `tetherly tray-panel`（令牌走 env），守护进程只做拉起/判活/关闭。
 - [x] 图标改单色模板 `.a8`，墨色随任务栏主题，`WM_SETTINGCHANGE` 热换。
 - [x] 门禁：mac fmt/clippy/tests 绿；msvc scratch clippy 绿。
-- [ ] CI check(windows) 绿（platform.rs Win32 改动仅此处校验）→ bump v0.2.78 → tag → release → deploy all → home-win 日志出现子进程 "tray panel: child spawned" / "WebView2 ready"。
-- [ ] 真机：用户肉眼确认黑白图标 + 左键面板弹出不再报错。
+- [x] CI check(windows) 绿 → v0.2.78 已被另一会话占用，改 bump **v0.2.79**（e52b190）→ tag → release 12 资产 → deploy all 绿（Mac/home-win health 0.2.79，受保护进程 3/3，daemon PID 32284 SYSTEM Session 1）→ home-win 日志 `tray icon inked for the taskbar theme light=false`；子进程链用 Session 1 交互任务计划（`Register-ScheduledTask -LogonType Interactive`）直接跑 `tetherly tray-panel --ui-port 45716` 冒烟：`child up` → 230 ms `WebView2 ready` → exit 0。注意 ssh 会话（Session 0）跑子进程必败 0x80070578（无交互桌面），不是 bug。
+- [ ] 真机：用户肉眼确认黑白图标 + 左键面板弹出不再报错（守护进程 SYSTEM→CreateProcessAsUser 拉起子进程这一段只有真点击能覆盖，看日志 `tray panel: child spawned`）。
