@@ -2,6 +2,7 @@
   import type { DevicesState } from "../lib/stores/devices";
   import type { SystemState } from "../lib/stores/system";
   import type { InputState } from "../lib/stores/input";
+  import { cursorAway, isDriven, isDriving, peerName } from "../lib/stores/input";
   import type { PairingState } from "../lib/stores/pairing";
   import type { Api } from "../lib/api/client";
   import { uptime } from "../lib/fmt";
@@ -28,13 +29,24 @@
   const all = $derived([...devices.byId.values()]);
   const online = $derived(all.filter((d) => d.online && d.trusted));
   const trusted = $derived(all.filter((d) => d.trusted && !d.blocked));
+  // §229: the card follows the physical cursor (`cursor_here`), not
+  // `channel_open`/`seat`, which are node-centric and read inverted on the
+  // target side. 收回 is a controller-only affordance.
+  const away = $derived(cursorAway(input.input));
+  const driving = $derived(isDriving(input.input));
+  const driven = $derived(isDriven(input.input));
+  const peer = $derived(peerName(input.input, devices.byId));
   const seatLabel = $derived.by(() => {
-    const i = input.input;
-    if (!i) return "…";
-    if (!i.channel_open) return "本机";
-    return i.peer ? `对端 ${i.peer}` : i.seat;
+    if (!input.input) return "…";
+    if (!away) return "本机";
+    return peer ? `对端 ${peer}` : "对端";
   });
-  const seatRemote = $derived(!!input.input?.channel_open);
+  const seatSub = $derived.by(() => {
+    if (away) return driving ? "键鼠已跨到其他设备，可随时收回。" : "键鼠在对端本机，对端推到屏幕边缘即可跨到这里。";
+    if (driven) return `${peer ?? "对端"} 正在控制本机。`;
+    return "键鼠当前归本机，推到屏幕边缘即可跨屏。";
+  });
+  const canRelease = $derived(away && driving);
 
   let pin = $state("");
   let pinBusy = $state(false);
@@ -72,7 +84,7 @@
   <div class="list row stat"><span class="k">已配对</span><AnimatedCounter target={trusted.length} class="v" /></div>
   <div class="list row stat">
     <span class="k">输入归属</span>
-    <span class="v truncate {seatRemote ? 'text-amber-600 dark:text-amber-400' : ''}" style="font-size: 16px">{seatLabel}</span>
+    <span class="v truncate {away || driven ? 'text-amber-600 dark:text-amber-400' : ''}" style="font-size: 16px">{seatLabel}</span>
   </div>
   <div class="list row stat">
     <span class="k">运行时长</span>
@@ -103,9 +115,9 @@
         <span class="ic"><Icon name="keyboard" size={16} /></span>
         <div class="main">
           <div class="name">{seatLabel}</div>
-          <div class="sub">{seatRemote ? "键鼠已跨到其他设备，可随时收回。" : "键鼠当前归本机，推到屏幕边缘即可跨屏。"}</div>
+          <div class="sub">{seatSub}</div>
         </div>
-        {#if seatRemote}
+        {#if canRelease}
           <button type="button" class="btn btn-sm" onclick={releaseInput}><Icon name="arrow-left" size={13} />收回</button>
         {/if}
       </div>

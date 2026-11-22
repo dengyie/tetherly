@@ -52,7 +52,25 @@ block_reason?: string, };
 
 export type Pairing = { pin_active: boolean, pin_expires_in_secs: number, };
 
-export type Input = { seat: string, channel_open: boolean, peer: string | null, };
+export type Input = {
+/**
+ * Node-centric seat word: on the controller `remote` means "my cursor is
+ * on the peer"; on the target `remote` means "the controller's cursor
+ * entered this screen". Clients label by `cursor_here`, not this.
+ */
+seat: string, channel_open: boolean, peer: string | null,
+/**
+ * This node's role in the active input tunnel (§229): `controller`,
+ * `target`, `session_controller`, `session_target`; `None` without a
+ * tunnel.
+ */
+role: string | null,
+/**
+ * Role-neutral "the keyboard/mouse are on this machine" bit (§229):
+ * the daemon folds `role` + `seat` so every node labels the same
+ * physical fact the same way.
+ */
+cursor_here: boolean, };
 
 export type Snapshot = { system: System, devices: Array<Device>, pairing: Pairing, input: Input, };
 

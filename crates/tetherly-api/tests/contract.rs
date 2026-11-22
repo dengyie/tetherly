@@ -276,6 +276,8 @@ mod events {
                         seat: "local".into(),
                         channel_open: false,
                         peer: None,
+                        role: None,
+                        cursor_here: true,
                     },
                 },
                 "input.changed",

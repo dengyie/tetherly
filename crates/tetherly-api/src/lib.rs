@@ -243,9 +243,20 @@ pub struct DialReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Input {
+    /// Node-centric seat word: on the controller `remote` means "my cursor is
+    /// on the peer"; on the target `remote` means "the controller's cursor
+    /// entered this screen". Clients label by `cursor_here`, not this.
     pub seat: String,
     pub channel_open: bool,
     pub peer: Option<String>,
+    /// This node's role in the active input tunnel (§229): `controller`,
+    /// `target`, `session_controller`, `session_target`; `None` without a
+    /// tunnel.
+    pub role: Option<String>,
+    /// Role-neutral "the keyboard/mouse are on this machine" bit (§229):
+    /// the daemon folds `role` + `seat` so every node labels the same
+    /// physical fact the same way.
+    pub cursor_here: bool,
 }
 
 /// Full client-visible state; the first frame of every event stream.

@@ -5,7 +5,7 @@ import { render, screen, waitFor } from "@testing-library/svelte";
 import { afterEach, describe, expect, it } from "vitest";
 import App from "../App.svelte";
 import { MockTransport } from "../lib/transport/mock";
-import type { Device, Snapshot, Transfer, Transfers } from "../lib/api/gen/api";
+import type { Device, Input, Snapshot, Transfer, Transfers } from "../lib/api/gen/api";
 
 // #tray must be present BEFORE mount (the shell opens the window with it).
 function mountTray() {
@@ -39,7 +39,9 @@ const device = (id: string, name: string, over: Partial<Device> = {}): Device =>
   ...over,
 });
 
-const snapshot = (devices: Device[], input = { seat: "local", channel_open: false, peer: null }): Snapshot => ({
+const localInput: Input = { seat: "local", channel_open: false, peer: null, role: null, cursor_here: true };
+
+const snapshot = (devices: Device[], input: Input = localInput): Snapshot => ({
   system: {
     device_id: "self",
     name: "mac",
@@ -95,10 +97,14 @@ describe("tray panel compact route", () => {
     t.emit({ id: 1, type: "snapshot", data: snapshot([]) });
     await waitFor(() => expect(screen.getByTestId("tray-state").textContent).toBe("键鼠在本机"));
 
-    t.emit({ id: 2, type: "input.changed", data: { seat: "remote", channel_open: true, peer: "d1" } });
+    t.emit({
+      id: 2,
+      type: "input.changed",
+      data: { seat: "remote", channel_open: true, peer: "d1", role: "controller", cursor_here: false },
+    });
     await waitFor(() => expect(screen.getByTestId("tray-state").textContent).toBe("键鼠在 d1"));
 
-    t.emit({ id: 3, type: "input.changed", data: { seat: "local", channel_open: false, peer: null } });
+    t.emit({ id: 3, type: "input.changed", data: localInput });
     t.emit({
       id: 4,
       type: "settings.changed",
@@ -109,6 +115,36 @@ describe("tray panel compact route", () => {
     });
     await waitFor(() => expect(screen.getByTestId("tray-state").textContent).toBe("共享已暂停"));
     expect(screen.getByTestId("tray-toggle").textContent).toBe("恢复共享");
+  });
+
+  it("target side labels by physical cursor, not by seat (§229)", async () => {
+    const t = mountTray();
+    t.setLinkState("live");
+    // Windows target while the Mac controller keeps its cursor at home: this
+    // node's seat is still "local", yet the keyboard/mouse are on the Mac.
+    t.emit({
+      id: 1,
+      type: "snapshot",
+      data: snapshot([device("d1", "MAC", { platform: "macos" })], {
+        seat: "local",
+        channel_open: false,
+        peer: "d1",
+        role: "target",
+        cursor_here: false,
+      }),
+    });
+    await waitFor(() => expect(screen.getByTestId("tray-state").textContent).toBe("键鼠在 MAC"));
+    // "收回" is a controller-only affordance.
+    expect(screen.getByTestId("tray-sub").textContent).not.toContain("收回");
+
+    // The controller's cursor entered this screen: the target is being driven.
+    t.emit({
+      id: 2,
+      type: "input.changed",
+      data: { seat: "remote", channel_open: false, peer: "d1", role: "target", cursor_here: true },
+    });
+    await waitFor(() => expect(screen.getByTestId("tray-state").textContent).toBe("键鼠在本机"));
+    expect(screen.getByTestId("tray-sub").textContent).toContain("MAC");
 
     t.setLinkState("offline");
     await waitFor(() => expect(screen.getByTestId("tray-state").textContent).toBe("daemon 未连接"));

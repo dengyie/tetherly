@@ -38,7 +38,7 @@ const snap = (devices: Device[]): Snapshot => ({
   },
   devices,
   pairing: { pin_active: false, pin_expires_in_secs: 0 },
-  input: { seat: "local", channel_open: false, peer: null },
+  input: { seat: "local", channel_open: false, peer: null, role: null, cursor_here: true },
 });
 
 describe("devices reducer", () => {

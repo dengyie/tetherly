@@ -45,7 +45,7 @@ const snapshot = (devices: Device[]): Snapshot => ({
   },
   devices,
   pairing: { pin_active: false, pin_expires_in_secs: 0 },
-  input: { seat: "local", channel_open: false, peer: null },
+  input: { seat: "local", channel_open: false, peer: null, role: null, cursor_here: true },
 });
 
 function mountApp() {
@@ -65,6 +65,31 @@ describe("app flows over MockTransport", () => {
     expect(screen.getByText("mac")).toBeTruthy();
     // input seat starts local
     expect(screen.getAllByText("本机").length).toBeGreaterThan(0);
+  });
+
+  it("flow: overview seat card follows the physical cursor on the target side (§229)", async () => {
+    const t = mountApp();
+    t.setLinkState("live");
+    t.emit({ id: 1, type: "snapshot", data: snapshot([device("d1", "MAC", { platform: "macos" })]) });
+    await waitFor(() => expect(screen.getByText("MAC")).toBeTruthy());
+
+    // Target node, controller's cursor at home on the Mac.
+    t.emit({
+      id: 2,
+      type: "input.changed",
+      data: { seat: "local", channel_open: false, peer: "d1", role: "target", cursor_here: false },
+    });
+    await waitFor(() => expect(screen.getAllByText("对端 MAC").length).toBeGreaterThan(0));
+    expect(screen.queryByRole("button", { name: "收回" })).toBeNull();
+
+    // Controller node whose cursor crossed to the peer: 收回 is offered.
+    t.emit({
+      id: 3,
+      type: "input.changed",
+      data: { seat: "remote", channel_open: true, peer: "d1", role: "controller", cursor_here: false },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "收回" })).toBeTruthy());
+    expect(screen.getAllByText("对端 MAC").length).toBeGreaterThan(0);
   });
 
   it("flow: PIN card generates when inactive and shows when active (§223)", async () => {

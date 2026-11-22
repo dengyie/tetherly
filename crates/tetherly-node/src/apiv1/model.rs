@@ -345,10 +345,26 @@ pub fn pairing(node: &Node) -> Pairing {
 
 pub async fn input(node: &Node) -> Input {
     let r = node.input_status_report().await;
+    let role = node.active_tunnel_role();
     Input {
+        cursor_here: input_cursor_here(role, &r.seat),
+        role: role.map(|x| x.as_str().to_string()),
         seat: r.seat,
         channel_open: r.channel_open,
         peer: r.active_peer,
+    }
+}
+
+/// §229: are the keyboard/mouse physically on this machine? `seat` is
+/// node-centric — the controller flips to `remote` when its cursor leaves for
+/// the peer, the target flips to `remote` when the controller's cursor enters
+/// (`client.focused()`) — so the receiving roles read it inverted. Without a
+/// tunnel the seat word is the whole story.
+pub fn input_cursor_here(role: Option<tetherly_core::InputTunnelRole>, seat: &str) -> bool {
+    let remote = seat == "remote";
+    match role {
+        Some(r) if r.is_receiving() => remote,
+        _ => !remote,
     }
 }
 
@@ -4144,5 +4160,27 @@ mod tests {
         assert_eq!(ids, sorted);
         assert_eq!(ids.len(), 2);
         assert!(find(&devs, 1).blocked);
+    }
+
+    /// §229: `cursor_here` is the role-neutral "keyboard/mouse are on this
+    /// machine" bit. `seat` is node-centric: on the controller `remote`
+    /// means "my cursor is on the peer", on the target `remote` means "the
+    /// controller's cursor entered this screen" — opposite physical meaning.
+    #[test]
+    fn input_cursor_here_is_role_aware() {
+        use tetherly_core::InputTunnelRole as R;
+        // No tunnel: seat is the whole story.
+        assert!(input_cursor_here(None, "local"));
+        assert!(!input_cursor_here(None, "remote"));
+        // Controller sides: remote seat == cursor went to the peer.
+        assert!(input_cursor_here(Some(R::Controller), "local"));
+        assert!(!input_cursor_here(Some(R::Controller), "remote"));
+        assert!(input_cursor_here(Some(R::SessionController), "local"));
+        assert!(!input_cursor_here(Some(R::SessionController), "remote"));
+        // Target sides: remote seat == the peer is driving THIS desktop.
+        assert!(!input_cursor_here(Some(R::Target), "local"));
+        assert!(input_cursor_here(Some(R::Target), "remote"));
+        assert!(!input_cursor_here(Some(R::SessionTarget), "local"));
+        assert!(input_cursor_here(Some(R::SessionTarget), "remote"));
     }
 }

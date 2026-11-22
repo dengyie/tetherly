@@ -6,6 +6,7 @@
   // translucent surface, text-button footer. No navigation.
   import type { DevicesState } from "../lib/stores/devices";
   import type { InputState } from "../lib/stores/input";
+  import { cursorAway, isDriven, isDriving, peerName } from "../lib/stores/input";
   import type { TransfersState } from "../lib/stores/transfers";
   import type { LinkState } from "../lib/transport/transport";
   import type { SettingsState } from "../lib/stores/settings";
@@ -39,21 +40,28 @@
   const paused = $derived(!!settings.settings && !settings.settings.general.advertise);
 
   // Same wording contract as the Rust tray fold (single source per meaning).
+  // §229: label by the physical cursor location (`cursor_here`), never by
+  // `seat` — on the Windows target `seat` stays "local" while the Mac
+  // controller keeps its cursor at home, which used to read "键鼠在本机".
+  const away = $derived(cursorAway(input.input));
+  const driving = $derived(isDriving(input.input));
+  const driven = $derived(isDriven(input.input));
+  const peer = $derived(peerName(input.input, devices.byId));
   const stateLine = $derived.by(() => {
     if (link !== "live") return link === "offline" ? "daemon 未连接" : "重新同步…";
-    const i = input.input;
-    if (!i) return "…";
-    if (i.seat === "remote") return i.peer ? `键鼠在 ${i.peer}` : "键鼠被远端接管";
+    if (!input.input) return "…";
+    if (away) return peer ? `键鼠在 ${peer}` : "键鼠在对端";
     if (paused) return "共享已暂停";
     return "键鼠在本机";
   });
   const stateSub = $derived.by(() => {
     if (link !== "live") return "等待本机 daemon";
     if (paused) return "设备对局域网不可见";
-    if (input.input?.seat === "remote") return "按 Ctrl+Alt+Esc 收回";
+    if (away) return driving ? "按 Ctrl+Alt+Esc 收回" : "对端推到屏幕边缘即可跨到本机";
+    if (driven) return `${peer ?? "对端"} 正在控制本机`;
     return online.length === 0 ? "共享中 · 等待设备" : `共享中 · ${online.length} 台在线`;
   });
-  const tone = $derived(link !== "live" ? "err" : paused ? "warn" : input.input?.seat === "remote" ? "info" : "ok");
+  const tone = $derived(link !== "live" ? "err" : paused ? "warn" : away || driven ? "info" : "ok");
 
   let busy = $state(false);
   async function toggleShare() {
@@ -119,7 +127,7 @@
         <span class="tp-dot {tone}"></span>
         <div class="main">
           <div class="name" data-testid="tray-state">{stateLine}</div>
-          <div class="sub">{stateSub}</div>
+          <div class="sub" data-testid="tray-sub">{stateSub}</div>
         </div>
         <div class="acts">
           <button type="button" class="btn {paused ? 'btn-primary' : ''}" disabled={!api} aria-busy={busy} onclick={toggleShare} data-testid="tray-toggle">{paused ? "恢复共享" : "暂停共享"}</button>
