@@ -1058,18 +1058,14 @@ static PENDING_WARP_Y: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI
 #[cfg(any(windows, target_os = "macos"))]
 static PENDING_WARP_VALID: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-// Root-fix E3: on macOS one warp produces TWO hook-visible events — the real
-// CGWarp jump and the synthetic MouseMoved posted to SessionEventTap to
-// dismiss hover tracking. A single-shot marker consumed the first echo and
-// let the second through, where it re-entered the engine at the park
-// position and re-placed the remote cursor (production: cursor snapped to
-// screen center right after a correct proportional entry). Count the echoes.
-#[cfg(target_os = "macos")]
-static PENDING_WARP_ECHOES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-// Root-fix F: events after a warp whose deltas would span the teleport get
-// their deltas zeroed for this many events (see the macOS tap below).
-#[cfg(target_os = "macos")]
-static WARP_SETTLE_EVENTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+// §231: one echo slot on every platform. The macOS tap used to keep two
+// echo slots (Root-fix E3) and zero the deltas of the next four events
+// (Root-fix F) because it consumed CGEvent HID deltas, which span the warp
+// teleport. It now derives deltas from consecutive hook POSITIONS anchored
+// at the warp target (Windows parity, `hook_move_state`): a second event at
+// the anchor has a zero position delta by construction, and the next real
+// event measures genuine hand motion — so per-batch roaming recenters no
+// longer eat the hand's motion and the counters are gone.
 // Time bound for the warp marker (both platforms). If the post-warp events
 // never surface (tap disabled by timeout, events lost, SetCursorPos failed,
 // or the echo consumed by another window's LL hook), the marker would
@@ -1090,13 +1086,6 @@ fn mark_pending_warp(x: i32, y: i32) {
     PENDING_WARP_Y.store(y, Ordering::SeqCst);
     PENDING_WARP_VALID.store(true, Ordering::SeqCst);
     WARP_MARKED_AT_MS.store(now_mono_ms(), Ordering::SeqCst);
-    #[cfg(target_os = "macos")]
-    {
-        PENDING_WARP_ECHOES.store(2, Ordering::SeqCst);
-        // Zero the deltas of the first few post-warp events: macOS computes
-        // them across the teleport, so they carry the park displacement.
-        WARP_SETTLE_EVENTS.store(4, Ordering::SeqCst);
-    }
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -1108,10 +1097,10 @@ fn now_mono_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// True while the warp marker (echo + settle counters) is still fresh. A
+/// True while the warp marker is still fresh. A
 /// marker older than [`WARP_MARKER_MAX_AGE_MS`] is dropped on read: its
 /// events never surfaced (lost or tap disabled), so letting the counters hang
-/// would zero the deltas of the user's next real motions.
+/// could swallow a later real event that lands on the warp target.
 #[cfg(any(windows, target_os = "macos"))]
 fn warp_marker_fresh() -> bool {
     use std::sync::atomic::Ordering;
@@ -1136,41 +1125,23 @@ fn take_warp_echo(x: i32, y: i32) -> bool {
     // event that happens to land on the warp target.
     if !warp_marker_fresh() {
         PENDING_WARP_VALID.store(false, Ordering::SeqCst);
-        #[cfg(target_os = "macos")]
-        {
-            PENDING_WARP_ECHOES.store(0, Ordering::SeqCst);
-            WARP_SETTLE_EVENTS.store(0, Ordering::SeqCst);
-        }
         return false;
     }
     let wx = PENDING_WARP_X.load(Ordering::SeqCst);
     let wy = PENDING_WARP_Y.load(Ordering::SeqCst);
     if (x - wx).abs() <= 2 && (y - wy).abs() <= 2 {
-        #[cfg(target_os = "macos")]
-        {
-            let left = PENDING_WARP_ECHOES.fetch_sub(1, Ordering::SeqCst);
-            if left <= 1 {
-                PENDING_WARP_VALID.store(false, Ordering::SeqCst);
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            PENDING_WARP_VALID.store(false, Ordering::SeqCst);
-        }
+        PENDING_WARP_VALID.store(false, Ordering::SeqCst);
         return true;
     }
     false
 }
 
-// Delta baseline of the Windows mouse hook (LL hooks deliver cursor
-// position only — see `mouse_proc`). Thread-local: LL hooks deliver every
-// event on one dedicated thread.
-//
-// Compiled outside Windows only under `cfg(test)` on macOS, so the
-// warp-echo/baseline coupling stays unit-tested where development happens;
-// production macOS never touches this (its tap consumes CGEvent deltas,
-// not positions).
-#[cfg(any(windows, all(target_os = "macos", test)))]
+// Delta baseline of the capture hooks. Windows LL hooks deliver cursor
+// position only (see `mouse_proc`); since §231 the macOS tap also derives
+// its deltas from positions (CGEvent HID deltas span warp teleports).
+// Thread-local: each platform delivers every hook event on one dedicated
+// thread (LL hook thread / tap runloop thread).
+#[cfg(any(windows, target_os = "macos"))]
 mod hook_move_state {
     thread_local! {
         static LAST_MOVE_POS: std::cell::RefCell<Option<(i32, i32)>> =
@@ -1229,6 +1200,86 @@ fn warp_state_test_gate() -> std::sync::MutexGuard<'static, ()> {
     static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// §231: one axis of the macOS tap's Move delta. The position delta (hook
+/// position minus the anchored baseline) is authoritative — it is immune to
+/// the post-warp teleport that contaminates CGEvent HID deltas. It is zero,
+/// though, once WindowServer clamps the cursor at a screen boundary, and the
+/// Local-seat fast-push crossing needs the hand's into-edge motion there.
+/// So only when the axis sits ON a boundary, did not move, and the HID
+/// delta points INTO that boundary does the HID delta stand in.
+#[cfg(target_os = "macos")]
+fn clamped_axis_delta(pos: i32, pos_delta: i32, hid_delta: i32, extent: i32) -> i32 {
+    if pos_delta != 0 || hid_delta == 0 || extent <= 0 {
+        return pos_delta;
+    }
+    let at_low = pos <= 0 && hid_delta < 0;
+    let at_high = pos >= extent - 1 && hid_delta > 0;
+    if at_low || at_high {
+        hid_delta
+    } else {
+        pos_delta
+    }
+}
+
+/// Rate limiter shared by the rehide guard and the tap re-enable warning:
+/// due when `interval_ms` elapsed since `last_ms`, when it never fired
+/// (`last_ms == 0`), or when the clock went backwards.
+#[cfg(target_os = "macos")]
+fn due_after(now_ms: u64, last_ms: u64, interval_ms: u64) -> bool {
+    last_ms == 0 || now_ms < last_ms || now_ms - last_ms >= interval_ms
+}
+
+#[cfg(target_os = "macos")]
+static REHIDE_CHECKED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+static REHIDE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// §231 rehide guard, called by the capture worker while roaming Remote.
+/// WindowServer drops the capture hide on a Space/display switch (the
+/// production "two cursors moving at once" report): while the Capture owner
+/// holds the hide and the system says the pointer is visible again, cycle a
+/// count-neutral show/hide pair and re-blank the NSCursor. Checked at most
+/// every 500 ms. Returns the running rehide count when it acted.
+#[cfg(target_os = "macos")]
+pub fn maybe_rehide_captured_cursor() -> Option<u64> {
+    use std::sync::atomic::Ordering;
+    let now = now_mono_ms();
+    let last = REHIDE_CHECKED_AT_MS.load(Ordering::Relaxed);
+    if !due_after(now, last, 500) {
+        return None;
+    }
+    REHIDE_CHECKED_AT_MS.store(now, Ordering::Relaxed);
+    if !cursor_owners().holds(CursorHideOwner::Capture) {
+        return None;
+    }
+    // SAFETY: plain CoreGraphics cursor queries/ops on the main display.
+    let visible = unsafe { CGCursorIsVisible() != 0 };
+    if !visible {
+        return None;
+    }
+    enable_background_cursor_ops();
+    unsafe {
+        let main = objc2_core_graphics::CGMainDisplayID();
+        let _ = CGDisplayShowCursor(main);
+        let _ = CGDisplayHideCursor(main);
+    }
+    cursor_shield::set_blank_cursor_now();
+    let n = REHIDE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::info!(count = n, "capture cursor visible while roaming; rehid");
+    Some(n)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn maybe_rehide_captured_cursor() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+static TAP_REENABLE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+static TAP_REENABLE_WARNED_AT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
 pub fn warp_mouse_position(x: i32, y: i32) {
@@ -1360,10 +1411,15 @@ pub fn set_mouse_cursor_associated(associated: bool) {
         }
 
         unsafe {
-            // 3. avoidHesitatingCursor(), then decouple the hardware mouse
-            //    from the cursor (after hideCursor, which re-associates).
+            // 3. avoidHesitatingCursor(). §231: the hardware mouse stays
+            //    ASSOCIATED with the (hidden) cursor. Dissociation was never
+            //    honored on the production Mac (the hidden cursor tracked
+            //    the hand during Remote and surfaced as a second pointer
+            //    after a Space switch); the tap now measures position deltas
+            //    and the capture worker recenters per batch, Windows-style,
+            //    which requires the cursor to follow the hand.
             let _ = CGSetLocalEventsSuppressionInterval(0.0001);
-            let _ = CGAssociateMouseAndMouseCursorPosition(false);
+            let _ = CGAssociateMouseAndMouseCursorPosition(true);
 
             // 4. Rehide guard: if WindowServer still draws the pointer,
             //    cycle a count-neutral show/hide pair once.
@@ -2474,6 +2530,11 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     std::thread::Builder::new()
         .name("tetherly-input-hooks".into())
         .spawn(move || unsafe {
+            // §231: the LL hook callbacks are on the system's input path;
+            // starving them under CPU load stutters every pointer motion.
+            if !set_current_thread_user_interactive() {
+                tracing::debug!("input hook thread: priority lift declined");
+            }
             let mouse_proc_fn: HOOKPROC = Some(mouse_proc);
             let keyboard_proc_fn: HOOKPROC = Some(keyboard_proc);
             let mouse = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc_fn, std::ptr::null_mut(), 0);
@@ -2837,10 +2898,23 @@ mod qos_sys {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// §231 Windows twin: lift the CALLING thread to THREAD_PRIORITY_HIGHEST.
+/// Under heavy CPU load (production: miner pegging every core) the LL hook
+/// thread and the capture worker starved behind normal-priority threads; a
+/// late LL mouse hook makes the whole desktop pointer stutter, and Windows
+/// silently drops hooks that exceed LowLevelHooksTimeout. Inside the
+/// ABOVE_NORMAL process class, HIGHEST lands at base priority 12.
+#[cfg(windows)]
 pub fn set_current_thread_user_interactive() -> bool {
-    // No per-thread analogue wired on other platforms; the Windows hook
-    // thread inherits the process lift from `raise_daemon_responsiveness`.
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+    };
+    // SAFETY: pseudo-handle of the calling thread; documented setter.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) != 0 }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn set_current_thread_user_interactive() -> bool {
     false
 }
 
@@ -2850,9 +2924,20 @@ pub fn set_current_thread_user_interactive() -> bool {
 /// PROCESS-level lift (priority class + working-set pin + image lock) that
 /// `cmd_core::run` already applied exactly once at startup — rerunning it
 /// from every worker thread would redo the whole working-set/image-lock
-/// sweep N times for nothing. No-op off macOS: the Windows hook threads
-/// inherit the one-shot process lift.
+/// sweep N times for nothing. §231: on Windows each worker gets a
+/// per-thread THREAD_PRIORITY_ABOVE_NORMAL (the input relay path runs on
+/// these workers and starved under CPU load at normal priority).
 pub fn lift_current_thread_user_initiated() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+        };
+        // SAFETY: pseudo-handle of the calling thread; documented setter.
+        if unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) } == 0 {
+            tracing::debug!("tokio worker: thread priority lift declined");
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         // The tokio workers have no other observability path: a declined
@@ -3349,6 +3434,17 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 let port = unsafe { &*(port_addr as *const CFMachPort) };
                 CGEvent::tap_enable(port, true);
             }
+            // §231: a disabled tap is input lag the user feels (macOS
+            // drops the tap when the callback misses its deadline under CPU
+            // load). Count it and say so, at most once per 5 s.
+            let n = TAP_REENABLE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            let now = now_mono_ms();
+            let last = TAP_REENABLE_WARNED_AT_MS.load(Ordering::Relaxed);
+            if due_after(now, last, 5_000) {
+                TAP_REENABLE_WARNED_AT_MS.store(now, Ordering::Relaxed);
+                let by_timeout = event_type == CGEventType::TapDisabledByTimeout;
+                tracing::warn!(count = n, by_timeout, "event tap was disabled; re-enabled");
+            }
             return event.as_ptr();
         }
 
@@ -3380,66 +3476,44 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
             | CGEventType::RightMouseDragged
             | CGEventType::OtherMouseDragged => {
                 let loc = CGEvent::location(Some(cg_event));
-                let dx =
-                    CGEvent::integer_value_field(Some(cg_event), CGEventField::MouseEventDeltaX)
-                        as i32;
-                let dy =
-                    CGEvent::integer_value_field(Some(cg_event), CGEventField::MouseEventDeltaY)
-                        as i32;
-                if take_warp_echo(loc.x as i32, loc.y as i32) {
+                let (x, y) = (loc.x as i32, loc.y as i32);
+                let armed = ctx.keyboard_armed.load(Ordering::SeqCst);
+                if hook_move_state::take_warp_echo_reset_baseline(x, y) {
                     // Echo of our own programmatic warp: swallow it without
-                    // feeding the roaming engine (the delta is the warp
-                    // displacement, not user motion).
-                    let armed = ctx.keyboard_armed.load(Ordering::SeqCst);
+                    // feeding the roaming engine, and anchor the position
+                    // baseline at the warp target.
                     return if armed {
                         std::ptr::null_mut()
                     } else {
                         event.as_ptr()
                     };
                 }
-                // Root-fix F: the deltas macOS computes for the FIRST events
-                // after a warp span the teleport (they include the park
-                // displacement), so applying them drives the remote cursor
-                // to the park position's map (production: entry placement
-                // snapped to screen center). Zero the deltas for the first
-                // few post-warp events; their positions are near the park
-                // point and the deltas carry no real hand motion. The counter
-                // is time-bounded: if its events never surfaced within
-                // WARP_MARKER_MAX_AGE_MS it is dropped rather than eating
-                // later real motion.
-                let settle = WARP_SETTLE_EVENTS.load(Ordering::SeqCst);
-                let (mut dx, mut dy) = if settle > 0 && warp_marker_fresh() {
-                    WARP_SETTLE_EVENTS.store(settle - 1, Ordering::SeqCst);
-                    (0, 0)
-                } else {
-                    if settle > 0 {
-                        WARP_SETTLE_EVENTS.store(0, Ordering::SeqCst);
-                    }
-                    (dx, dy)
-                };
-                // v0.2.26: Deskflow bogus-motion filter, macOS twin of the
-                // Windows hook's `hook_delta_is_bogus`. The settle counter
-                // above only covers the FIRST events after a warp while its
-                // 250ms marker is fresh; an echo event that surfaces later
-                // (or a second echo macOS coalesces past the gate) still
-                // carries the whole warp displacement — hundreds of px. Fed
-                // to the roaming engine it is a "fast push" that instantly
-                // re-crosses the shared edge (production: ghost-controller
-                // bounce loop — rescue docked inside the redundancy band,
-                // the rescue-warp echo re-crossed Top, and the Windows
-                // target's physical mouse was swallowed every ~13s). A real
-                // hand cannot span center-to-edge in one event; drop it.
+                // §231: deltas from consecutive POSITIONS (Windows parity).
+                // CGEvent HID deltas span a warp teleport, which forced the
+                // old echo-count/settle-zeroing scheme that ate real motion
+                // after every per-batch recenter. HID deltas only stand in
+                // on an axis clamped at the screen boundary (edge push).
+                let (pdx, pdy) = hook_move_state::advance(x, y, None);
+                let hdx =
+                    CGEvent::integer_value_field(Some(cg_event), CGEventField::MouseEventDeltaX)
+                        as i32;
+                let hdy =
+                    CGEvent::integer_value_field(Some(cg_event), CGEventField::MouseEventDeltaY)
+                        as i32;
+                let mut dx = clamped_axis_delta(x, pdx, hdx, ctx.screen_w);
+                let mut dy = clamped_axis_delta(y, pdy, hdy, ctx.screen_h);
+                // v0.2.26: Deskflow bogus-motion filter. A pre-warp event
+                // consumed after the anchor spans the teleport (hundreds of
+                // px); a real hand cannot cover center-to-edge in one event.
                 if hook_delta_is_bogus(dx, dy, ctx.screen_w, ctx.screen_h) {
                     dx = 0;
                     dy = 0;
                 }
-                let _ = ctx.tx.send(RawInput::Move {
-                    x: loc.x as i32,
-                    y: loc.y as i32,
-                    dx,
-                    dy,
-                });
-                let armed = ctx.keyboard_armed.load(Ordering::SeqCst);
+                // While captured a zero-delta Move carries nothing for the
+                // engine and would only trigger another recenter warp.
+                if !armed || (dx, dy) != (0, 0) {
+                    let _ = ctx.tx.send(RawInput::Move { x, y, dx, dy });
+                }
                 if armed {
                     std::ptr::null_mut()
                 } else {
@@ -4274,6 +4348,70 @@ mod input_tests {
         assert_eq!(roaming_recenter_target(800, 600), (400, 300));
         // Degenerate dimensions stay inside the screen.
         assert_eq!(roaming_recenter_target(1, 1), (0, 0));
+    }
+
+    /// §231: the macOS tap derives Move deltas from consecutive hook
+    /// POSITIONS (Windows parity), anchored at the warp target by the echo
+    /// gate, so one warp needs exactly ONE echo slot. A second slot ate the
+    /// hand's first slow real event after every per-batch recenter (it lands
+    /// within 2 px of center) — the Root-fix E3 two-echo count existed only
+    /// because HID deltas carried the teleport displacement; a position delta
+    /// of an event AT the anchor is zero by construction, so nothing is left
+    /// to swallow.
+    #[cfg(all(target_os = "macos", test))]
+    #[test]
+    fn warp_echo_is_single_shot() {
+        let _gate = super::warp_state_test_gate();
+        super::mark_pending_warp(735, 478);
+        assert!(super::take_warp_echo(735, 478), "first echo consumed");
+        assert!(
+            !super::take_warp_echo(736, 478),
+            "a second event at the anchor is the hand's slow motion, not an echo"
+        );
+        assert!(!super::PENDING_WARP_VALID.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// §231: position deltas are zero on an axis once WindowServer clamps
+    /// the cursor at the screen boundary, but the Local-seat fast-push
+    /// crossing (`tb_band_gate`) needs the hand's into-edge motion there.
+    /// Only on a clamped axis, and only for motion INTO that boundary, the
+    /// CGEvent HID delta stands in; everywhere else the position delta wins
+    /// (it is immune to the post-warp teleport contamination of HID deltas).
+    #[cfg(all(target_os = "macos", test))]
+    #[test]
+    fn clamped_axis_delta_falls_back_to_hid_only_into_the_edge() {
+        let w = 1470;
+        // Interior: position delta, whatever HID says (post-warp HID carries
+        // the teleport displacement).
+        assert_eq!(clamped_axis_delta(735, 6, 6, w), 6);
+        assert_eq!(clamped_axis_delta(735, 0, 400, w), 0);
+        assert_eq!(clamped_axis_delta(735, -3, -300, w), -3);
+        // Clamped at the right boundary, pushing right: HID stands in.
+        assert_eq!(clamped_axis_delta(w - 1, 0, 9, w), 9);
+        // Clamped at the right boundary but HID says leftwards: the position
+        // would have moved if that were real — stay with the position delta.
+        assert_eq!(clamped_axis_delta(w - 1, 0, -9, w), 0);
+        // Left boundary mirror.
+        assert_eq!(clamped_axis_delta(0, 0, -7, w), -7);
+        assert_eq!(clamped_axis_delta(0, 0, 7, w), 0);
+        // Arriving at the boundary in one event: the clamped position delta
+        // is reported (nonzero), never the larger HID delta.
+        assert_eq!(clamped_axis_delta(w - 1, 40, 55, w), 40);
+        // No clamping on a degenerate extent.
+        assert_eq!(clamped_axis_delta(0, 0, -7, 0), 0);
+    }
+
+    /// §231: the Remote-seat rehide guard and the tap re-enable log both
+    /// fire at most once per interval; a never-fired (0) timestamp is due.
+    #[cfg(all(target_os = "macos", test))]
+    #[test]
+    fn rate_limit_due_after_interval() {
+        assert!(due_after(1_000, 0, 500));
+        assert!(!due_after(1_000, 900, 500));
+        assert!(!due_after(1_399, 900, 500));
+        assert!(due_after(1_400, 900, 500));
+        // Clock going backwards (monotonic source swapped) never wedges it.
+        assert!(due_after(100, 900, 500));
     }
 
     #[cfg(target_os = "macos")]

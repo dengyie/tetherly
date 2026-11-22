@@ -2389,10 +2389,23 @@ impl Node {
                             // seat-scoped (Remote-only) and the skip below
                             // only short-circuits a redundant same-position
                             // warp on the entry batch itself.
-                            #[cfg(windows)]
-                            if node.input_engine_seat() == CursorSeat::Remote {
+                            //
+                            // §231: macOS too. Its dissociation was never
+                            // honored in production, so the hidden cursor
+                            // tracked the hand during Remote and surfaced
+                            // as a second pointer after a Space switch. The
+                            // tap now measures position deltas like the
+                            // Windows hook. Only batches that carried motion
+                            // recenter: a zero batch would turn every warp
+                            // echo into another warp.
+                            #[cfg(any(windows, target_os = "macos"))]
+                            if (dx, dy) != (0, 0) && node.input_engine_seat() == CursorSeat::Remote
+                            {
                                 if let Some((rx, ry)) = node.roaming_recenter_target(w, h) {
                                     crate::platform::warp_mouse_position(rx, ry);
+                                }
+                                if let Some(n) = crate::platform::maybe_rehide_captured_cursor() {
+                                    node.trace_input("cursor_rehide", format!("count={n}"));
                                 }
                             }
                             if let Some(other) = next_non_move {
@@ -4330,12 +4343,10 @@ impl Node {
     /// movement owns the whole screen and is never recentred. The caller
     /// executed the warp through `warp_mouse_position`, whose echo is
     /// swallowed with the baseline anchored at the target (replayed in the
-    /// platform warp-echo tests). Production callers are Windows-only:
-    /// macOS needs no recenter, its capture is dissociated from the
-    /// hardware mouse (`CGAssociateMouseAnd...`) and reads raw CGEvent
-    /// deltas — the method stays seat-agnostic so the decision logic is
-    /// unit-testable on any platform.
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    /// platform warp-echo tests). Production callers are the Windows hook and,
+    /// since §231, the macOS tap (both measure position deltas); the method
+    /// stays seat-agnostic so the decision logic is unit-testable anywhere.
+    #[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
     pub fn roaming_recenter_target(&self, width: i32, height: i32) -> Option<(i32, i32)> {
         if self.input_engine_seat() != CursorSeat::Remote {
             return None;
