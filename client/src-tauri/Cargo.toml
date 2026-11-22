@@ -19,6 +19,7 @@ tauri = { version = "2.9", features = ["tray-icon", "image-png"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

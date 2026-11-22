@@ -103,6 +103,82 @@ cleanup() {
 trap cleanup EXIT
 
 # ------------------------------------------------------------------------------
+# 0. Desktop client (Tauri shell) install — §230
+# ------------------------------------------------------------------------------
+# The tray's "打开主窗口" launches the desktop client via `tetherly://open`
+# and only falls back to the browser dashboard when the scheme is missing.
+# Ship the client from the same release so both hosts open the client.
+# Best-effort: a client install failure warns but never fails the daemon
+# deploy (the daemon is the production-critical part). Release-tag only —
+# run-id artifacts don't carry the bundles.
+verify_release_digest() {
+    local file="$1" expected actual
+    expected=$(awk -v name="$(basename "$file")" '$2 == name || $2 == "./" name || $2 == "*" name {print $1; exit}' "$TMP_DIR/SHA256SUMS")
+    actual=$(shasum -a 256 "$file" | awk '{print $1}')
+    [ -n "$expected" ] && [ "$actual" = "$expected" ]
+}
+
+install_client_mac() {
+    [ -n "$TAG" ] || { echo "==> Skipping desktop client install (no release tag)."; return 0; }
+    local ver="${TAG#v}" dmg mnt app dest="/Applications/Tetherly Client.app" was_running=""
+    dmg="$TMP_DIR/Tetherly_${ver}_aarch64.dmg"
+    echo "==> Installing desktop client ${TAG} to ${dest}..."
+    gh release download "$TAG" -p "$(basename "$dmg")" -p "SHA256SUMS" -D "$TMP_DIR" --skip-existing || return 1
+    verify_release_digest "$dmg" || { echo "digest mismatch for $(basename "$dmg")" >&2; return 1; }
+    mnt=$(mktemp -d "$TMP_DIR/dmg-XXXXXX")
+    hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" >/dev/null || return 1
+    app=$(find "$mnt" -maxdepth 1 -name '*.app' -print -quit)
+    if [ -z "$app" ] || [ "$(defaults read "$app/Contents/Info" CFBundleIdentifier 2>/dev/null)" != "app.tetherly.shell" ]; then
+        echo "DMG does not contain the app.tetherly.shell bundle" >&2
+        hdiutil detach "$mnt" -quiet || true
+        return 1
+    fi
+    if pgrep -x tetherly-shell >/dev/null; then
+        was_running=1
+        osascript -e 'tell application id "app.tetherly.shell" to quit' >/dev/null 2>&1 || true
+        for _ in $(seq 1 20); do pgrep -x tetherly-shell >/dev/null || break; sleep 0.25; done
+        pkill -x tetherly-shell 2>/dev/null || true
+    fi
+    # Never write over /Applications/Tetherly.app — that is the daemon bundle.
+    rm -rf "$dest.new"
+    ditto "$app" "$dest.new" || { hdiutil detach "$mnt" -quiet || true; return 1; }
+    hdiutil detach "$mnt" -quiet || true
+    rm -rf "$dest" && mv "$dest.new" "$dest" || return 1
+    xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
+    # Re-register so `tetherly://` resolves to the fresh bundle.
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$dest" >/dev/null 2>&1 || true
+    [ -n "$was_running" ] && open "$dest" || true
+    echo "==> Desktop client installed: $(defaults read "$dest/Contents/Info" CFBundleShortVersionString)"
+}
+
+install_client_windows() {
+    [ -n "$TAG" ] || { echo "==> Skipping desktop client install (no release tag)."; return 0; }
+    local ver="${TAG#v}" msi msi_name ps b64 out
+    msi_name="Tetherly_${ver}_x64_en-US.msi"
+    msi="$TMP_DIR/$msi_name"
+    echo "==> Installing desktop client ${TAG} on ${REMOTE_HOST}..."
+    gh release download "$TAG" -p "$msi_name" -p "SHA256SUMS" -D "$TMP_DIR" --skip-existing || return 1
+    verify_release_digest "$msi" || { echo "digest mismatch for $msi_name" >&2; return 1; }
+    scp -q "$msi" "${REMOTE_HOST}:E:/code/tetherly/data/updates/${msi_name}" || return 1
+    # perMachine MSI: the elevated ssh session can install it silently. The
+    # client process is `tetherly-shell.exe`, distinct from the daemon's
+    # `tetherly.exe`, so stopping it never touches the daemon.
+    ps="\$ErrorActionPreference='Stop'; \$ProgressPreference='SilentlyContinue'; Get-Process tetherly-shell -ErrorAction SilentlyContinue | Stop-Process -Force; \$m='E:\\code\\tetherly\\data\\updates\\${msi_name}'; \$l='E:\\code\\tetherly\\data\\updates\\client-install.log'; \$p=Start-Process msiexec.exe -ArgumentList @('/i',('\"'+\$m+'\"'),'/qn','/norestart','/l*v',('\"'+\$l+'\"')) -Wait -PassThru; \$cmd=(Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\\tetherly\\shell\\open\\command' -ErrorAction SilentlyContinue).'(default)'; \$exe=if (\$cmd -match '^\"([^\"]+)\"') { \$Matches[1] } else { '' }; \$name=if (\$exe -and (Test-Path -LiteralPath \$exe)) { (Get-Item -LiteralPath \$exe).FullName } else { 'missing' }; Write-Output ('msi_exit=' + \$p.ExitCode + ' scheme=' + \$name)"
+    b64=$(printf '%s' "$ps" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\r\n')
+    out=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -NonInteractive -EncodedCommand ${b64}" 2>/dev/null | tr -d '\r') || return 1
+    echo "$out"
+    case "$out" in
+        *"msi_exit=0 "*|*"msi_exit=3010 "*) ;;
+        *) echo "msiexec failed (see E:\\code\\tetherly\\data\\updates\\client-install.log)" >&2; return 1 ;;
+    esac
+    case "$out" in
+        *tetherly-shell.exe*) ;;
+        *) echo "tetherly:// scheme is not registered to tetherly-shell.exe" >&2; return 1 ;;
+    esac
+    echo "==> Desktop client installed on ${REMOTE_HOST}."
+}
+
+# ------------------------------------------------------------------------------
 # 1. macOS Deployment
 # ------------------------------------------------------------------------------
 deploy_mac() {
@@ -157,6 +233,7 @@ deploy_mac() {
         exit 1
     fi
     curl -s "http://127.0.0.1:${LOCAL_PORT}/api/v1/health" | jq .
+    install_client_mac || echo "WARN: desktop client install failed on macOS; daemon deploy is unaffected." >&2
     echo "==> macOS deployment complete."
 }
 
@@ -328,6 +405,7 @@ deploy_windows() {
     else
         echo "Daemon privilege: SYSTEM (UAC/elevated-window injection OK)"
     fi
+    install_client_windows || echo "WARN: desktop client install failed on ${REMOTE_HOST}; daemon deploy is unaffected." >&2
     echo "==> Windows deployment complete."
 }
 

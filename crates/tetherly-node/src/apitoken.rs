@@ -364,8 +364,16 @@ pub fn open_client_or_dashboard(ui_port: u16, token: Option<&str>) -> bool {
         .status()
         .is_ok_and(|s| s.success());
     if client_ok {
+        tracing::info!("open main window: desktop client via tetherly://open");
         return true;
     }
+    #[cfg(windows)]
+    tracing::warn!(
+        scheme_registered = win::client_scheme_registered(),
+        "open main window: desktop client unavailable; falling back to the dashboard"
+    );
+    #[cfg(not(windows))]
+    tracing::warn!("open main window: desktop client unavailable; falling back to the dashboard");
     let url = dashboard_url(ui_port, token);
     #[cfg(target_os = "macos")]
     let opened = std::process::Command::new("open").arg(&url).spawn().is_ok();
@@ -376,6 +384,9 @@ pub fn open_client_or_dashboard(ui_port: u16, token: Option<&str>) -> bool {
         .arg(&url)
         .spawn()
         .is_ok();
+    if !opened {
+        tracing::warn!("open main window: dashboard fallback failed to launch");
+    }
     opened
 }
 

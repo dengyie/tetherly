@@ -77,6 +77,14 @@ pub fn run() {
     tracing::info!(port = daemon.port, "shell starting against loopback daemon");
 
     tauri::Builder::default()
+        // §230: must be the first plugin. A second launch (the daemon's
+        // tray "open main window" ShellExecutes tetherly://open, which on
+        // Windows starts a NEW process) forwards its deep link to this
+        // instance — the deep-link feature re-emits it to on_open_url — and
+        // exits, so the click always surfaces the one running client.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            trayui::show_main_window(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
