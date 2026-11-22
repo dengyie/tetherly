@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Cross-platform system tray icon and background status presence.
 //!
-//! macOS: NSStatusBar status item with menu and dashboard launcher.
+//! macOS: NSStatusBar template glyph; left click opens the Magpie-style
+//! panel (frosted NSPanel + WKWebView on the SPA `#tray` route), right
+//! click pops the compact context menu.
 //! Windows: Shell_NotifyIconW notification area icon with popup menu and dashboard launcher.
 //!
 //! §6.3 tray takeover: the daemon's built-in tray hides itself while a
@@ -46,21 +48,61 @@ impl Drop for TrayHandle {
 
 #[cfg(target_os = "macos")]
 mod macos_tray {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use objc2::rc::{Allocated, Retained};
     use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{define_class, msg_send, sel, AnyThread, ClassType, DefinedClass, MainThreadOnly};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSDragOperation, NSDraggingDestination,
-        NSDraggingInfo, NSMenu, NSMenuItem, NSPasteboardTypeFileURL, NSStatusBar, NSView,
+        NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions,
+        NSBackingStoreType, NSCellImagePosition, NSColor, NSDragOperation, NSDraggingDestination,
+        NSDraggingInfo, NSEventMask, NSEventModifierFlags, NSEventType, NSImage, NSMenu,
+        NSMenuItem, NSPanel, NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSScreen,
+        NSStatusBar, NSStatusBarButton, NSStatusItem, NSView, NSVisualEffectBlendingMode,
+        NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+        NSWindowCollectionBehavior, NSWindowStyleMask,
     };
-    use objc2_foundation::{MainThreadMarker, NSArray, NSDictionary, NSRect, NSString, NSURL};
+    use objc2_foundation::{
+        MainThreadMarker, NSArray, NSData, NSDictionary, NSNumber, NSPoint, NSRect, NSSize,
+        NSString, NSURLRequest, NSURL,
+    };
+    use objc2_web_kit::{
+        WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKWebView,
+        WKWebViewConfiguration,
+    };
+
+    /// Panel geometry (§225): Magpie's menubar panel is 380pt wide; the
+    /// height fits status + devices + transfers cards plus the footer.
+    const PANEL_W: f64 = 380.0;
+    const PANEL_H: f64 = 468.0;
+    /// The page reports its content height (`resize` action); clamp it.
+    const PANEL_MIN_H: f64 = 200.0;
+    const PANEL_MAX_H: f64 = 640.0;
+    /// Gap between the menubar bottom edge and the panel.
+    const PANEL_GAP: f64 = 6.0;
+    /// A click on the status item while the panel is open first resigns key
+    /// (hides the panel) and then fires the button action; swallow a re-show
+    /// inside this window so the click reads as "close", not "close+reopen".
+    const RETOGGLE_GUARD_MS: u64 = 300;
+    /// JS bridge name — `window.webkit.messageHandlers.tetherlyTray`.
+    const BRIDGE_NAME: &str = "tetherlyTray";
 
     pub(crate) struct TrayIvars {
         ui_port: u16,
-        /// Status-item button (for the visibility timer's alpha fold).
-        /// Only the tray target's ivars carry a value; the drop view keeps
-        /// `None`.
-        button: Option<objc2::rc::Retained<objc2_app_kit::NSStatusBarButton>>,
+        device_alias: String,
+        /// Status-item button (visibility fold + panel anchor). Only the
+        /// tray target's ivars carry a value; the drop view keeps `None`.
+        button: Option<Retained<NSStatusBarButton>>,
+        /// Status item (right-click menu attach/detach).
+        item: Option<Retained<NSStatusItem>>,
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
     }
 
     /// Extract local file paths from a dropping pasteboard.
@@ -173,7 +215,9 @@ mod macos_tray {
             fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
                 let this = this.set_ivars(TrayIvars {
                     ui_port: 0,
+                    device_alias: String::new(),
                     button: None,
+                    item: None,
                 });
                 unsafe { msg_send![super(this), initWithFrame: frame] }
             }
@@ -218,13 +262,336 @@ mod macos_tray {
         }
     );
 
+    // ---------------------------------------------------------------
+    // Menubar panel (§225, Magpie-style): borderless non-activating
+    // NSPanel → NSVisualEffectView (popover material, 12pt corners) →
+    // transparent WKWebView loading the SPA's `#tray` route. The page
+    // talks back through the `tetherlyTray` script-message bridge.
+    // ---------------------------------------------------------------
+
+    static LAST_HIDE_MS: AtomicU64 = AtomicU64::new(0);
+
+    struct PanelState {
+        panel: Retained<TrayPanel>,
+        web: Retained<WKWebView>,
+        loaded: bool,
+        /// Content-fitted height last reported by the page.
+        height: f64,
+    }
+
+    thread_local! {
+        static PANEL: RefCell<Option<PanelState>> = const { RefCell::new(None) };
+    }
+
+    define_class!(
+        #[unsafe(super(NSPanel))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "TetherlyTrayPanel"]
+        pub(crate) struct TrayPanel;
+
+        impl TrayPanel {
+            /// Borderless panels refuse key status by default; the web view
+            /// needs it for focus/typing and for the resign-key dismissal.
+            #[unsafe(method(canBecomeKeyWindow))]
+            fn can_become_key_window(&self) -> bool {
+                true
+            }
+
+            /// Click-outside dismissal: losing key status hides the panel
+            /// (same model as NSPopover transient behaviour, without the
+            /// arrow chrome Magpie also avoids).
+            #[unsafe(method(resignKeyWindow))]
+            fn resign_key_window(&self) {
+                unsafe {
+                    let _: () = msg_send![super(self), resignKeyWindow];
+                }
+                self.orderOut(None);
+                LAST_HIDE_MS.store(now_ms(), Ordering::Relaxed);
+            }
+        }
+    );
+
+    pub(crate) struct BridgeIvars {
+        ui_port: u16,
+    }
+
     define_class!(
         #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "TetherlyTrayBridge"]
+        #[ivars = BridgeIvars]
+        pub(crate) struct TrayBridge;
+
+        unsafe impl NSObjectProtocol for TrayBridge {}
+
+        unsafe impl WKScriptMessageHandler for TrayBridge {
+            /// `window.webkit.messageHandlers.tetherlyTray.postMessage(json)`
+            /// from the SPA tray bridge. The body is a JSON string with an
+            /// `action` field (traybridge.ts `TrayAction`).
+            #[unsafe(method(userContentController:didReceiveScriptMessage:))]
+            fn did_receive_script_message(
+                &self,
+                _controller: &WKUserContentController,
+                message: &WKScriptMessage,
+            ) {
+                let body = unsafe { message.body() };
+                let Ok(text) = body.downcast::<NSString>() else {
+                    return;
+                };
+                handle_panel_action(self.ivars().ui_port, &text.to_string());
+            }
+        }
+    );
+
+    /// Dispatch one SPA tray action. `toggled`/`error` are informational
+    /// (the page already reflects them); the host-side ones are open-main,
+    /// close and quit.
+    fn handle_panel_action(ui_port: u16, raw: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            tracing::debug!(raw, "tray panel: non-JSON bridge message ignored");
+            return;
+        };
+        match value["action"].as_str().unwrap_or_default() {
+            "open-main" => {
+                hide_panel();
+                crate::apitoken::open_client_or_dashboard(
+                    ui_port,
+                    tetherly_loopback::api_token_for(ui_port).as_deref(),
+                );
+            }
+            "close" => hide_panel(),
+            "quit" => std::process::exit(0),
+            "resize" => {
+                if let Some(h) = value["height"].as_f64() {
+                    resize_panel(h.clamp(PANEL_MIN_H, PANEL_MAX_H));
+                }
+            }
+            "error" => {
+                tracing::warn!(message = %value["message"], "tray panel reported an error");
+            }
+            other => tracing::debug!(action = other, "tray panel action"),
+        }
+    }
+
+    /// Fit the panel to the page's content height, keeping its top edge
+    /// under the status item. The borrow is released before the (possibly
+    /// run-loop-pumping) animated frame change.
+    fn resize_panel(height: f64) {
+        let target = PANEL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let state = slot.as_mut()?;
+            if (state.height - height).abs() < 0.5 {
+                return None;
+            }
+            state.height = height;
+            state.panel.isVisible().then(|| state.panel.clone())
+        });
+        if let Some(panel) = target {
+            let f = panel.frame();
+            let top = f.origin.y + f.size.height;
+            let frame = NSRect::new(
+                NSPoint::new(f.origin.x, (top - height).round()),
+                NSSize::new(f.size.width, height),
+            );
+            panel.setFrame_display_animate(frame, true, true);
+        }
+    }
+
+    fn hide_panel() {
+        PANEL.with(|slot| {
+            if let Some(state) = slot.borrow().as_ref() {
+                if state.panel.isVisible() {
+                    state.panel.orderOut(None);
+                    LAST_HIDE_MS.store(now_ms(), Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
+    /// The SPA tray route with the per-port API token in the fragment
+    /// (`#tray&token=…`, same handoff as the dashboard URL — App.svelte
+    /// strips the token and keeps `#tray`).
+    fn panel_url(ui_port: u16) -> String {
+        match tetherly_loopback::api_token_for(ui_port) {
+            Some(token) => format!("http://127.0.0.1:{ui_port}/#tray&token={token}"),
+            None => format!("http://127.0.0.1:{ui_port}/#tray"),
+        }
+    }
+
+    fn load_panel_page(web: &WKWebView, ui_port: u16) {
+        let url = NSString::from_str(&panel_url(ui_port));
+        if let Some(url) = NSURL::URLWithString(&url) {
+            let request = NSURLRequest::requestWithURL(&url);
+            let _ = unsafe { web.loadRequest(&request) };
+        }
+    }
+
+    fn build_panel(mtm: MainThreadMarker, ui_port: u16) -> PanelState {
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_W, PANEL_H));
+        let mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+        let panel: Retained<TrayPanel> = unsafe {
+            msg_send![
+                TrayPanel::alloc(mtm),
+                initWithContentRect: rect,
+                styleMask: mask,
+                backing: NSBackingStoreType::Buffered,
+                defer: false,
+            ]
+        };
+        panel.setLevel(NSPopUpMenuWindowLevel);
+        panel.setOpaque(false);
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
+        panel.setHasShadow(true);
+        panel.setMovable(false);
+        panel.setHidesOnDeactivate(false);
+        panel.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::Transient
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+
+        // Frosted card: popover material behind the window, rounded by the
+        // backing layer so the web content is clipped to the same radius.
+        let fx: Retained<NSVisualEffectView> =
+            unsafe { msg_send![NSVisualEffectView::alloc(mtm), initWithFrame: rect] };
+        fx.setMaterial(NSVisualEffectMaterial::Popover);
+        fx.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        fx.setState(NSVisualEffectState::Active);
+        fx.setWantsLayer(true);
+        unsafe {
+            let layer: Option<Retained<AnyObject>> = msg_send![&*fx, layer];
+            if let Some(layer) = layer {
+                let _: () = msg_send![&*layer, setCornerRadius: 12.0f64];
+                let _: () = msg_send![&*layer, setMasksToBounds: true];
+            }
+        }
+        fx.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+
+        // Web view: transparent so the material shows through the SPA's
+        // `color-mix(var(--bg) 93%, transparent)` panel background.
+        let config = unsafe { WKWebViewConfiguration::new(mtm) };
+        let bridge = TrayBridge::alloc(mtm).set_ivars(BridgeIvars { ui_port });
+        let bridge: Retained<TrayBridge> = unsafe { msg_send![super(bridge), init] };
+        unsafe {
+            config.userContentController().addScriptMessageHandler_name(
+                ProtocolObject::from_ref(&*bridge),
+                &NSString::from_str(BRIDGE_NAME),
+            );
+        }
+        let web: Retained<WKWebView> =
+            unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), rect, &config) };
+        web.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        unsafe {
+            // Private-but-stable KVC key WebKit honours for transparent pages.
+            let no = NSNumber::numberWithBool(false);
+            let _: () =
+                msg_send![&*web, setValue: &*no, forKey: &*NSString::from_str("drawsBackground")];
+            web.setUnderPageBackgroundColor(Some(&NSColor::clearColor()));
+        }
+        fx.addSubview(&web);
+        panel.setContentView(Some(&fx));
+        // The user content controller keeps the handler alive, but pin it
+        // for the process lifetime regardless — the panel never goes away.
+        std::mem::forget(bridge);
+
+        PanelState {
+            panel,
+            web,
+            loaded: false,
+            height: PANEL_H,
+        }
+    }
+
+    /// Anchor the panel centred under the status item, clamped to the
+    /// screen's visible frame (origin is bottom-left in AppKit coordinates).
+    fn anchored_frame(button: &NSStatusBarButton, height: f64, mtm: MainThreadMarker) -> NSRect {
+        let bounds = button.bounds();
+        let in_window = button.convertRect_toView(bounds, None);
+        let window = button.window();
+        let on_screen = window
+            .as_ref()
+            .map(|w| w.convertRectToScreen(in_window))
+            .unwrap_or(in_window);
+        let mut x = on_screen.origin.x + on_screen.size.width / 2.0 - PANEL_W / 2.0;
+        let mut y = on_screen.origin.y - height - PANEL_GAP;
+        let screen = window
+            .as_ref()
+            .and_then(|w| w.screen())
+            .or_else(|| NSScreen::mainScreen(mtm));
+        if let Some(screen) = screen {
+            let vf = screen.visibleFrame();
+            let max_x = vf.origin.x + vf.size.width - PANEL_W - 8.0;
+            x = x.min(max_x).max(vf.origin.x + 8.0);
+            y = y.max(vf.origin.y + 8.0);
+        }
+        NSRect::new(
+            NSPoint::new(x.round(), y.round()),
+            NSSize::new(PANEL_W, height),
+        )
+    }
+
+    fn toggle_panel(button: &NSStatusBarButton, ui_port: u16, mtm: MainThreadMarker) {
+        let now = now_ms();
+        PANEL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let state = slot.get_or_insert_with(|| build_panel(mtm, ui_port));
+            if state.panel.isVisible() {
+                state.panel.orderOut(None);
+                LAST_HIDE_MS.store(now, Ordering::Relaxed);
+                return;
+            }
+            if now.saturating_sub(LAST_HIDE_MS.load(Ordering::Relaxed)) < RETOGGLE_GUARD_MS {
+                return;
+            }
+            if !state.loaded {
+                load_panel_page(&state.web, ui_port);
+                state.loaded = true;
+            }
+            state
+                .panel
+                .setFrame_display(anchored_frame(button, state.height, mtm), false);
+            state.panel.makeKeyAndOrderFront(None);
+        });
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
         #[name = "TetherlyTrayTarget"]
         #[ivars = TrayIvars]
         pub(crate) struct TetherlyTrayTarget;
 
         impl TetherlyTrayTarget {
+            /// Status-item click. Left click toggles the panel; right click
+            /// (or ctrl-click) pops the compact context menu, Magpie-style.
+            #[unsafe(method(statusClicked:))]
+            fn status_clicked(&self, _sender: &NSStatusBarButton) {
+                let mtm = self.mtm();
+                let Some(button) = self.ivars().button.as_ref() else {
+                    return;
+                };
+                let secondary = NSApplication::sharedApplication(mtm)
+                    .currentEvent()
+                    .map(|ev| {
+                        ev.r#type() == NSEventType::RightMouseUp
+                            || ev.modifierFlags().contains(NSEventModifierFlags::Control)
+                    })
+                    .unwrap_or(false);
+                if secondary {
+                    hide_panel();
+                    self.show_context_menu(button, mtm);
+                } else {
+                    toggle_panel(button, self.ivars().ui_port, mtm);
+                }
+            }
+
             #[unsafe(method(openDashboard:))]
             fn open_dashboard(&self, _sender: &NSMenuItem) {
                 let port = self.ivars().ui_port;
@@ -259,10 +626,10 @@ mod macos_tray {
                 let want = super::tray_visible();
                 if SHOWN.swap(want, std::sync::atomic::Ordering::SeqCst) != want {
                     if let Some(button) = self.ivars().button.as_ref() {
-                        unsafe {
-                            let _: () = msg_send![button,
-                                setAlphaValue: if want { 1.0 } else { 0.0 }];
-                        }
+                        button.setAlphaValue(if want { 1.0 } else { 0.0 });
+                    }
+                    if !want {
+                        hide_panel();
                     }
                 }
             }
@@ -271,33 +638,122 @@ mod macos_tray {
         unsafe impl NSObjectProtocol for TetherlyTrayTarget {}
     );
 
+    impl TetherlyTrayTarget {
+        /// Build the context menu fresh (accessibility state is live) and
+        /// pop it from the status item: attach → synthetic click → detach,
+        /// so left clicks keep reaching `statusClicked:` instead of the menu.
+        fn show_context_menu(&self, button: &NSStatusBarButton, mtm: MainThreadMarker) {
+            let Some(item) = self.ivars().item.as_ref() else {
+                return;
+            };
+            let menu = build_context_menu(self, mtm);
+            item.setMenu(Some(&menu));
+            unsafe { button.performClick(None) };
+            item.setMenu(None);
+        }
+    }
+
+    fn menu_item(
+        mtm: MainThreadMarker,
+        title: &str,
+        action: Option<objc2::runtime::Sel>,
+        target: Option<&AnyObject>,
+    ) -> Retained<NSMenuItem> {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str(title),
+                action,
+                &NSString::from_str(""),
+            )
+        };
+        if action.is_some() {
+            unsafe { item.setTarget(target) };
+            item.setEnabled(true);
+        } else {
+            item.setEnabled(false);
+        }
+        item
+    }
+
+    /// Compact right-click menu (no emoji, no chatter — Magpie's menubar
+    /// keeps the text to status / console / permission / quit).
+    fn build_context_menu(target: &TetherlyTrayTarget, mtm: MainThreadMarker) -> Retained<NSMenu> {
+        let ivars = target.ivars();
+        let target_ref: &AnyObject = target.as_ref();
+        let menu = NSMenu::new(mtm);
+        menu.addItem(&menu_item(
+            mtm,
+            &format!("Tetherly · 运行中 ({})", ivars.device_alias),
+            None,
+            None,
+        ));
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        menu.addItem(&menu_item(
+            mtm,
+            "打开控制台",
+            Some(sel!(openDashboard:)),
+            Some(target_ref),
+        ));
+        if crate::platform::is_accessibility_trusted() {
+            menu.addItem(&menu_item(mtm, "辅助功能权限：已授权", None, None));
+        } else {
+            menu.addItem(&menu_item(
+                mtm,
+                "辅助功能权限：未授权…",
+                Some(sel!(openAccessibility:)),
+                Some(target_ref),
+            ));
+        }
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        menu.addItem(&menu_item(
+            mtm,
+            "退出 Tetherly",
+            Some(sel!(quitTetherly:)),
+            Some(target_ref),
+        ));
+        menu
+    }
+
     /// Build the tray dropzone view covering the full bounds of the status
     /// item's button. The view is the registered dragging destination; the
     /// button stays clickable underneath (the view is non-interfering for
     /// mouse events because a plain NSView passes clicks through its own
     /// hit-testing only when it has no event handlers — the menu still works
     /// since dragging is the only gesture this view intercepts).
-    fn attach_drop_view(
-        button: &objc2_app_kit::NSStatusBarButton,
-        ui_port: u16,
-        mtm: MainThreadMarker,
-    ) {
+    fn attach_drop_view(button: &NSStatusBarButton, ui_port: u16, mtm: MainThreadMarker) {
         let frame = button.bounds();
         let drop = TrayDropView::alloc(mtm).set_ivars(TrayIvars {
             ui_port,
+            device_alias: String::new(),
             button: None,
+            item: None,
         });
         let drop: Retained<TrayDropView> = unsafe { msg_send![super(drop), initWithFrame: frame] };
         let file_type = unsafe { NSPasteboardTypeFileURL };
         drop.registerForDraggedTypes(&NSArray::from_slice(&[file_type]));
         // Auto-resize with the button so the dropzone never shrinks away.
         drop.setAutoresizingMask(
-            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
-                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         button.addSubview(&drop);
         // Keep the drop view alive for the process lifetime.
         std::mem::forget(drop);
+    }
+
+    /// Monochrome template glyph (assets/brand/menubar-template-36x36.png,
+    /// the mac47054639 mark at 18pt@2x). `setTemplate` lets AppKit tint it
+    /// for light/dark menubars and the pressed state — Magpie's menubar
+    /// presence is exactly this: one glyph, no title.
+    fn menubar_image() -> Option<Retained<NSImage>> {
+        let png = NSData::with_bytes(include_bytes!(
+            "../../../../assets/brand/menubar-template-36x36.png"
+        ));
+        let image = NSImage::initWithData(NSImage::alloc(), &png)?;
+        image.setSize(NSSize::new(18.0, 18.0));
+        image.setTemplate(true);
+        Some(image)
     }
 
     pub fn run_macos_tray_on_main_thread(
@@ -316,140 +772,43 @@ mod macos_tray {
         let bar = NSStatusBar::systemStatusBar();
         let item = bar.statusItemWithLength(-1.0);
         let button_ref = item.button(mtm);
-        let target = TetherlyTrayTarget::alloc().set_ivars(TrayIvars {
+        let target = TetherlyTrayTarget::alloc(mtm).set_ivars(TrayIvars {
             ui_port,
+            device_alias,
             button: button_ref.clone(),
+            item: Some(item.clone()),
         });
         let target: Retained<TetherlyTrayTarget> = unsafe { msg_send![super(target), init] };
         let target_ref: &AnyObject = target.as_ref();
 
-        if let Some(button) = item.button(mtm) {
-            let title = NSString::from_str("⇄ Tetherly");
-            button.setTitle(&title);
-            // Brand mark (assets/brand/menubar-72x72.png, mac47054639) drawn
-            // at 18pt left of the title; the glyph title stays as fallback
-            // if AppKit cannot decode the PNG.
-            let png = objc2_foundation::NSData::with_bytes(include_bytes!(
-                "../../../../assets/brand/menubar-72x72.png"
-            ));
-            if let Some(image) =
-                objc2_app_kit::NSImage::initWithData(objc2_app_kit::NSImage::alloc(), &png)
-            {
-                image.setSize(objc2_foundation::NSSize::new(18.0, 18.0));
-                button.setImage(Some(&image));
-                button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeft);
-                button.setTitle(&NSString::from_str("Tetherly"));
+        if let Some(button) = button_ref.as_ref() {
+            match menubar_image() {
+                Some(image) => {
+                    button.setImage(Some(&image));
+                    button.setImagePosition(NSCellImagePosition::ImageOnly);
+                    button.setTitle(&NSString::from_str(""));
+                }
+                // Glyph title fallback if AppKit cannot decode the PNG.
+                None => button.setTitle(&NSString::from_str("⇄")),
             }
+            button.setToolTip(Some(&NSString::from_str("Tetherly")));
+            // Left click → panel, right click → menu (`statusClicked:`
+            // inspects the current event). No menu is attached to the item
+            // at rest, otherwise AppKit would swallow the action.
+            unsafe {
+                button.setTarget(Some(target_ref));
+                button.setAction(Some(sel!(statusClicked:)));
+            }
+            button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
             // ADR-137 Engine I: the tray icon is a live dropzone — dragging
             // files onto it sends them to the connected peer via the loopback
             // drag REST chain (intent → confirm → stream → MOTW settle).
-            attach_drop_view(&button, ui_port, mtm);
+            attach_drop_view(button, ui_port, mtm);
         }
-
-        let menu = NSMenu::new(mtm);
-        let status_title = NSString::from_str(&format!("🟢 Tetherly: 运行中 ({device_alias})"));
-        let status_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &status_title,
-                None,
-                &NSString::from_str(""),
-            )
-        };
-        status_item.setEnabled(false);
-        menu.addItem(&status_item);
-
-        let sep1 = NSMenuItem::separatorItem(mtm);
-        menu.addItem(&sep1);
-
-        let dash_title = NSString::from_str(&format!("🌐 打开管理控制台 (127.0.0.1:{})", ui_port));
-        let dash_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &dash_title,
-                Some(sel!(openDashboard:)),
-                &NSString::from_str(""),
-            )
-        };
-        unsafe { dash_item.setTarget(Some(target_ref)) };
-        dash_item.setEnabled(true);
-        menu.addItem(&dash_item);
-
-        // ADR-139 M4: the tray popover (peers + live transfers panel) is
-        // retired — the Tauri client's tray panel and the console at `/`
-        // cover it; popover.rs is gone.
-
-        let edge_title = NSString::from_str("🖥️ 漫游拓扑: Deskflow 对齐 (边缘探测)");
-        let edge_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &edge_title,
-                None,
-                &NSString::from_str(""),
-            )
-        };
-        edge_item.setEnabled(false);
-        menu.addItem(&edge_item);
-
-        let keymap_title = NSString::from_str("⌨️ 键位映射: Mac ↔ Windows (Cmd ↔ Ctrl)");
-        let keymap_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &keymap_title,
-                None,
-                &NSString::from_str(""),
-            )
-        };
-        keymap_item.setEnabled(false);
-        menu.addItem(&keymap_item);
-
-        let trusted = crate::platform::is_accessibility_trusted();
-        let ax_title = if trusted {
-            NSString::from_str("🔒 辅助功能权限: 已授权")
-        } else {
-            NSString::from_str("⚠️ 辅助功能权限: 未授权 (点击授权)")
-        };
-        let ax_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &ax_title,
-                if trusted {
-                    None
-                } else {
-                    Some(sel!(openAccessibility:))
-                },
-                &NSString::from_str(""),
-            )
-        };
-        if !trusted {
-            unsafe { ax_item.setTarget(Some(target_ref)) };
-            ax_item.setEnabled(true);
-        } else {
-            ax_item.setEnabled(false);
-        }
-        menu.addItem(&ax_item);
-
-        let sep2 = NSMenuItem::separatorItem(mtm);
-        menu.addItem(&sep2);
-
-        let quit_title = NSString::from_str("❌ 退出 Tetherly");
-        let quit_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &quit_title,
-                Some(sel!(quitTetherly:)),
-                &NSString::from_str(""),
-            )
-        };
-        unsafe { quit_item.setTarget(Some(target_ref)) };
-        quit_item.setEnabled(true);
-        menu.addItem(&quit_item);
-
-        item.setMenu(Some(&menu));
 
         // §6.3 tray takeover: run-loop timer polls the shared visibility
         // flag on the main thread and folds it into the status item (see
-        // `trayVisibilityTick:`). Same pattern as the popover refresh timer.
+        // `trayVisibilityTick:`).
         unsafe {
             let timer =
                 objc2_foundation::NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
@@ -462,6 +821,11 @@ mod macos_tray {
             objc2_foundation::NSRunLoop::currentRunLoop()
                 .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
         }
+
+        // The status item and target must outlive `app.run()` (which never
+        // returns); pin them explicitly rather than relying on drop order.
+        std::mem::forget(item);
+        std::mem::forget(target);
 
         std::thread::spawn(move || {
             let _ = rx.recv();
@@ -583,10 +947,10 @@ mod windows_tray {
 
                     let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
                     let menu: HMENU = CreatePopupMenu();
-                    let status_str = to_wide("🟢 Tetherly: 运行中");
-                    let dash_str = to_wide(&format!("🌐 打开管理控制台 (127.0.0.1:{port})"));
-                    let roam_str = to_wide("🖥️ Deskflow 漫游: 活跃");
-                    let exit_str = to_wide("❌ 退出 Tetherly");
+                    let status_str = to_wide("Tetherly · 运行中");
+                    let dash_str = to_wide(&format!("打开控制台 (127.0.0.1:{port})"));
+                    let roam_str = to_wide("键鼠漫游：活跃");
+                    let exit_str = to_wide("退出 Tetherly");
 
                     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_STATUS, status_str.as_ptr());
                     AppendMenuW(menu, MF_STRING, IDM_DASHBOARD, dash_str.as_ptr());
@@ -700,7 +1064,7 @@ mod windows_tray {
             nid.uCallbackMessage = WM_TRAYICON;
             nid.hIcon = icon;
 
-            let tip = to_wide("Tetherly (Running) - Deskflow Roaming");
+            let tip = to_wide("Tetherly · 运行中");
             let len = tip.len().min(nid.szTip.len() - 1);
             nid.szTip[..len].copy_from_slice(&tip[..len]);
 

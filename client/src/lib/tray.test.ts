@@ -158,4 +158,41 @@ describe("tray panel compact route", () => {
       }),
     );
   });
+
+  // §225: the daemon's native menubar panel opens `#tray&token=…`. The route
+  // must still mount the compact view, the token must leave the URL (kept
+  // only in sessionStorage) and `#tray` must survive so a reload stays in
+  // panel mode.
+  it("daemon handoff #tray&token= mounts the panel and strips the token", async () => {
+    sessionStorage.removeItem("tetherly_token");
+    location.hash = "#tray&token=abc%2Fdef";
+    const t = new MockTransport();
+    render(App, { transport: t });
+    t.emit({ id: 1, type: "snapshot", data: snapshot([]) });
+    await waitFor(() => expect(screen.getByTestId("tray-panel")).toBeTruthy());
+    expect(location.hash).toBe("#tray");
+    expect(sessionStorage.getItem("tetherly_token")).toBe("abc/def");
+    expect(document.documentElement.dataset.tray).toBe("panel");
+  });
+
+  // §225: inside the native panel, actions go to the WKWebView script-message
+  // handler (`webkit.messageHandlers.tetherlyTray`) as a JSON string.
+  it("footer actions post JSON to the native tetherlyTray bridge when present", async () => {
+    const posted: string[] = [];
+    (globalThis as { webkit?: unknown }).webkit = {
+      messageHandlers: { tetherlyTray: { postMessage: (m: string) => posted.push(m) } },
+    };
+    try {
+      location.hash = "#tray";
+      const t = new MockTransport();
+      render(App, { transport: t });
+      t.emit({ id: 1, type: "snapshot", data: snapshot([]) });
+      await waitFor(() => expect(screen.getByTestId("tray-open")).toBeTruthy());
+      screen.getByTestId("tray-open").click();
+      screen.getByTestId("tray-quit").click();
+      expect(posted.map((m) => JSON.parse(m).action)).toEqual(["open-main", "quit"]);
+    } finally {
+      delete (globalThis as { webkit?: unknown }).webkit;
+    }
+  });
 });

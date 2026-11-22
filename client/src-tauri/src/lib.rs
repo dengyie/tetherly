@@ -204,17 +204,35 @@ pub fn run() {
                     }
                 });
             });
-            // Tray panel SPA actions (§6.3): 打开主窗口 shows the main shell
-            // and hides the popover; toggles/errors are already reflected via
-            // the settings.changed event loop, so only open-main needs a hook.
+            // Tray panel SPA actions (§6.3/§225): 打开主窗口 shows the main
+            // shell and hides the popover; 关闭 only hides; 退出 ends the
+            // shell. Toggles/errors are already reflected via the
+            // settings.changed event loop, so they need no hook here.
             let act = handle.clone();
             handle.listen(crate::traybridge::TRAY_ACTION_CHANNEL, move |ev| {
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(ev.payload()) {
-                    if payload["action"] == "open-main" {
-                        trayui::show_main_window(&act);
+                    let hide_panel = || {
                         if let Some(panel) = act.get_webview_window("tray-panel") {
                             let _ = panel.hide();
                         }
+                    };
+                    match payload["action"].as_str().unwrap_or_default() {
+                        "open-main" => {
+                            trayui::show_main_window(&act);
+                            hide_panel();
+                        }
+                        "close" => hide_panel(),
+                        "quit" => act.exit(0),
+                        "resize" => {
+                            if let (Some(h), Some(panel)) = (
+                                payload["height"].as_f64(),
+                                act.get_webview_window("tray-panel"),
+                            ) {
+                                let h = h.clamp(trayui::PANEL_MIN_H, trayui::PANEL_MAX_H);
+                                let _ = panel.set_size(tauri::LogicalSize::new(trayui::PANEL_W, h));
+                            }
+                        }
+                        _ => {}
                     }
                 }
             });

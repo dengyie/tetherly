@@ -391,3 +391,9 @@
 - 关键 tokio 事实（1.53.2 源码核实）：blocking 池与 worker 共享线程名 tokio-runtime-worker（pool.rs:465）且 on_thread_start hook 同样跑在 blocking 线程（pool.rs:229/506）——按线程名区分池不可能，池身份只能来自探针站点位置（闭包内=blocking 池，tokio 契约保证）。
 - 测试 m5_1_encode_stages_run_off_the_runtime_workers（RED→GREEN）：pump 以生产形态（tokio::spawn 驱动）推 5 帧，断言 blocking 探针前缀 pump:/fec:、inline 探针为空。
 - 门禁：phase5 19 全绿 / node lib 335 / workspace clippy+tests 全绿 / fmt 过。
+
+## §225 (2026-11-22) 菜单栏 UI 抄 Magpie 面板
+- [x] macOS 状态项 template 字形 + 左键 frosted WKWebView 面板（`#tray&token=`、`tetherlyTray` 桥、内容自适应高度）+ 右键干净菜单；SPA Tray 路由重写；Tauri 壳 resize 跟随；ADR-134 更新。
+- [x] 隔离第二节点冒烟截图通过（380×338 空态面板）。
+- [ ] Windows：WebView2 托盘面板（当前仅去 emoji 的文本菜单）。
+- [ ] 真机：v0.2.76 部署后肉眼确认菜单栏字形深/浅色反色正确。

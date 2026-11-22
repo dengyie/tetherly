@@ -130,6 +130,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSObject",
     "NSDictionary",
     "NSURL",
+    "NSURLRequest",
+    "NSValue",
     "NSEnumerator",
 ] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
@@ -172,12 +174,27 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSUserInterfaceLayout",
     "NSView",
     "NSViewController",
+    "NSVisualEffectView",
     "NSWindow",
     "NSDragging",
     "NSDraggingItem",
     "NSDraggingSession",
     "NSPasteboard",
     "NSPasteboardItem",
+] }
+# Menubar panel (§225): a WKWebView inside the frosted NSPanel loads the
+# SPA's #tray route. Already in the lockfile via wry — no new package.
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-app-kit",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKUserContentController",
+    "WKScriptMessageHandler",
+    "WKScriptMessage",
+    "WKPreferences",
+    "WKNavigation",
+    "objc2-core-foundation",
 ] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",

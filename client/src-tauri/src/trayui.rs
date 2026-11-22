@@ -221,9 +221,13 @@ pub fn toggle_autostart<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Tray panel geometry (§6.3: 360×480 popover).
-const PANEL_W: f64 = 360.0;
-const PANEL_H: f64 = 480.0;
+/// Tray panel geometry (§225: Magpie-style 380-wide panel). The SPA reports
+/// its content height over the tray-action channel (`resize`); the window
+/// follows it within [`PANEL_MIN_H`, `PANEL_MAX_H`].
+pub const PANEL_W: f64 = 380.0;
+const PANEL_H: f64 = 468.0;
+pub const PANEL_MIN_H: f64 = 200.0;
+pub const PANEL_MAX_H: f64 = 640.0;
 
 /// Toggle the 360×480 frameless panel. It is created lazily near the tray
 /// icon (the click's physical cursor position), then shown/hidden. Focus-out

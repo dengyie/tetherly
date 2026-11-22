@@ -220,6 +220,10 @@ body {
   .page-intro p { margin: 0; font-size: 12.5px; color: var(--muted); flex: 1; min-width: 0; }
 
   /* ---- Lists / rows (the Magpie card) -------------------------------- */
+  /* §225 menubar panel: the daemon's NSVisualEffectView shows through a
+     transparent document; the panel surface itself tints it 93% --bg. */
+  html[data-tray="panel"], html[data-tray="panel"] body { background: transparent; }
+
   .list {
     background: var(--card);
     border: 1px solid var(--line);

@@ -31,17 +31,23 @@
   import Activity from "./routes/Activity.svelte";
   import Tray from "./routes/Tray.svelte";
 
-  // Tray panel mode: the shell opens the 360×480 frameless window at index
-  // with the #tray fragment (§6.3) — the compact single-screen view replaces
-  // sidebar + header entirely.
-  const isTrayPanel = $state(location.hash === "#tray");
+  // Tray panel mode: the shell (or the daemon's own menubar panel, §225)
+  // opens the frameless 380-wide window at index with the #tray fragment
+  // (§6.3) — the compact single-screen view replaces sidebar + header.
+  // `#tray&token=…` is the daemon handoff form (token stripped below).
+  const isTrayPanel = $state(/^#tray(?:&|$)/.test(location.hash));
+  // Lets app.css make html/body transparent for the frosted native panel.
+  document.documentElement.dataset.tray = isTrayPanel ? "panel" : "main";
 
-  // Token arrives via the daemon URL fragment (#token=…); read and strip it
-  // immediately so it never stays in the address bar or history.
+  // Token arrives via the daemon URL fragment (#token=… or #tray&token=…);
+  // read and strip it immediately so it never stays in the address bar or
+  // history. The #tray marker is kept so a reload stays in panel mode.
   function readFragmentToken(): string | null {
-    if (!location.hash.startsWith("#token=")) return null;
-    const t = decodeURIComponent(location.hash.slice(7));
-    history.replaceState(null, "", location.pathname + location.search);
+    const m = /(?:^#|&)token=([^&]*)/.exec(location.hash);
+    if (!m) return null;
+    const t = decodeURIComponent(m[1]);
+    const keep = isTrayPanel ? "#tray" : "";
+    history.replaceState(null, "", location.pathname + location.search + keep);
     sessionStorage.setItem("tetherly_token", t);
     return t;
   }

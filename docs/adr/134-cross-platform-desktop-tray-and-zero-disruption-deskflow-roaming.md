@@ -28,18 +28,17 @@
 
 无需引入庞大的第三方 GUI 框架，直接复用既有系统绑定特性实现轻量原生托盘：
 - **macOS 顶部菜单栏 (`NSStatusBar`)**：
-  * 主线程托管 `NSApplication`，设置为 `Accessory` 模式（`LSUIElement = 1`），不在 Dock 栏显示冗余大图标，仅在顶部菜单栏常驻 `⇄ Tetherly` 图标。
-  * 动态上下文菜单：
-    - `🟢 Tetherly: 运行中 (设备别名)`
-    - `🌐 打开管理控制台 (127.0.0.1:45716)`（调用系统默认浏览器）
-    - `🖥️ 漫游拓扑: Deskflow 对齐 (边缘探测)`
-    - `⌨️ 键位映射: Mac ↔ Windows (Cmd ↔ Ctrl)`
-    - `🔒 辅助功能权限: 已授权 / ⚠️ 未授权 (点击设置)`（未授权时高亮且可一键唤起系统设置）
-    - `❌ 退出 Tetherly`
+  * 主线程托管 `NSApplication`，设置为 `Accessory` 模式（`LSUIElement = 1`），不在 Dock 栏显示冗余大图标，顶部菜单栏只常驻一枚 18pt 单色 template 图标（`assets/brand/menubar-template-36x36.png`，mango 品牌轮廓，AppKit 按浅/深色菜单栏自动着色），不带文字（§225，对齐 Magpie）。
+  * 左键：弹出 Magpie 风格面板——无边框 `NSPanel`（NonactivatingPanel、PopUpMenu 层级、CanJoinAllSpaces）内嵌 `NSVisualEffectView`（Popover 材质、12pt 圆角）+ 透明 `WKWebView`，加载 daemon 自带 SPA 的 `#tray&token=…` 路由（380×468，锚定在状态项正下方、夹取在屏幕可见区内）。面板失去 key 即 `orderOut` 收起；页面经 `window.webkit.messageHandlers.tetherlyTray.postMessage(JSON)` 回传 `open-main` / `close` / `quit`。
+  * 右键 / Ctrl-点击：临时挂上下文菜单并 `performClick` 弹出，弹完即卸下（保证左键仍走 action）：
+    - `Tetherly · 运行中 (设备别名)`
+    - `打开控制台`（优先 Tauri 客户端深链接，退回系统浏览器）
+    - `辅助功能权限：已授权` / `辅助功能权限：未授权…`（点击唤起系统设置）
+    - `退出 Tetherly`
 - **Windows 任务栏通知区 (`Shell_NotifyIconW`)**：
   * 在 Session 2 交互上下文中注册轻量隐藏窗口（`WNDCLASSEXW`）与消息泵循环（`GetMessageW` / `DispatchMessageW`）。
   * 单击/双击托盘图标：拉起默认浏览器访问 `http://127.0.0.1:45716`。
-  * 右键弹出原生菜单（`TrackPopupMenuEx`）：提供状态指示、拓扑指示、控制台直达与安全退出。
+  * 右键弹出原生菜单（`TrackPopupMenuEx`）：`Tetherly · 运行中` / `打开控制台 (127.0.0.1:45716)` / `键鼠漫游：活跃` / `退出 Tetherly`（§225 起去 emoji，与 macOS 菜单同风格；WebView2 面板暂未实现）。
 
 ### 2. 零扰民权限治理与持久化 App Bundle 规范
 
