@@ -841,6 +841,18 @@ struct Shared {
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
     screen_prev_frame: Mutex<Option<Vec<u8>>>,
+    /// §218-d: `site:thread-name` of the last heavy encode-path stage
+    /// executed inside its `spawn_blocking` closure (empty until the first
+    /// encode lands). tokio names worker and blocking-pool threads
+    /// identically, so pool identity comes from the probe sites themselves —
+    /// these sites record only from inside a blocking closure, and tokio's
+    /// `spawn_blocking` contract guarantees the closure never runs on a
+    /// runtime worker.
+    screen_encode_thread: std::sync::Mutex<String>,
+    /// §218-d: `site:thread-name` of the last heavy encode-path execution
+    /// outside any blocking closure, if any. Non-empty means a heavy path
+    /// bypassed the blocking pool — the exact regression §218-d prevents.
+    screen_inline_encode_thread: std::sync::Mutex<String>,
     /// Global admission budget for file-channel handlers. LAN and overlay
     /// listeners share this semaphore so alternate paths cannot multiply the
     /// number of pre-auth sockets beyond the process-wide bound.

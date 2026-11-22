@@ -526,6 +526,8 @@ impl Node {
             screen_privacy_last_change_us: AtomicU64::new(0),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
+            screen_encode_thread: std::sync::Mutex::new(String::new()),
+            screen_inline_encode_thread: std::sync::Mutex::new(String::new()),
             file_admission: Arc::new(Semaphore::new(FILE_HANDLER_LIMIT)),
             shutdown,
             overlay: Mutex::new(initial_overlay),

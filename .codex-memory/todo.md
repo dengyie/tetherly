@@ -382,3 +382,11 @@
 - ③ qos_sys 可见性统一 pub(crate)。
 - 门禁：fmt / lib 331 全绿 / clippy node+cli -D warnings / node bins + cli build 全过。
 - 部署：v0.2.71 升级至 /Applications/Tetherly.app（health 回读 0.2.71，daemon responsiveness 日志在案，input tunnel 连 tdev_rguuuxmtz7e2hfpm）。
+
+## §218-d (2026-11-22) §218 遗留观察项落地：编码重路径移出 runtime worker
+- ① screen_send_frame ~1560 行编码主管线（damage/motion/tile/delta/SVC/LTR/PIR）抽为 encode_pump_outbound 纯函数，spawn_blocking 执行。
+- ② send_screen_frames 的 FEC Reed-Solomon 编码 + 网络健康采样 + delay 计算 spawn_blocking。
+- ③ 探针：Shared.screen_encode_thread（闭包内记录 site:thread-name）+ screen_inline_encode_thread（必须保持空）+ screen_encode_thread_report()。
+- 关键 tokio 事实（1.53.2 源码核实）：blocking 池与 worker 共享线程名 tokio-runtime-worker（pool.rs:465）且 on_thread_start hook 同样跑在 blocking 线程（pool.rs:229/506）——按线程名区分池不可能，池身份只能来自探针站点位置（闭包内=blocking 池，tokio 契约保证）。
+- 测试 m5_1_encode_stages_run_off_the_runtime_workers（RED→GREEN）：pump 以生产形态（tokio::spawn 驱动）推 5 帧，断言 blocking 探针前缀 pump:/fec:、inline 探针为空。
+- 门禁：phase5 19 全绿 / node lib 335 / workspace clippy+tests 全绿 / fmt 过。

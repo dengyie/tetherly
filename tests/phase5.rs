@@ -380,6 +380,71 @@ async fn m5_1_h264_stream_roundtrips_through_the_wire() {
 }
 
 // --------------------------------------------------------------------------
+// §218-d — the pump's heavy encode stages (damage scan, motion/tile/patch
+// encode, FEC framing) must run on the blocking pool, never on a tokio
+// runtime worker: inline encode under load is what starves the input chain
+// (macOS mouse/keyboard lag under high CPU, §218).
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_1_encode_stages_run_off_the_runtime_workers() {
+    let (host, visitor, _ga, _gb) = pair_view().await;
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming (encode-pool probe)");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Drive the pump through the full encode path (damage + delta + FEC).
+    // Production calls screen_send_frame from a spawned pump task (cmd_core
+    // §218 comment), so reproduce that topology: run the pump on a spawned
+    // task — it lands on a tokio runtime worker, exactly the thread class
+    // the encode work must stay off of.
+    let pump_host = host.clone_handle();
+    let pump = tokio::spawn(async move {
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(35)).await;
+            let _ = pump_host.screen_send_frame().await;
+        }
+    });
+    pump.await.unwrap();
+    // Let the async send path (FEC probe site) settle.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (blocking_thread, inline_thread) = host.screen_encode_thread_report();
+    assert!(
+        !blocking_thread.is_empty(),
+        "encode path never executed; probe wiring broken"
+    );
+    // tokio names worker and blocking-pool threads identically, so the pool
+    // identity comes from the probe sites themselves: each site records only
+    // from inside a `spawn_blocking` closure, and the inline slot records a
+    // site executing outside one (must never happen).
+    assert!(
+        inline_thread.is_empty(),
+        "encode stage ran inline on thread {inline_thread:?} — it must run inside the pump's blocking closures (§218)"
+    );
+    assert!(
+        blocking_thread.starts_with("pump:") || blocking_thread.starts_with("fec:"),
+        "encode probe recorded an unexpected site {blocking_thread:?}"
+    );
+
+    host.shutdown();
+    visitor.shutdown();
+}
+
+// --------------------------------------------------------------------------
 // M5.3 — Peer disconnection resets state and seq.
 // --------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread")]

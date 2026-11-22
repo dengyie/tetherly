@@ -3173,817 +3173,389 @@ impl Node {
         // ADR-124 / v2.38: Dynamic multi-resolution Level-of-Detail downsampling under congestion.
         let lod_cfg = *self.shared.screen_tile_lod_config.read().unwrap();
 
-        let outbound = {
-            let mut engine = self.shared.screen_engine.lock().expect("screen");
-            let now_us = self.shared.clock.unix_us();
-            // Congestion control / adaptive backpressure (ADR-080 / ADR-082):
-            // When link is congested (in_flight >= 4 or RTT >= 250ms), drop non-initial frames
-            // to eliminate bufferbloat and socket stall while maintaining presentation continuity.
-            // On drop, AIMD multiplicative decrease cuts bitrate by 20% and arms an immediate IDR.
-            if engine.is_congested()
-                && engine.stats().sent > 0
-                && !saliency_cfg.enabled
-                && !lod_cfg.enabled
-            {
-                if svc_cfg.is_enabled() && (frame.seq % 2 != 0) {
-                    self.shared
-                        .screen_svc_t1_frames_dropped
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let raw_bytes =
-                        (frame.rect.w as u64) * (frame.rect.h as u64) * (frame.format.bpp() as u64);
-                    self.shared
-                        .screen_svc_saved_bytes
-                        .fetch_add(raw_bytes, std::sync::atomic::Ordering::Relaxed);
-                    return Ok(false);
-                }
-                engine.record_drop_with_time(now_us);
-                engine.consume_pacing(now_us);
-                let new_rate = engine.bitrate_bps();
-                let new_fps = engine.fps_target();
-                let new_scale = engine.scale_pct();
-                self.shared.screen_source.force_idr();
-                if let Some(sel) = &self.shared.screen_encode_codec {
-                    sel.force_idr();
-                    sel.set_bitrate_bps(new_rate);
-                    sel.set_fps(new_fps);
-                    sel.set_scale_pct(new_scale);
-                }
-                self.shared.screen_source.set_bitrate_bps(new_rate);
-                self.shared.screen_source.set_fps(new_fps);
-                self.shared.screen_source.set_scale_pct(new_scale);
-                warn!(
-                    in_flight = engine.in_flight_count(),
-                    rtt_latest = ?engine.stats().rtt_latest_us,
-                    bitrate_bps = new_rate,
-                    fps_target = new_fps,
-                    scale_pct = new_scale,
-                    health = %engine.network_health().as_str(),
-                    "screen channel congested; dropping non-initial capture frame; flagged IDR and adapted 4D matrix"
-                );
-                return Ok(false);
-            }
+        // §218-d: run the full encode pipeline on the blocking pool — inline
+        // on a runtime worker it starves every other task scheduled there
+        // (the input chain included) whenever a frame is heavy: the §218
+        // mouse/keyboard-lag root cause.
+        let shared = Arc::clone(&self.shared);
+        let outbound = tokio::task::spawn_blocking(move || {
+            Self::encode_pump_outbound(&shared, frame, svc_cfg, saliency_cfg, lod_cfg, ltr_cfg)
+        })
+        .await
+        .map_err(|join| CoreError::ScreenRefused(format!("screen encode task: {join}")))??;
+        let Some(outbound) = outbound else {
+            // Congestion drop / SVC T1 drop / squelch suppression inside the
+            // encode stages — the pump's early-exit paths.
+            return Ok(false);
+        };
+        self.shared
+            .screen_interval
+            .lock()
+            .expect("interval")
+            .record();
+        self.send_screen_frames(outbound).await?;
+        if let Some(seq) = ltr_sync_seq {
+            let sync_msg = ControlMsg::LtrAnchorSync { ltr_seq: seq };
+            let _ = self.send_screen_control(sync_msg).await;
+        }
+        Ok(true)
+    }
 
-            // ADR-089 Screen Damage Detection & Adaptive Squelch:
-            let (is_dirty, dirty_ratio, bounding_rect) = {
-                let mut prev_guard = self.shared.screen_prev_frame.lock().expect("prev frame");
-                let mut tracker = self
-                    .shared
-                    .screen_damage_tracker
-                    .lock()
-                    .expect("damage tracker");
-                let (width, height) = (frame.rect.w as u32, frame.rect.h as u32);
-                let report = match &*prev_guard {
-                    None => {
+    /// §218-d: the pump's full encode pipeline, extracted verbatim from
+    /// `screen_send_frame` so it can run on `spawn_blocking`. Pure CPU over
+    /// std-synced `Shared` state; no `.await`, no `AsyncMutex`. Returns
+    /// `None` for the pump's early-exit paths (congestion drop, SVC T1
+    /// drop, squelch suppression) and otherwise the drained outbound
+    /// frames. Tile-resend bookkeeping stays internal (same lock scope).
+    fn encode_pump_outbound(
+        shared: &Arc<Shared>,
+        frame: ScreenFrame,
+        svc_cfg: tetherly_core::ScreenSvcConfig,
+        saliency_cfg: tetherly_core::ScreenTileSaliencyConfig,
+        lod_cfg: tetherly_core::ScreenTileLodConfig,
+        ltr_cfg: tetherly_core::ScreenLtrConfig,
+    ) -> Result<Option<Vec<ScreenFrame>>, CoreError> {
+        // §218-d: encode-path observability — record which pool executes
+        // the heavy pump stages. The invariant is "never a runtime worker".
+        // Executing means we are on the blocking pool by tokio's
+        // spawn_blocking contract (see the FEC site note).
+        Self::record_encode_thread("pump", &shared.screen_encode_thread);
+        let mut engine = shared.screen_engine.lock().expect("screen");
+        let now_us = shared.clock.unix_us();
+        // Congestion control / adaptive backpressure (ADR-080 / ADR-082):
+        // When link is congested (in_flight >= 4 or RTT >= 250ms), drop non-initial frames
+        // to eliminate bufferbloat and socket stall while maintaining presentation continuity.
+        // On drop, AIMD multiplicative decrease cuts bitrate by 20% and arms an immediate IDR.
+        if engine.is_congested()
+            && engine.stats().sent > 0
+            && !saliency_cfg.enabled
+            && !lod_cfg.enabled
+        {
+            if svc_cfg.is_enabled() && (frame.seq % 2 != 0) {
+                shared
+                    .screen_svc_t1_frames_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let raw_bytes =
+                    (frame.rect.w as u64) * (frame.rect.h as u64) * (frame.format.bpp() as u64);
+                shared
+                    .screen_svc_saved_bytes
+                    .fetch_add(raw_bytes, std::sync::atomic::Ordering::Relaxed);
+                return Ok(None);
+            }
+            engine.record_drop_with_time(now_us);
+            engine.consume_pacing(now_us);
+            let new_rate = engine.bitrate_bps();
+            let new_fps = engine.fps_target();
+            let new_scale = engine.scale_pct();
+            shared.screen_source.force_idr();
+            if let Some(sel) = &shared.screen_encode_codec {
+                sel.force_idr();
+                sel.set_bitrate_bps(new_rate);
+                sel.set_fps(new_fps);
+                sel.set_scale_pct(new_scale);
+            }
+            shared.screen_source.set_bitrate_bps(new_rate);
+            shared.screen_source.set_fps(new_fps);
+            shared.screen_source.set_scale_pct(new_scale);
+            warn!(
+                in_flight = engine.in_flight_count(),
+                rtt_latest = ?engine.stats().rtt_latest_us,
+                bitrate_bps = new_rate,
+                fps_target = new_fps,
+                scale_pct = new_scale,
+                health = %engine.network_health().as_str(),
+                "screen channel congested; dropping non-initial capture frame; flagged IDR and adapted 4D matrix"
+            );
+            return Ok(None);
+        }
+
+        // ADR-089 Screen Damage Detection & Adaptive Squelch:
+        let (is_dirty, dirty_ratio, bounding_rect) = {
+            let mut prev_guard = shared.screen_prev_frame.lock().expect("prev frame");
+            let mut tracker = shared.screen_damage_tracker.lock().expect("damage tracker");
+            let (width, height) = (frame.rect.w as u32, frame.rect.h as u32);
+            let report = match &*prev_guard {
+                None => {
+                    *prev_guard = Some(frame.bytes.clone());
+                    tracker.evaluate_hint(true, width, height)
+                }
+                Some(prev_bytes) => {
+                    let is_diff = prev_bytes != &frame.bytes;
+                    if !is_diff {
+                        tracker.evaluate_hint(false, width, height)
+                    } else if !frame.compressed() {
+                        let r = tracker.evaluate_rgba(prev_bytes, &frame.bytes, width, height);
+                        *prev_guard = Some(frame.bytes.clone());
+                        r
+                    } else {
                         *prev_guard = Some(frame.bytes.clone());
                         tracker.evaluate_hint(true, width, height)
                     }
-                    Some(prev_bytes) => {
-                        let is_diff = prev_bytes != &frame.bytes;
-                        if !is_diff {
-                            tracker.evaluate_hint(false, width, height)
-                        } else if !frame.compressed() {
-                            let r = tracker.evaluate_rgba(prev_bytes, &frame.bytes, width, height);
-                            *prev_guard = Some(frame.bytes.clone());
-                            r
-                        } else {
-                            *prev_guard = Some(frame.bytes.clone());
-                            tracker.evaluate_hint(true, width, height)
-                        }
-                    }
-                };
-                (!report.is_static, report.dirty_ratio, report.bounding_rect)
+                }
             };
+            (!report.is_static, report.dirty_ratio, report.bounding_rect)
+        };
 
-            // ADR-112 / v2.26: Screen Streaming Progressive Intra-Refresh (PIR) Anti-Burst Pipeline
-            let pir_cfg = *self.shared.screen_pir_config.read().unwrap();
-            let is_pir_active = match pir_cfg.mode {
-                tetherly_core::ScreenPirMode::Disabled => false,
-                tetherly_core::ScreenPirMode::Continuous => true,
-                tetherly_core::ScreenPirMode::OnDemand => self
-                    .shared
-                    .screen_pir_active_sweep
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            };
+        // ADR-112 / v2.26: Screen Streaming Progressive Intra-Refresh (PIR) Anti-Burst Pipeline
+        let pir_cfg = *shared.screen_pir_config.read().unwrap();
+        let is_pir_active = match pir_cfg.mode {
+            tetherly_core::ScreenPirMode::Disabled => false,
+            tetherly_core::ScreenPirMode::Continuous => true,
+            tetherly_core::ScreenPirMode::OnDemand => shared
+                .screen_pir_active_sweep
+                .load(std::sync::atomic::Ordering::Relaxed),
+        };
 
-            // ADR-113 / v2.27: Screen Streaming LTR Recovery Pipeline
-            let is_ltr_recovery = ltr_cfg.enabled
-                && self
-                    .shared
-                    .screen_ltr_recovery_pending
-                    .swap(false, std::sync::atomic::Ordering::SeqCst);
+        // ADR-113 / v2.27: Screen Streaming LTR Recovery Pipeline
+        let is_ltr_recovery = ltr_cfg.enabled
+            && shared
+                .screen_ltr_recovery_pending
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
 
-            // ADR-115 / v2.29: 2D Motion Vector Estimation & Scroll Acceleration Pipeline
-            let motion_cfg = *self.shared.screen_motion_config.read().unwrap();
-            let motion_frame_opt = if motion_cfg.enabled && !frame.compressed() {
-                let prev_opt = self
-                    .shared
-                    .screen_sender_motion_canvas
-                    .read()
-                    .unwrap()
-                    .clone();
-                let mut encoded_motion = None;
-                if let Some(prev) = prev_opt {
-                    if prev.rect.w == frame.rect.w
-                        && prev.rect.h == frame.rect.h
-                        && prev.format == frame.format
-                    {
-                        if let Some(mv) = tetherly_core::estimate_scroll_motion(
-                            &prev,
-                            &frame,
-                            motion_cfg.max_displacement,
-                            tetherly_core::SCREEN_MOTION_MIN_MATCH_RATIO,
-                        ) {
-                            if mv.dx != 0 || mv.dy != 0 {
-                                if let Some(exposed_rect) = tetherly_core::compute_exposed_strip(
-                                    frame.rect.w,
-                                    frame.rect.h,
-                                    mv.dx,
-                                    mv.dy,
+        // ADR-115 / v2.29: 2D Motion Vector Estimation & Scroll Acceleration Pipeline
+        let motion_cfg = *shared.screen_motion_config.read().unwrap();
+        let motion_frame_opt = if motion_cfg.enabled && !frame.compressed() {
+            let prev_opt = shared.screen_sender_motion_canvas.read().unwrap().clone();
+            let mut encoded_motion = None;
+            if let Some(prev) = prev_opt {
+                if prev.rect.w == frame.rect.w
+                    && prev.rect.h == frame.rect.h
+                    && prev.format == frame.format
+                {
+                    if let Some(mv) = tetherly_core::estimate_scroll_motion(
+                        &prev,
+                        &frame,
+                        motion_cfg.max_displacement,
+                        tetherly_core::SCREEN_MOTION_MIN_MATCH_RATIO,
+                    ) {
+                        if mv.dx != 0 || mv.dy != 0 {
+                            if let Some(exposed_rect) = tetherly_core::compute_exposed_strip(
+                                frame.rect.w,
+                                frame.rect.h,
+                                mv.dx,
+                                mv.dy,
+                            ) {
+                                if let Ok(patch) = frame.extract_sub_rect(
+                                    exposed_rect.x,
+                                    exposed_rect.y,
+                                    exposed_rect.width,
+                                    exposed_rect.height,
                                 ) {
-                                    if let Ok(patch) = frame.extract_sub_rect(
-                                        exposed_rect.x,
-                                        exposed_rect.y,
-                                        exposed_rect.width,
-                                        exposed_rect.height,
+                                    if let Ok(compressed) = shared.screen_codec.compress_frame(
+                                        &patch.bytes,
+                                        patch.rect.w,
+                                        patch.rect.h,
                                     ) {
-                                        if let Ok(compressed) =
-                                            self.shared.screen_codec.compress_frame(
-                                                &patch.bytes,
-                                                patch.rect.w,
-                                                patch.rect.h,
-                                            )
-                                        {
-                                            let full_raw_bytes = (frame.rect.w as u64)
-                                                * (frame.rect.h as u64)
-                                                * (frame.format.bpp() as u64);
-                                            let encoded_bytes = (compressed.len() + 12) as u64;
-                                            if full_raw_bytes > encoded_bytes {
-                                                self.shared.screen_motion_saved_bytes.fetch_add(
-                                                    full_raw_bytes - encoded_bytes,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                            }
-                                            self.shared
-                                                .screen_motion_frames_sent
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            *self
-                                                .shared
-                                                .screen_sender_motion_canvas
-                                                .write()
-                                                .unwrap() = Some(frame.clone());
-                                            encoded_motion =
-                                                Some(ScreenFrame::encode_motion_scroll(
-                                                    frame.rect,
-                                                    frame.format,
-                                                    frame.seq,
-                                                    mv.dx,
-                                                    mv.dy,
-                                                    exposed_rect,
-                                                    &compressed,
-                                                ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if encoded_motion.is_none() {
-                    if is_dirty {
-                        self.shared
-                            .screen_motion_fallback_frames_sent
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    *self.shared.screen_sender_motion_canvas.write().unwrap() = Some(frame.clone());
-                }
-                encoded_motion
-            } else {
-                if !frame.compressed() {
-                    *self.shared.screen_sender_motion_canvas.write().unwrap() = Some(frame.clone());
-                }
-                None
-            };
-            let is_motion = motion_frame_opt.is_some();
-
-            // ADR-117 / v2.31 takes precedence over basic Tile-Grid when tile_cache_cfg.enabled
-            let mut tile_resend_entry: Option<(u32, Vec<tetherly_core::DirtyTile>)> = None;
-            let tile_cache_cfg = *self.shared.screen_tile_cache_config.read().unwrap();
-            let tile_batch_cfg = *self.shared.screen_tile_batch_config.read().unwrap();
-            let tile_motion_cfg = *self.shared.screen_tile_motion_config.read().unwrap();
-            let tile_cfg = *self.shared.screen_tile_config.read().unwrap();
-            let focus_cfg = *self.shared.screen_focus_config.read().unwrap();
-            let palette_cfg = *self.shared.screen_tile_palette_config.read().unwrap();
-            let predict_cfg = *self.shared.screen_tile_predict_config.read().unwrap();
-            let is_congested = engine.is_congested();
-            let cursor_pos = if focus_cfg.enabled {
-                let stats = self
-                    .shared
-                    .screen_cursor_stats
-                    .lock()
-                    .ok()
-                    .map(|s| (s.current_x, s.current_y));
-                if let Some((cx, cy)) = stats {
-                    if cx != 0 || cy != 0 {
-                        Some((cx, cy))
-                    } else {
-                        self.shared.cursor_last_pos.lock().ok().map(|p| *p)
-                    }
-                } else {
-                    self.shared.cursor_last_pos.lock().ok().map(|p| *p)
-                }
-            } else {
-                None
-            };
-            let focus_box = if focus_cfg.enabled {
-                match focus_cfg.mode {
-                    tetherly_core::ScreenFocusMode::Box => Some((
-                        focus_cfg.box_x,
-                        focus_cfg.box_y,
-                        focus_cfg.box_w,
-                        focus_cfg.box_h,
-                    )),
-                    tetherly_core::ScreenFocusMode::Cursor => cursor_pos.map(|(cx, cy)| {
-                        let r = focus_cfg.radius;
-                        let x = cx.max(0) as u16;
-                        let y = cy.max(0) as u16;
-                        let bx = x.saturating_sub(r);
-                        let by = y.saturating_sub(r);
-                        let bw = r.saturating_mul(2);
-                        let bh = r.saturating_mul(2);
-                        (bx, by, bw, bh)
-                    }),
-                }
-            } else {
-                None
-            };
-
-            let (tile_cache_frame_opt, tile_frame_opt, tile_batch_chunks_opt) = if tile_cache_cfg
-                .enabled
-                && !frame.compressed()
-                && !is_motion
-            {
-                let prev_opt = self
-                    .shared
-                    .screen_sender_tile_canvas
-                    .read()
-                    .unwrap()
-                    .clone();
-                let mut encoded_tile_cache = None;
-                if let Some(prev) = &prev_opt {
-                    if prev.rect.w == frame.rect.w
-                        && prev.rect.h == frame.rect.h
-                        && prev.format == frame.format
-                    {
-                        let tile_size = if tile_cfg.enabled {
-                            tile_cfg.tile_size
-                        } else {
-                            tetherly_core::SCREEN_TILE_DEFAULT_SIZE
-                        };
-                        let (total_tiles, raw_dirty_tiles) =
-                            tetherly_core::extract_dirty_tiles(prev, &frame, tile_size);
-                        let (dirty_tiles, any_peripheral_skipped) = if focus_cfg.enabled {
-                            let cadence = (focus_cfg.peripheral_skip_ratio as u64) + 1;
-                            let send_peripheral = (frame.seq % cadence) == 0;
-                            let mut kept = Vec::with_capacity(raw_dirty_tiles.len());
-                            let mut skipped = false;
-                            for tile in raw_dirty_tiles {
-                                let in_focus = tetherly_core::is_tile_in_focus(
-                                    tile.x, tile.y, tile.w, tile.h, &focus_cfg, cursor_pos,
-                                );
-                                if in_focus {
-                                    self.shared
-                                        .screen_focus_tiles_sent
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    kept.push(tile);
-                                } else if send_peripheral {
-                                    self.shared
-                                        .screen_focus_peripheral_sent
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    kept.push(tile);
-                                } else {
-                                    self.shared
-                                        .screen_focus_peripheral_skipped
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    self.shared.screen_focus_saved_bytes.fetch_add(
-                                        tile.data.len() as u64,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                    skipped = true;
-                                }
-                            }
-                            (kept, skipped)
-                        } else {
-                            (raw_dirty_tiles, false)
-                        };
-
-                        let (dirty_tiles, any_saliency_skipped) = if saliency_cfg.enabled {
-                            let (scheduled, crit, norm, bg, skipped) =
-                                tetherly_core::ScreenTileSaliencyEvaluator::schedule_tiles(
-                                    dirty_tiles,
-                                    focus_box,
-                                    &saliency_cfg,
-                                    is_congested,
-                                );
-                            self.shared
-                                .screen_tile_saliency_critical_tiles
-                                .fetch_add(crit, std::sync::atomic::Ordering::Relaxed);
-                            self.shared
-                                .screen_tile_saliency_normal_tiles
-                                .fetch_add(norm, std::sync::atomic::Ordering::Relaxed);
-                            self.shared
-                                .screen_tile_saliency_background_tiles
-                                .fetch_add(bg, std::sync::atomic::Ordering::Relaxed);
-                            self.shared
-                                .screen_tile_saliency_background_skipped
-                                .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
-                            (scheduled, skipped > 0)
-                        } else {
-                            (dirty_tiles, false)
-                        };
-                        let any_skipped = any_peripheral_skipped || any_saliency_skipped;
-
-                        if !dirty_tiles.is_empty() {
-                            let mut cached_entries = Vec::with_capacity(dirty_tiles.len());
-                            let mut dict = self.shared.screen_tile_cache_dict.lock().unwrap();
-                            let mut any_lod_downsampled = false;
-                            let mut lod_flags = Vec::with_capacity(dirty_tiles.len());
-                            for tile in &dirty_tiles {
-                                let hash = tetherly_core::fnv1a_hash64(&tile.data);
-                                let (hit, cache_id) = dict.lookup_or_insert(hash);
-                                if hit {
-                                    lod_flags.push(false);
-                                    self.shared
-                                        .screen_tile_cache_hits
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    let saved = (tile.data.len() as u64).saturating_sub(17);
-                                    self.shared
-                                        .screen_tile_cache_saved_bytes
-                                        .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
-                                    cached_entries.push(tetherly_core::CachedTileEntry {
-                                        index: tile.index,
-                                        x: tile.x,
-                                        y: tile.y,
-                                        w: tile.w,
-                                        h: tile.h,
-                                        cache_hit: true,
-                                        cache_id,
-                                        data: Vec::new(),
-                                    });
-                                } else {
-                                    self.shared
-                                        .screen_tile_cache_misses
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    let raw_len = tile.data.len();
-                                    let motion_opt = if tile_motion_cfg.enabled {
-                                        tetherly_core::compress_tile_motion(
-                                            &tile.data,
-                                            tile.x,
-                                            tile.y,
-                                            tile.w,
-                                            tile.h,
-                                            prev,
-                                            &tile_motion_cfg,
-                                        )
-                                    } else {
-                                        None
-                                    };
-
-                                    let (to_send, subc) = if let Some((
-                                        motion_subc,
-                                        motion_payload,
-                                    )) = motion_opt
-                                    {
-                                        self.shared
-                                            .screen_tile_motion_tiles_sent
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        let saved = (raw_len as u64)
-                                            .saturating_sub(motion_payload.len() as u64);
-                                        self.shared
-                                            .screen_tile_motion_bytes_saved
-                                            .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
-                                        lod_flags.push(false);
-                                        (motion_payload, motion_subc)
-                                    } else {
-                                        if tile_motion_cfg.enabled {
-                                            self.shared
-                                                .screen_tile_motion_fallback_tiles_sent
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        }
-                                        let (target_lod, is_lod) = if lod_cfg.enabled {
-                                            let (_, tier) = if saliency_cfg.enabled {
-                                                tetherly_core::ScreenTileSaliencyEvaluator::evaluate_tile(tile, focus_box, &saliency_cfg)
-                                            } else {
-                                                (100, tetherly_core::TileSaliencyTier::Normal)
-                                            };
-                                            if tier == tetherly_core::TileSaliencyTier::Critical {
-                                                (tetherly_core::TileLodLevel::Lod0, false)
-                                            } else if lod_cfg.auto_lod_on_congestion {
-                                                if is_congested {
-                                                    if tier == tetherly_core::TileSaliencyTier::Background && lod_cfg.max_lod >= 2 {
-                                                        (tetherly_core::TileLodLevel::Lod2, true)
-                                                    } else if lod_cfg.max_lod >= 1 {
-                                                        if !saliency_cfg.enabled && lod_cfg.max_lod >= 2 {
-                                                            (tetherly_core::TileLodLevel::Lod2, true)
-                                                        } else {
-                                                            (tetherly_core::TileLodLevel::Lod1, true)
-                                                        }
-                                                    } else {
-                                                        (tetherly_core::TileLodLevel::Lod0, false)
-                                                    }
-                                                } else {
-                                                    (tetherly_core::TileLodLevel::Lod0, false)
-                                                }
-                                            } else {
-                                                if (tier
-                                                    == tetherly_core::TileSaliencyTier::Background
-                                                    || !saliency_cfg.enabled)
-                                                    && lod_cfg.max_lod >= 2
-                                                {
-                                                    (tetherly_core::TileLodLevel::Lod2, true)
-                                                } else if lod_cfg.max_lod >= 1 {
-                                                    (tetherly_core::TileLodLevel::Lod1, true)
-                                                } else {
-                                                    (tetherly_core::TileLodLevel::Lod0, false)
-                                                }
-                                            }
-                                        } else {
-                                            (tetherly_core::TileLodLevel::Lod0, false)
-                                        };
-                                        if is_lod {
-                                            any_lod_downsampled = true;
-                                        }
-                                        lod_flags.push(is_lod);
-
-                                        if target_lod != tetherly_core::TileLodLevel::Lod0 {
-                                            let (subc, comp) = tetherly_core::compress_tile_lod(
-                                                &tile.data,
-                                                tile.w,
-                                                tile.h,
-                                                target_lod,
-                                                self.shared.screen_codec.as_ref(),
-                                            );
-                                            let saved =
-                                                (raw_len as u64).saturating_sub(comp.len() as u64);
-                                            self.shared.screen_tile_lod_bytes_saved.fetch_add(
-                                                saved,
+                                        let full_raw_bytes = (frame.rect.w as u64)
+                                            * (frame.rect.h as u64)
+                                            * (frame.format.bpp() as u64);
+                                        let encoded_bytes = (compressed.len() + 12) as u64;
+                                        if full_raw_bytes > encoded_bytes {
+                                            shared.screen_motion_saved_bytes.fetch_add(
+                                                full_raw_bytes - encoded_bytes,
                                                 std::sync::atomic::Ordering::Relaxed,
                                             );
-                                            match target_lod {
-                                                tetherly_core::TileLodLevel::Lod1 => {
-                                                    self.shared.screen_tile_lod1_tiles.fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                }
-                                                tetherly_core::TileLodLevel::Lod2 => {
-                                                    self.shared.screen_tile_lod2_tiles.fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                }
-                                                _ => {}
-                                            }
-                                            (comp, subc)
-                                        } else {
-                                            if lod_cfg.enabled {
-                                                self.shared.screen_tile_lod0_tiles.fetch_add(
-                                                    1,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                            }
-                                            if palette_cfg.enabled {
-                                                let (subcodec, encoded) =
-                                                    tetherly_core::compress_tile_palette(
-                                                        &tile.data,
-                                                        tile.w,
-                                                        tile.h,
-                                                        &palette_cfg,
-                                                    );
-                                                if subcodec == tetherly_core::TILE_SUBCODEC_SOLID
-                                                    || subcodec
-                                                        == tetherly_core::TILE_SUBCODEC_BILEVEL
-                                                    || subcodec
-                                                        == tetherly_core::TILE_SUBCODEC_PALETTE16
-                                                {
-                                                    (encoded, subcodec)
-                                                } else if predict_cfg.enabled {
-                                                    let (pred_subc, pred_data) =
-                                                        tetherly_core::compress_tile_predictive(
-                                                            &tile.data,
-                                                            tile.w,
-                                                            tile.h,
-                                                            &predict_cfg,
-                                                            self.shared.screen_codec.as_ref(),
-                                                        );
-                                                    if pred_subc
-                                                        == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
-                                                        && pred_data.len() < raw_len
-                                                    {
-                                                        (pred_data, tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD)
-                                                    } else {
-                                                        let comp = if let Ok(compressed) =
-                                                            self.shared.screen_codec.compress_frame(
-                                                                &tile.data, tile.w, tile.h,
-                                                            ) {
-                                                            if compressed.len() < raw_len {
-                                                                compressed
-                                                            } else {
-                                                                tile.data.clone()
-                                                            }
-                                                        } else {
-                                                            tile.data.clone()
-                                                        };
-                                                        (comp, tetherly_core::TILE_SUBCODEC_RAW)
-                                                    }
-                                                } else {
-                                                    let comp = if let Ok(compressed) = self
-                                                        .shared
-                                                        .screen_codec
-                                                        .compress_frame(&tile.data, tile.w, tile.h)
-                                                    {
-                                                        if compressed.len() < raw_len {
-                                                            compressed
-                                                        } else {
-                                                            tile.data.clone()
-                                                        }
-                                                    } else {
-                                                        tile.data.clone()
-                                                    };
-                                                    (comp, tetherly_core::TILE_SUBCODEC_RAW)
-                                                }
-                                            } else if predict_cfg.enabled {
-                                                let (pred_subc, pred_data) =
-                                                    tetherly_core::compress_tile_predictive(
-                                                        &tile.data,
-                                                        tile.w,
-                                                        tile.h,
-                                                        &predict_cfg,
-                                                        self.shared.screen_codec.as_ref(),
-                                                    );
-                                                if pred_subc
-                                                    == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
-                                                    && pred_data.len() < raw_len
-                                                {
-                                                    (
-                                                        pred_data,
-                                                        tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD,
-                                                    )
-                                                } else {
-                                                    let comp = if let Ok(compressed) = self
-                                                        .shared
-                                                        .screen_codec
-                                                        .compress_frame(&tile.data, tile.w, tile.h)
-                                                    {
-                                                        if compressed.len() < raw_len {
-                                                            compressed
-                                                        } else {
-                                                            tile.data.clone()
-                                                        }
-                                                    } else {
-                                                        tile.data.clone()
-                                                    };
-                                                    (comp, tetherly_core::TILE_SUBCODEC_RAW)
-                                                }
-                                            } else {
-                                                let comp = if let Ok(compressed) = self
-                                                    .shared
-                                                    .screen_codec
-                                                    .compress_frame(&tile.data, tile.w, tile.h)
-                                                {
-                                                    if compressed.len() < raw_len {
-                                                        compressed
-                                                    } else {
-                                                        tile.data.clone()
-                                                    }
-                                                } else {
-                                                    tile.data.clone()
-                                                };
-                                                (comp, tetherly_core::TILE_SUBCODEC_RAW)
-                                            }
                                         }
-                                    };
-                                    if palette_cfg.enabled {
-                                        let saved =
-                                            (raw_len as u64).saturating_sub(to_send.len() as u64);
-                                        match subc {
-                                            tetherly_core::TILE_SUBCODEC_SOLID => {
-                                                self.shared
-                                                    .screen_tile_palette_solid_count
-                                                    .fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                self.shared
-                                                    .screen_tile_palette_saved_bytes
-                                                    .fetch_add(
-                                                        saved,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                            }
-                                            tetherly_core::TILE_SUBCODEC_BILEVEL => {
-                                                self.shared
-                                                    .screen_tile_palette_bilevel_count
-                                                    .fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                self.shared
-                                                    .screen_tile_palette_saved_bytes
-                                                    .fetch_add(
-                                                        saved,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                            }
-                                            tetherly_core::TILE_SUBCODEC_PALETTE16 => {
-                                                self.shared
-                                                    .screen_tile_palette_palette_count
-                                                    .fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                self.shared
-                                                    .screen_tile_palette_saved_bytes
-                                                    .fetch_add(
-                                                        saved,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                            }
-                                            _ => {
-                                                self.shared
-                                                    .screen_tile_palette_truecolor_count
-                                                    .fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                            }
-                                        }
-                                    }
-                                    if predict_cfg.enabled
-                                        && subc == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
-                                    {
-                                        let saved =
-                                            (raw_len as u64).saturating_sub(to_send.len() as u64);
-                                        self.shared
-                                            .screen_tile_predict_tiles_count
+                                        shared
+                                            .screen_motion_frames_sent
                                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        self.shared
-                                            .screen_tile_predict_saved_bytes
-                                            .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    cached_entries.push(tetherly_core::CachedTileEntry {
-                                        index: tile.index,
-                                        x: tile.x,
-                                        y: tile.y,
-                                        w: tile.w,
-                                        h: tile.h,
-                                        cache_hit: false,
-                                        cache_id,
-                                        data: to_send,
-                                    });
-                                }
-                            }
-                            drop(dict);
-                            if any_skipped || any_lod_downsampled {
-                                let mut prev_canvas = prev.clone();
-                                for (t, was_lod) in dirty_tiles.iter().zip(lod_flags.iter()) {
-                                    if !*was_lod {
-                                        let _ = prev_canvas
-                                            .apply_cached_tile(t.x, t.y, t.w, t.h, &t.data);
+                                        *shared.screen_sender_motion_canvas.write().unwrap() =
+                                            Some(frame.clone());
+                                        encoded_motion = Some(ScreenFrame::encode_motion_scroll(
+                                            frame.rect,
+                                            frame.format,
+                                            frame.seq,
+                                            mv.dx,
+                                            mv.dy,
+                                            exposed_rect,
+                                            &compressed,
+                                        ));
                                     }
                                 }
-                                *self.shared.screen_sender_tile_canvas.write().unwrap() =
-                                    Some(prev_canvas);
-                            } else {
-                                *self.shared.screen_sender_tile_canvas.write().unwrap() =
-                                    Some(frame.clone());
                             }
-                            encoded_tile_cache = Some(ScreenFrame::encode_tile_cache(
-                                frame.seq,
-                                frame.rect,
-                                frame.format,
-                                tile_size,
-                                total_tiles,
-                                &cached_entries,
-                            ));
                         }
                     }
                 }
-                if encoded_tile_cache.is_none()
-                    && (prev_opt.is_none()
-                        || (!focus_cfg.enabled
-                            && !saliency_cfg.enabled
-                            && !lod_cfg.enabled
-                            && !tile_motion_cfg.enabled))
-                {
-                    *self.shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
+            }
+            if encoded_motion.is_none() {
+                if is_dirty {
+                    shared
+                        .screen_motion_fallback_frames_sent
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                (encoded_tile_cache, None, None)
-            } else if (tile_cfg.enabled
-                || focus_cfg.enabled
-                || palette_cfg.enabled
-                || predict_cfg.enabled
-                || saliency_cfg.enabled
-                || lod_cfg.enabled
-                || tile_batch_cfg.enabled
-                || tile_motion_cfg.enabled)
-                && !frame.compressed()
-                && !is_motion
-            {
-                let prev_opt = self
-                    .shared
-                    .screen_sender_tile_canvas
-                    .read()
-                    .unwrap()
-                    .clone();
-                let mut encoded_tile = None;
-                let mut encoded_tile_batch = None;
-                if let Some(prev) = &prev_opt {
-                    if prev.rect.w == frame.rect.w
-                        && prev.rect.h == frame.rect.h
-                        && prev.format == frame.format
-                    {
-                        let tile_size = if tile_cfg.enabled {
-                            tile_cfg.tile_size
-                        } else {
-                            tetherly_core::SCREEN_TILE_DEFAULT_SIZE
-                        };
-                        let (total_tiles, raw_dirty_tiles) =
-                            tetherly_core::extract_dirty_tiles(prev, &frame, tile_size);
-                        let (dirty_tiles, any_peripheral_skipped) = if focus_cfg.enabled {
-                            let cadence = (focus_cfg.peripheral_skip_ratio as u64) + 1;
-                            let send_peripheral = (frame.seq % cadence) == 0;
-                            let mut kept = Vec::with_capacity(raw_dirty_tiles.len());
-                            let mut skipped = false;
-                            for tile in raw_dirty_tiles {
-                                let in_focus = tetherly_core::is_tile_in_focus(
-                                    tile.x, tile.y, tile.w, tile.h, &focus_cfg, cursor_pos,
+                *shared.screen_sender_motion_canvas.write().unwrap() = Some(frame.clone());
+            }
+            encoded_motion
+        } else {
+            if !frame.compressed() {
+                *shared.screen_sender_motion_canvas.write().unwrap() = Some(frame.clone());
+            }
+            None
+        };
+        let is_motion = motion_frame_opt.is_some();
+
+        // ADR-117 / v2.31 takes precedence over basic Tile-Grid when tile_cache_cfg.enabled
+        let mut tile_resend_entry: Option<(u32, Vec<tetherly_core::DirtyTile>)> = None;
+        let tile_cache_cfg = *shared.screen_tile_cache_config.read().unwrap();
+        let tile_batch_cfg = *shared.screen_tile_batch_config.read().unwrap();
+        let tile_motion_cfg = *shared.screen_tile_motion_config.read().unwrap();
+        let tile_cfg = *shared.screen_tile_config.read().unwrap();
+        let focus_cfg = *shared.screen_focus_config.read().unwrap();
+        let palette_cfg = *shared.screen_tile_palette_config.read().unwrap();
+        let predict_cfg = *shared.screen_tile_predict_config.read().unwrap();
+        let is_congested = engine.is_congested();
+        let cursor_pos = if focus_cfg.enabled {
+            let stats = shared
+                .screen_cursor_stats
+                .lock()
+                .ok()
+                .map(|s| (s.current_x, s.current_y));
+            if let Some((cx, cy)) = stats {
+                if cx != 0 || cy != 0 {
+                    Some((cx, cy))
+                } else {
+                    shared.cursor_last_pos.lock().ok().map(|p| *p)
+                }
+            } else {
+                shared.cursor_last_pos.lock().ok().map(|p| *p)
+            }
+        } else {
+            None
+        };
+        let focus_box = if focus_cfg.enabled {
+            match focus_cfg.mode {
+                tetherly_core::ScreenFocusMode::Box => Some((
+                    focus_cfg.box_x,
+                    focus_cfg.box_y,
+                    focus_cfg.box_w,
+                    focus_cfg.box_h,
+                )),
+                tetherly_core::ScreenFocusMode::Cursor => cursor_pos.map(|(cx, cy)| {
+                    let r = focus_cfg.radius;
+                    let x = cx.max(0) as u16;
+                    let y = cy.max(0) as u16;
+                    let bx = x.saturating_sub(r);
+                    let by = y.saturating_sub(r);
+                    let bw = r.saturating_mul(2);
+                    let bh = r.saturating_mul(2);
+                    (bx, by, bw, bh)
+                }),
+            }
+        } else {
+            None
+        };
+
+        let (tile_cache_frame_opt, tile_frame_opt, tile_batch_chunks_opt) = if tile_cache_cfg
+            .enabled
+            && !frame.compressed()
+            && !is_motion
+        {
+            let prev_opt = shared.screen_sender_tile_canvas.read().unwrap().clone();
+            let mut encoded_tile_cache = None;
+            if let Some(prev) = &prev_opt {
+                if prev.rect.w == frame.rect.w
+                    && prev.rect.h == frame.rect.h
+                    && prev.format == frame.format
+                {
+                    let tile_size = if tile_cfg.enabled {
+                        tile_cfg.tile_size
+                    } else {
+                        tetherly_core::SCREEN_TILE_DEFAULT_SIZE
+                    };
+                    let (total_tiles, raw_dirty_tiles) =
+                        tetherly_core::extract_dirty_tiles(prev, &frame, tile_size);
+                    let (dirty_tiles, any_peripheral_skipped) = if focus_cfg.enabled {
+                        let cadence = (focus_cfg.peripheral_skip_ratio as u64) + 1;
+                        let send_peripheral = (frame.seq % cadence) == 0;
+                        let mut kept = Vec::with_capacity(raw_dirty_tiles.len());
+                        let mut skipped = false;
+                        for tile in raw_dirty_tiles {
+                            let in_focus = tetherly_core::is_tile_in_focus(
+                                tile.x, tile.y, tile.w, tile.h, &focus_cfg, cursor_pos,
+                            );
+                            if in_focus {
+                                shared
+                                    .screen_focus_tiles_sent
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                kept.push(tile);
+                            } else if send_peripheral {
+                                shared
+                                    .screen_focus_peripheral_sent
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                kept.push(tile);
+                            } else {
+                                shared
+                                    .screen_focus_peripheral_skipped
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                shared.screen_focus_saved_bytes.fetch_add(
+                                    tile.data.len() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
                                 );
-                                if in_focus {
-                                    self.shared
-                                        .screen_focus_tiles_sent
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    kept.push(tile);
-                                } else if send_peripheral {
-                                    self.shared
-                                        .screen_focus_peripheral_sent
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    kept.push(tile);
-                                } else {
-                                    self.shared
-                                        .screen_focus_peripheral_skipped
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    self.shared.screen_focus_saved_bytes.fetch_add(
-                                        tile.data.len() as u64,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                    skipped = true;
-                                }
+                                skipped = true;
                             }
-                            (kept, skipped)
-                        } else {
-                            (raw_dirty_tiles, false)
-                        };
+                        }
+                        (kept, skipped)
+                    } else {
+                        (raw_dirty_tiles, false)
+                    };
 
-                        let (dirty_tiles, any_saliency_skipped) = if saliency_cfg.enabled {
-                            let (scheduled, crit, norm, bg, skipped) =
-                                tetherly_core::ScreenTileSaliencyEvaluator::schedule_tiles(
-                                    dirty_tiles,
-                                    focus_box,
-                                    &saliency_cfg,
-                                    is_congested,
-                                );
-                            self.shared
-                                .screen_tile_saliency_critical_tiles
-                                .fetch_add(crit, std::sync::atomic::Ordering::Relaxed);
-                            self.shared
-                                .screen_tile_saliency_normal_tiles
-                                .fetch_add(norm, std::sync::atomic::Ordering::Relaxed);
-                            self.shared
-                                .screen_tile_saliency_background_tiles
-                                .fetch_add(bg, std::sync::atomic::Ordering::Relaxed);
-                            self.shared
-                                .screen_tile_saliency_background_skipped
-                                .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
-                            (scheduled, skipped > 0)
-                        } else {
-                            (dirty_tiles, false)
-                        };
-                        let any_skipped = any_peripheral_skipped || any_saliency_skipped;
+                    let (dirty_tiles, any_saliency_skipped) = if saliency_cfg.enabled {
+                        let (scheduled, crit, norm, bg, skipped) =
+                            tetherly_core::ScreenTileSaliencyEvaluator::schedule_tiles(
+                                dirty_tiles,
+                                focus_box,
+                                &saliency_cfg,
+                                is_congested,
+                            );
+                        shared
+                            .screen_tile_saliency_critical_tiles
+                            .fetch_add(crit, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .screen_tile_saliency_normal_tiles
+                            .fetch_add(norm, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .screen_tile_saliency_background_tiles
+                            .fetch_add(bg, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .screen_tile_saliency_background_skipped
+                            .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+                        (scheduled, skipped > 0)
+                    } else {
+                        (dirty_tiles, false)
+                    };
+                    let any_skipped = any_peripheral_skipped || any_saliency_skipped;
 
-                        let threshold_ok = focus_cfg.enabled
-                            || palette_cfg.enabled
-                            || predict_cfg.enabled
-                            || saliency_cfg.enabled
-                            || lod_cfg.enabled
-                            || tile_batch_cfg.enabled
-                            || tile_motion_cfg.enabled
-                            || dirty_tiles.len() < ((total_tiles as usize) * 3 / 4).max(1);
-                        if !dirty_tiles.is_empty() && threshold_ok {
-                            let mut compressed_tiles = Vec::with_capacity(dirty_tiles.len());
-                            let mut payload_bytes = 6u64;
-                            let mut any_lod_downsampled = false;
-                            let mut lod_flags = Vec::with_capacity(dirty_tiles.len());
-                            for tile in &dirty_tiles {
+                    if !dirty_tiles.is_empty() {
+                        let mut cached_entries = Vec::with_capacity(dirty_tiles.len());
+                        let mut dict = shared.screen_tile_cache_dict.lock().unwrap();
+                        let mut any_lod_downsampled = false;
+                        let mut lod_flags = Vec::with_capacity(dirty_tiles.len());
+                        for tile in &dirty_tiles {
+                            let hash = tetherly_core::fnv1a_hash64(&tile.data);
+                            let (hit, cache_id) = dict.lookup_or_insert(hash);
+                            if hit {
+                                lod_flags.push(false);
+                                shared
+                                    .screen_tile_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let saved = (tile.data.len() as u64).saturating_sub(17);
+                                shared
+                                    .screen_tile_cache_saved_bytes
+                                    .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                cached_entries.push(tetherly_core::CachedTileEntry {
+                                    index: tile.index,
+                                    x: tile.x,
+                                    y: tile.y,
+                                    w: tile.w,
+                                    h: tile.h,
+                                    cache_hit: true,
+                                    cache_id,
+                                    data: Vec::new(),
+                                });
+                            } else {
+                                shared
+                                    .screen_tile_cache_misses
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let raw_len = tile.data.len();
                                 let motion_opt = if tile_motion_cfg.enabled {
                                     tetherly_core::compress_tile_motion(
@@ -4002,19 +3574,19 @@ impl Node {
                                 let (to_send, subc) = if let Some((motion_subc, motion_payload)) =
                                     motion_opt
                                 {
-                                    self.shared
+                                    shared
                                         .screen_tile_motion_tiles_sent
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     let saved = (raw_len as u64)
                                         .saturating_sub(motion_payload.len() as u64);
-                                    self.shared
+                                    shared
                                         .screen_tile_motion_bytes_saved
                                         .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
                                     lod_flags.push(false);
                                     (motion_payload, motion_subc)
                                 } else {
                                     if tile_motion_cfg.enabled {
-                                        self.shared
+                                        shared
                                             .screen_tile_motion_fallback_tiles_sent
                                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     }
@@ -4072,22 +3644,22 @@ impl Node {
                                             tile.w,
                                             tile.h,
                                             target_lod,
-                                            self.shared.screen_codec.as_ref(),
+                                            shared.screen_codec.as_ref(),
                                         );
                                         let saved =
                                             (raw_len as u64).saturating_sub(comp.len() as u64);
-                                        self.shared
+                                        shared
                                             .screen_tile_lod_bytes_saved
                                             .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
                                         match target_lod {
                                             tetherly_core::TileLodLevel::Lod1 => {
-                                                self.shared.screen_tile_lod1_tiles.fetch_add(
+                                                shared.screen_tile_lod1_tiles.fetch_add(
                                                     1,
                                                     std::sync::atomic::Ordering::Relaxed,
                                                 );
                                             }
                                             tetherly_core::TileLodLevel::Lod2 => {
-                                                self.shared.screen_tile_lod2_tiles.fetch_add(
+                                                shared.screen_tile_lod2_tiles.fetch_add(
                                                     1,
                                                     std::sync::atomic::Ordering::Relaxed,
                                                 );
@@ -4097,7 +3669,7 @@ impl Node {
                                         (comp, subc)
                                     } else {
                                         if lod_cfg.enabled {
-                                            self.shared
+                                            shared
                                                 .screen_tile_lod0_tiles
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         }
@@ -4122,7 +3694,7 @@ impl Node {
                                                         tile.w,
                                                         tile.h,
                                                         &predict_cfg,
-                                                        self.shared.screen_codec.as_ref(),
+                                                        shared.screen_codec.as_ref(),
                                                     );
                                                 if pred_subc
                                                     == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
@@ -4133,8 +3705,7 @@ impl Node {
                                                         tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD,
                                                     )
                                                 } else {
-                                                    let comp = if let Ok(compressed) = self
-                                                        .shared
+                                                    let comp = if let Ok(compressed) = shared
                                                         .screen_codec
                                                         .compress_frame(&tile.data, tile.w, tile.h)
                                                     {
@@ -4149,8 +3720,7 @@ impl Node {
                                                     (comp, tetherly_core::TILE_SUBCODEC_RAW)
                                                 }
                                             } else {
-                                                let comp = if let Ok(compressed) = self
-                                                    .shared
+                                                let comp = if let Ok(compressed) = shared
                                                     .screen_codec
                                                     .compress_frame(&tile.data, tile.w, tile.h)
                                                 {
@@ -4171,7 +3741,7 @@ impl Node {
                                                     tile.w,
                                                     tile.h,
                                                     &predict_cfg,
-                                                    self.shared.screen_codec.as_ref(),
+                                                    shared.screen_codec.as_ref(),
                                                 );
                                             if pred_subc
                                                 == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
@@ -4182,8 +3752,7 @@ impl Node {
                                                     tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD,
                                                 )
                                             } else {
-                                                let comp = if let Ok(compressed) = self
-                                                    .shared
+                                                let comp = if let Ok(compressed) = shared
                                                     .screen_codec
                                                     .compress_frame(&tile.data, tile.w, tile.h)
                                                 {
@@ -4198,8 +3767,7 @@ impl Node {
                                                 (comp, tetherly_core::TILE_SUBCODEC_RAW)
                                             }
                                         } else {
-                                            let comp = if let Ok(compressed) = self
-                                                .shared
+                                            let comp = if let Ok(compressed) = shared
                                                 .screen_codec
                                                 .compress_frame(&tile.data, tile.w, tile.h)
                                             {
@@ -4215,40 +3783,39 @@ impl Node {
                                         }
                                     }
                                 };
-
                                 if palette_cfg.enabled {
                                     let saved =
                                         (raw_len as u64).saturating_sub(to_send.len() as u64);
                                     match subc {
                                         tetherly_core::TILE_SUBCODEC_SOLID => {
-                                            self.shared
+                                            shared
                                                 .screen_tile_palette_solid_count
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            self.shared.screen_tile_palette_saved_bytes.fetch_add(
+                                            shared.screen_tile_palette_saved_bytes.fetch_add(
                                                 saved,
                                                 std::sync::atomic::Ordering::Relaxed,
                                             );
                                         }
                                         tetherly_core::TILE_SUBCODEC_BILEVEL => {
-                                            self.shared
+                                            shared
                                                 .screen_tile_palette_bilevel_count
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            self.shared.screen_tile_palette_saved_bytes.fetch_add(
+                                            shared.screen_tile_palette_saved_bytes.fetch_add(
                                                 saved,
                                                 std::sync::atomic::Ordering::Relaxed,
                                             );
                                         }
                                         tetherly_core::TILE_SUBCODEC_PALETTE16 => {
-                                            self.shared
+                                            shared
                                                 .screen_tile_palette_palette_count
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            self.shared.screen_tile_palette_saved_bytes.fetch_add(
+                                            shared.screen_tile_palette_saved_bytes.fetch_add(
                                                 saved,
                                                 std::sync::atomic::Ordering::Relaxed,
                                             );
                                         }
                                         _ => {
-                                            self.shared
+                                            shared
                                                 .screen_tile_palette_truecolor_count
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         }
@@ -4259,146 +3826,659 @@ impl Node {
                                 {
                                     let saved =
                                         (raw_len as u64).saturating_sub(to_send.len() as u64);
-                                    self.shared
+                                    shared
                                         .screen_tile_predict_tiles_count
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    self.shared
+                                    shared
                                         .screen_tile_predict_saved_bytes
                                         .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
                                 }
-
-                                payload_bytes += 14 + to_send.len() as u64;
-                                compressed_tiles.push(tetherly_core::DirtyTile {
+                                cached_entries.push(tetherly_core::CachedTileEntry {
+                                    index: tile.index,
+                                    x: tile.x,
+                                    y: tile.y,
+                                    w: tile.w,
+                                    h: tile.h,
+                                    cache_hit: false,
+                                    cache_id,
                                     data: to_send,
-                                    ..tile.clone()
                                 });
                             }
-                            let full_raw_bytes = (frame.rect.w as u64)
-                                * (frame.rect.h as u64)
-                                * (frame.format.bpp() as u64);
-                            if full_raw_bytes > payload_bytes {
-                                self.shared.screen_tile_saved_bytes.fetch_add(
-                                    full_raw_bytes - payload_bytes,
+                        }
+                        drop(dict);
+                        if any_skipped || any_lod_downsampled {
+                            let mut prev_canvas = prev.clone();
+                            for (t, was_lod) in dirty_tiles.iter().zip(lod_flags.iter()) {
+                                if !*was_lod {
+                                    let _ =
+                                        prev_canvas.apply_cached_tile(t.x, t.y, t.w, t.h, &t.data);
+                                }
+                            }
+                            *shared.screen_sender_tile_canvas.write().unwrap() = Some(prev_canvas);
+                        } else {
+                            *shared.screen_sender_tile_canvas.write().unwrap() =
+                                Some(frame.clone());
+                        }
+                        encoded_tile_cache = Some(ScreenFrame::encode_tile_cache(
+                            frame.seq,
+                            frame.rect,
+                            frame.format,
+                            tile_size,
+                            total_tiles,
+                            &cached_entries,
+                        ));
+                    }
+                }
+            }
+            if encoded_tile_cache.is_none()
+                && (prev_opt.is_none()
+                    || (!focus_cfg.enabled
+                        && !saliency_cfg.enabled
+                        && !lod_cfg.enabled
+                        && !tile_motion_cfg.enabled))
+            {
+                *shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
+            }
+            (encoded_tile_cache, None, None)
+        } else if (tile_cfg.enabled
+            || focus_cfg.enabled
+            || palette_cfg.enabled
+            || predict_cfg.enabled
+            || saliency_cfg.enabled
+            || lod_cfg.enabled
+            || tile_batch_cfg.enabled
+            || tile_motion_cfg.enabled)
+            && !frame.compressed()
+            && !is_motion
+        {
+            let prev_opt = shared.screen_sender_tile_canvas.read().unwrap().clone();
+            let mut encoded_tile = None;
+            let mut encoded_tile_batch = None;
+            if let Some(prev) = &prev_opt {
+                if prev.rect.w == frame.rect.w
+                    && prev.rect.h == frame.rect.h
+                    && prev.format == frame.format
+                {
+                    let tile_size = if tile_cfg.enabled {
+                        tile_cfg.tile_size
+                    } else {
+                        tetherly_core::SCREEN_TILE_DEFAULT_SIZE
+                    };
+                    let (total_tiles, raw_dirty_tiles) =
+                        tetherly_core::extract_dirty_tiles(prev, &frame, tile_size);
+                    let (dirty_tiles, any_peripheral_skipped) = if focus_cfg.enabled {
+                        let cadence = (focus_cfg.peripheral_skip_ratio as u64) + 1;
+                        let send_peripheral = (frame.seq % cadence) == 0;
+                        let mut kept = Vec::with_capacity(raw_dirty_tiles.len());
+                        let mut skipped = false;
+                        for tile in raw_dirty_tiles {
+                            let in_focus = tetherly_core::is_tile_in_focus(
+                                tile.x, tile.y, tile.w, tile.h, &focus_cfg, cursor_pos,
+                            );
+                            if in_focus {
+                                shared
+                                    .screen_focus_tiles_sent
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                kept.push(tile);
+                            } else if send_peripheral {
+                                shared
+                                    .screen_focus_peripheral_sent
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                kept.push(tile);
+                            } else {
+                                shared
+                                    .screen_focus_peripheral_skipped
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                shared.screen_focus_saved_bytes.fetch_add(
+                                    tile.data.len() as u64,
                                     std::sync::atomic::Ordering::Relaxed,
                                 );
+                                skipped = true;
                             }
-                            let count = compressed_tiles.len() as u64;
-                            self.shared
-                                .screen_tile_frames_sent
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            self.shared
-                                .screen_tile_dirty_tiles_sent
-                                .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
-                            let skipped = (total_tiles as u64).saturating_sub(count);
-                            self.shared
-                                .screen_tile_skipped_count
-                                .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        (kept, skipped)
+                    } else {
+                        (raw_dirty_tiles, false)
+                    };
 
-                            if any_skipped || any_lod_downsampled {
-                                let mut prev_canvas = prev.clone();
-                                for (t, was_lod) in dirty_tiles.iter().zip(lod_flags.iter()) {
-                                    if !*was_lod {
-                                        let _ = prev_canvas
-                                            .apply_cached_tile(t.x, t.y, t.w, t.h, &t.data);
+                    let (dirty_tiles, any_saliency_skipped) = if saliency_cfg.enabled {
+                        let (scheduled, crit, norm, bg, skipped) =
+                            tetherly_core::ScreenTileSaliencyEvaluator::schedule_tiles(
+                                dirty_tiles,
+                                focus_box,
+                                &saliency_cfg,
+                                is_congested,
+                            );
+                        shared
+                            .screen_tile_saliency_critical_tiles
+                            .fetch_add(crit, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .screen_tile_saliency_normal_tiles
+                            .fetch_add(norm, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .screen_tile_saliency_background_tiles
+                            .fetch_add(bg, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .screen_tile_saliency_background_skipped
+                            .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+                        (scheduled, skipped > 0)
+                    } else {
+                        (dirty_tiles, false)
+                    };
+                    let any_skipped = any_peripheral_skipped || any_saliency_skipped;
+
+                    let threshold_ok = focus_cfg.enabled
+                        || palette_cfg.enabled
+                        || predict_cfg.enabled
+                        || saliency_cfg.enabled
+                        || lod_cfg.enabled
+                        || tile_batch_cfg.enabled
+                        || tile_motion_cfg.enabled
+                        || dirty_tiles.len() < ((total_tiles as usize) * 3 / 4).max(1);
+                    if !dirty_tiles.is_empty() && threshold_ok {
+                        let mut compressed_tiles = Vec::with_capacity(dirty_tiles.len());
+                        let mut payload_bytes = 6u64;
+                        let mut any_lod_downsampled = false;
+                        let mut lod_flags = Vec::with_capacity(dirty_tiles.len());
+                        for tile in &dirty_tiles {
+                            let raw_len = tile.data.len();
+                            let motion_opt = if tile_motion_cfg.enabled {
+                                tetherly_core::compress_tile_motion(
+                                    &tile.data,
+                                    tile.x,
+                                    tile.y,
+                                    tile.w,
+                                    tile.h,
+                                    prev,
+                                    &tile_motion_cfg,
+                                )
+                            } else {
+                                None
+                            };
+
+                            let (to_send, subc) = if let Some((motion_subc, motion_payload)) =
+                                motion_opt
+                            {
+                                shared
+                                    .screen_tile_motion_tiles_sent
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let saved =
+                                    (raw_len as u64).saturating_sub(motion_payload.len() as u64);
+                                shared
+                                    .screen_tile_motion_bytes_saved
+                                    .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                lod_flags.push(false);
+                                (motion_payload, motion_subc)
+                            } else {
+                                if tile_motion_cfg.enabled {
+                                    shared
+                                        .screen_tile_motion_fallback_tiles_sent
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                let (target_lod, is_lod) = if lod_cfg.enabled {
+                                    let (_, tier) = if saliency_cfg.enabled {
+                                        tetherly_core::ScreenTileSaliencyEvaluator::evaluate_tile(
+                                            tile,
+                                            focus_box,
+                                            &saliency_cfg,
+                                        )
+                                    } else {
+                                        (100, tetherly_core::TileSaliencyTier::Normal)
+                                    };
+                                    if tier == tetherly_core::TileSaliencyTier::Critical {
+                                        (tetherly_core::TileLodLevel::Lod0, false)
+                                    } else if lod_cfg.auto_lod_on_congestion {
+                                        if is_congested {
+                                            if tier == tetherly_core::TileSaliencyTier::Background
+                                                && lod_cfg.max_lod >= 2
+                                            {
+                                                (tetherly_core::TileLodLevel::Lod2, true)
+                                            } else if lod_cfg.max_lod >= 1 {
+                                                if !saliency_cfg.enabled && lod_cfg.max_lod >= 2 {
+                                                    (tetherly_core::TileLodLevel::Lod2, true)
+                                                } else {
+                                                    (tetherly_core::TileLodLevel::Lod1, true)
+                                                }
+                                            } else {
+                                                (tetherly_core::TileLodLevel::Lod0, false)
+                                            }
+                                        } else {
+                                            (tetherly_core::TileLodLevel::Lod0, false)
+                                        }
+                                    } else {
+                                        if (tier == tetherly_core::TileSaliencyTier::Background
+                                            || !saliency_cfg.enabled)
+                                            && lod_cfg.max_lod >= 2
+                                        {
+                                            (tetherly_core::TileLodLevel::Lod2, true)
+                                        } else if lod_cfg.max_lod >= 1 {
+                                            (tetherly_core::TileLodLevel::Lod1, true)
+                                        } else {
+                                            (tetherly_core::TileLodLevel::Lod0, false)
+                                        }
+                                    }
+                                } else {
+                                    (tetherly_core::TileLodLevel::Lod0, false)
+                                };
+                                if is_lod {
+                                    any_lod_downsampled = true;
+                                }
+                                lod_flags.push(is_lod);
+
+                                if target_lod != tetherly_core::TileLodLevel::Lod0 {
+                                    let (subc, comp) = tetherly_core::compress_tile_lod(
+                                        &tile.data,
+                                        tile.w,
+                                        tile.h,
+                                        target_lod,
+                                        shared.screen_codec.as_ref(),
+                                    );
+                                    let saved = (raw_len as u64).saturating_sub(comp.len() as u64);
+                                    shared
+                                        .screen_tile_lod_bytes_saved
+                                        .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                    match target_lod {
+                                        tetherly_core::TileLodLevel::Lod1 => {
+                                            shared
+                                                .screen_tile_lod1_tiles
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        tetherly_core::TileLodLevel::Lod2 => {
+                                            shared
+                                                .screen_tile_lod2_tiles
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        _ => {}
+                                    }
+                                    (comp, subc)
+                                } else {
+                                    if lod_cfg.enabled {
+                                        shared
+                                            .screen_tile_lod0_tiles
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    if palette_cfg.enabled {
+                                        let (subcodec, encoded) =
+                                            tetherly_core::compress_tile_palette(
+                                                &tile.data,
+                                                tile.w,
+                                                tile.h,
+                                                &palette_cfg,
+                                            );
+                                        if subcodec == tetherly_core::TILE_SUBCODEC_SOLID
+                                            || subcodec == tetherly_core::TILE_SUBCODEC_BILEVEL
+                                            || subcodec == tetherly_core::TILE_SUBCODEC_PALETTE16
+                                        {
+                                            (encoded, subcodec)
+                                        } else if predict_cfg.enabled {
+                                            let (pred_subc, pred_data) =
+                                                tetherly_core::compress_tile_predictive(
+                                                    &tile.data,
+                                                    tile.w,
+                                                    tile.h,
+                                                    &predict_cfg,
+                                                    shared.screen_codec.as_ref(),
+                                                );
+                                            if pred_subc
+                                                == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                                                && pred_data.len() < raw_len
+                                            {
+                                                (
+                                                    pred_data,
+                                                    tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD,
+                                                )
+                                            } else {
+                                                let comp = if let Ok(compressed) = shared
+                                                    .screen_codec
+                                                    .compress_frame(&tile.data, tile.w, tile.h)
+                                                {
+                                                    if compressed.len() < raw_len {
+                                                        compressed
+                                                    } else {
+                                                        tile.data.clone()
+                                                    }
+                                                } else {
+                                                    tile.data.clone()
+                                                };
+                                                (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                            }
+                                        } else {
+                                            let comp = if let Ok(compressed) = shared
+                                                .screen_codec
+                                                .compress_frame(&tile.data, tile.w, tile.h)
+                                            {
+                                                if compressed.len() < raw_len {
+                                                    compressed
+                                                } else {
+                                                    tile.data.clone()
+                                                }
+                                            } else {
+                                                tile.data.clone()
+                                            };
+                                            (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                        }
+                                    } else if predict_cfg.enabled {
+                                        let (pred_subc, pred_data) =
+                                            tetherly_core::compress_tile_predictive(
+                                                &tile.data,
+                                                tile.w,
+                                                tile.h,
+                                                &predict_cfg,
+                                                shared.screen_codec.as_ref(),
+                                            );
+                                        if pred_subc == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                                            && pred_data.len() < raw_len
+                                        {
+                                            (pred_data, tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD)
+                                        } else {
+                                            let comp = if let Ok(compressed) = shared
+                                                .screen_codec
+                                                .compress_frame(&tile.data, tile.w, tile.h)
+                                            {
+                                                if compressed.len() < raw_len {
+                                                    compressed
+                                                } else {
+                                                    tile.data.clone()
+                                                }
+                                            } else {
+                                                tile.data.clone()
+                                            };
+                                            (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                        }
+                                    } else {
+                                        let comp = if let Ok(compressed) = shared
+                                            .screen_codec
+                                            .compress_frame(&tile.data, tile.w, tile.h)
+                                        {
+                                            if compressed.len() < raw_len {
+                                                compressed
+                                            } else {
+                                                tile.data.clone()
+                                            }
+                                        } else {
+                                            tile.data.clone()
+                                        };
+                                        (comp, tetherly_core::TILE_SUBCODEC_RAW)
                                     }
                                 }
-                                *self.shared.screen_sender_tile_canvas.write().unwrap() =
-                                    Some(prev_canvas);
-                            } else {
-                                *self.shared.screen_sender_tile_canvas.write().unwrap() =
-                                    Some(frame.clone());
+                            };
+
+                            if palette_cfg.enabled {
+                                let saved = (raw_len as u64).saturating_sub(to_send.len() as u64);
+                                match subc {
+                                    tetherly_core::TILE_SUBCODEC_SOLID => {
+                                        shared
+                                            .screen_tile_palette_solid_count
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        shared
+                                            .screen_tile_palette_saved_bytes
+                                            .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    tetherly_core::TILE_SUBCODEC_BILEVEL => {
+                                        shared
+                                            .screen_tile_palette_bilevel_count
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        shared
+                                            .screen_tile_palette_saved_bytes
+                                            .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    tetherly_core::TILE_SUBCODEC_PALETTE16 => {
+                                        shared
+                                            .screen_tile_palette_palette_count
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        shared
+                                            .screen_tile_palette_saved_bytes
+                                            .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    _ => {
+                                        shared
+                                            .screen_tile_palette_truecolor_count
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                            if predict_cfg.enabled
+                                && subc == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                            {
+                                let saved = (raw_len as u64).saturating_sub(to_send.len() as u64);
+                                shared
+                                    .screen_tile_predict_tiles_count
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                shared
+                                    .screen_tile_predict_saved_bytes
+                                    .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
                             }
 
-                            tile_resend_entry = Some((frame.seq as u32, compressed_tiles.clone()));
-                            self.shared
-                                .screen_tile_resend_buffer
-                                .write()
-                                .unwrap()
-                                .push_frame(frame.seq as u32, compressed_tiles.clone());
-                            if tile_batch_cfg.enabled {
-                                let batch_id = self
-                                    .shared
-                                    .screen_tile_batches_sent
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                                    as u32
-                                    + 1;
-                                let chunks = tetherly_core::chunk_dirty_tiles(
-                                    frame.seq,
-                                    frame.rect,
-                                    frame.format,
-                                    compressed_tiles.clone(),
-                                    tile_batch_cfg.target_chunk_bytes as usize,
-                                    tile_size,
-                                    total_tiles,
-                                    batch_id,
-                                );
-                                let chunk_count = chunks.len() as u64;
-                                self.shared
-                                    .screen_tile_chunks_sent
-                                    .fetch_add(chunk_count, std::sync::atomic::Ordering::Relaxed);
-                                let total_bytes: u64 =
-                                    chunks.iter().map(|c| c.bytes.len() as u64).sum();
-                                self.shared
-                                    .screen_tile_batch_bytes_total
-                                    .fetch_add(total_bytes, std::sync::atomic::Ordering::Relaxed);
-                                encoded_tile_batch = Some(chunks);
-                            } else {
-                                encoded_tile = Some(ScreenFrame::encode_tile_grid(
-                                    frame.seq,
-                                    frame.rect,
-                                    frame.format,
-                                    tile_size,
-                                    total_tiles,
-                                    &compressed_tiles,
-                                ));
+                            payload_bytes += 14 + to_send.len() as u64;
+                            compressed_tiles.push(tetherly_core::DirtyTile {
+                                data: to_send,
+                                ..tile.clone()
+                            });
+                        }
+                        let full_raw_bytes = (frame.rect.w as u64)
+                            * (frame.rect.h as u64)
+                            * (frame.format.bpp() as u64);
+                        if full_raw_bytes > payload_bytes {
+                            shared.screen_tile_saved_bytes.fetch_add(
+                                full_raw_bytes - payload_bytes,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        let count = compressed_tiles.len() as u64;
+                        shared
+                            .screen_tile_frames_sent
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .screen_tile_dirty_tiles_sent
+                            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                        let skipped = (total_tiles as u64).saturating_sub(count);
+                        shared
+                            .screen_tile_skipped_count
+                            .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+
+                        if any_skipped || any_lod_downsampled {
+                            let mut prev_canvas = prev.clone();
+                            for (t, was_lod) in dirty_tiles.iter().zip(lod_flags.iter()) {
+                                if !*was_lod {
+                                    let _ =
+                                        prev_canvas.apply_cached_tile(t.x, t.y, t.w, t.h, &t.data);
+                                }
                             }
+                            *shared.screen_sender_tile_canvas.write().unwrap() = Some(prev_canvas);
+                        } else {
+                            *shared.screen_sender_tile_canvas.write().unwrap() =
+                                Some(frame.clone());
+                        }
+
+                        tile_resend_entry = Some((frame.seq as u32, compressed_tiles.clone()));
+                        shared
+                            .screen_tile_resend_buffer
+                            .write()
+                            .unwrap()
+                            .push_frame(frame.seq as u32, compressed_tiles.clone());
+                        if tile_batch_cfg.enabled {
+                            let batch_id = shared
+                                .screen_tile_batches_sent
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                as u32
+                                + 1;
+                            let chunks = tetherly_core::chunk_dirty_tiles(
+                                frame.seq,
+                                frame.rect,
+                                frame.format,
+                                compressed_tiles.clone(),
+                                tile_batch_cfg.target_chunk_bytes as usize,
+                                tile_size,
+                                total_tiles,
+                                batch_id,
+                            );
+                            let chunk_count = chunks.len() as u64;
+                            shared
+                                .screen_tile_chunks_sent
+                                .fetch_add(chunk_count, std::sync::atomic::Ordering::Relaxed);
+                            let total_bytes: u64 =
+                                chunks.iter().map(|c| c.bytes.len() as u64).sum();
+                            shared
+                                .screen_tile_batch_bytes_total
+                                .fetch_add(total_bytes, std::sync::atomic::Ordering::Relaxed);
+                            encoded_tile_batch = Some(chunks);
+                        } else {
+                            encoded_tile = Some(ScreenFrame::encode_tile_grid(
+                                frame.seq,
+                                frame.rect,
+                                frame.format,
+                                tile_size,
+                                total_tiles,
+                                &compressed_tiles,
+                            ));
                         }
                     }
                 }
-                if encoded_tile.is_none()
-                    && encoded_tile_batch.is_none()
-                    && (prev_opt.is_none()
-                        || (!focus_cfg.enabled
-                            && !saliency_cfg.enabled
-                            && !lod_cfg.enabled
-                            && !tile_batch_cfg.enabled))
-                {
-                    *self.shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
-                }
-                (None, encoded_tile, encoded_tile_batch)
-            } else {
-                if !frame.compressed() {
-                    *self.shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
-                }
-                (None, None, None)
-            };
-            let is_tile = tile_frame_opt.is_some();
-            let is_tile_cache = tile_cache_frame_opt.is_some();
-            let is_tile_batch = tile_batch_chunks_opt.is_some();
+            }
+            if encoded_tile.is_none()
+                && encoded_tile_batch.is_none()
+                && (prev_opt.is_none()
+                    || (!focus_cfg.enabled
+                        && !saliency_cfg.enabled
+                        && !lod_cfg.enabled
+                        && !tile_batch_cfg.enabled))
+            {
+                *shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
+            }
+            (None, encoded_tile, encoded_tile_batch)
+        } else {
+            if !frame.compressed() {
+                *shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
+            }
+            (None, None, None)
+        };
+        let is_tile = tile_frame_opt.is_some();
+        let is_tile_cache = tile_cache_frame_opt.is_some();
+        let is_tile_batch = tile_batch_chunks_opt.is_some();
 
-            let frame = if let Some(cf) = tile_cache_frame_opt {
-                cf
-            } else if let Some(chunks) = &tile_batch_chunks_opt {
-                chunks[0].clone()
-            } else if let Some(mf) = motion_frame_opt {
-                mf
-            } else if let Some(tf) = tile_frame_opt {
-                tf
-            } else if is_ltr_recovery && !frame.compressed() {
-                let golden_opt = self.shared.screen_sender_ltr_canvas.read().unwrap().clone();
-                match golden_opt {
-                    Some(golden)
-                        if golden.rect.w == frame.rect.w
-                            && golden.rect.h == frame.rect.h
-                            && golden.format == frame.format =>
+        let frame = if let Some(cf) = tile_cache_frame_opt {
+            cf
+        } else if let Some(chunks) = &tile_batch_chunks_opt {
+            chunks[0].clone()
+        } else if let Some(mf) = motion_frame_opt {
+            mf
+        } else if let Some(tf) = tile_frame_opt {
+            tf
+        } else if is_ltr_recovery && !frame.compressed() {
+            let golden_opt = shared.screen_sender_ltr_canvas.read().unwrap().clone();
+            match golden_opt {
+                Some(golden)
+                    if golden.rect.w == frame.rect.w
+                        && golden.rect.h == frame.rect.h
+                        && golden.format == frame.format =>
+                {
+                    let mut tracker = shared.screen_damage_tracker.lock().expect("damage tracker");
+                    let report = tracker.evaluate_rgba(
+                        &golden.bytes,
+                        &frame.bytes,
+                        frame.rect.w as u32,
+                        frame.rect.h as u32,
+                    );
+                    drop(tracker);
+                    let rect = report
+                        .bounding_rect
+                        .unwrap_or(tetherly_core::ScreenDamageRect {
+                            x: 0,
+                            y: 0,
+                            width: 1.min(frame.rect.w),
+                            height: 1.min(frame.rect.h),
+                        });
+                    let patch = frame.extract_sub_rect(rect.x, rect.y, rect.width, rect.height)?;
+                    let compressed = shared.screen_codec.compress_frame(
+                        &patch.bytes,
+                        patch.rect.w,
+                        patch.rect.h,
+                    )?;
+                    let full_raw_bytes =
+                        (frame.rect.w as u64) * (frame.rect.h as u64) * (frame.format.bpp() as u64);
+                    let patch_bytes = compressed.len() as u64;
+                    if full_raw_bytes > patch_bytes {
+                        shared.screen_ltr_saved_burst_bytes.fetch_add(
+                            full_raw_bytes - patch_bytes,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    shared
+                        .screen_ltr_recoveries_completed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    ScreenFrame {
+                        codec_tag: tetherly_core::SCREEN_COMPRESS_LTR,
+                        bytes: compressed,
+                        ..patch
+                    }
+                }
+                _ => {
+                    shared
+                        .screen_delta_counter
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    shared
+                        .screen_delta_keyframes_sent
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    frame
+                }
+            }
+        } else if is_pir_active && !frame.compressed() {
+            let cur_band = shared
+                .screen_pir_current_band
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let bands = pir_cfg.bands.clamp(
+                tetherly_core::SCREEN_PIR_MIN_BANDS,
+                tetherly_core::SCREEN_PIR_MAX_BANDS,
+            );
+            let (bx, by, bw, bh) = tetherly_core::compute_pir_band_rect(
+                frame.rect.w as u32,
+                frame.rect.h as u32,
+                bands,
+                cur_band,
+            );
+            let slice = frame.extract_sub_rect(bx as u16, by as u16, bw as u16, bh as u16)?;
+            let compressed =
+                shared
+                    .screen_codec
+                    .compress_frame(&slice.bytes, slice.rect.w, slice.rect.h)?;
+            let next_band = (cur_band + 1) % bands;
+            shared
+                .screen_pir_current_band
+                .store(next_band, std::sync::atomic::Ordering::Relaxed);
+            shared
+                .screen_pir_slices_sent
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if next_band == 0 {
+                shared
+                    .screen_pir_sweeps_completed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if pir_cfg.mode == tetherly_core::ScreenPirMode::OnDemand {
+                    shared
+                        .screen_pir_active_sweep
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            ScreenFrame {
+                codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
+                bytes: compressed,
+                ..slice
+            }
+        } else if svc_cfg.is_enabled() && !frame.compressed() {
+            // ADR-114 / v2.28: 2-Layer Temporal Scalability (SVC-T) Hierarchical Delta & Leaf Branch
+            let is_t1 = (frame.seq % 2) != 0;
+            if is_t1 {
+                // Enhancement Layer (T1): strictly references latest T0 anchor; never updates T0 anchor
+                let t0_opt = shared.screen_sender_t0_canvas.read().unwrap().clone();
+                match t0_opt {
+                    Some(t0_ref)
+                        if t0_ref.rect.w == frame.rect.w
+                            && t0_ref.rect.h == frame.rect.h
+                            && t0_ref.format == frame.format =>
                     {
-                        let mut tracker = self
-                            .shared
-                            .screen_damage_tracker
-                            .lock()
-                            .expect("damage tracker");
+                        let mut tracker =
+                            shared.screen_damage_tracker.lock().expect("damage tracker");
                         let report = tracker.evaluate_rgba(
-                            &golden.bytes,
+                            &t0_ref.bytes,
                             &frame.bytes,
                             frame.rect.w as u32,
                             frame.rect.h as u32,
@@ -4415,7 +4495,7 @@ impl Node {
                                 });
                         let patch =
                             frame.extract_sub_rect(rect.x, rect.y, rect.width, rect.height)?;
-                        let compressed = self.shared.screen_codec.compress_frame(
+                        let compressed = shared.screen_codec.compress_frame(
                             &patch.bytes,
                             patch.rect.w,
                             patch.rect.h,
@@ -4425,109 +4505,55 @@ impl Node {
                             * (frame.format.bpp() as u64);
                         let patch_bytes = compressed.len() as u64;
                         if full_raw_bytes > patch_bytes {
-                            self.shared.screen_ltr_saved_burst_bytes.fetch_add(
+                            shared.screen_svc_saved_bytes.fetch_add(
                                 full_raw_bytes - patch_bytes,
                                 std::sync::atomic::Ordering::Relaxed,
                             );
                         }
-                        self.shared
-                            .screen_ltr_recoveries_completed
+                        shared
+                            .screen_svc_t1_frames_sent
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         ScreenFrame {
-                            codec_tag: tetherly_core::SCREEN_COMPRESS_LTR,
+                            codec_tag: tetherly_core::SCREEN_COMPRESS_SVC_T1,
                             bytes: compressed,
                             ..patch
                         }
                     }
                     _ => {
-                        self.shared
-                            .screen_delta_counter
-                            .store(0, std::sync::atomic::Ordering::Relaxed);
-                        self.shared
-                            .screen_delta_keyframes_sent
+                        shared
+                            .screen_svc_t1_frames_sent
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         frame
                     }
                 }
-            } else if is_pir_active && !frame.compressed() {
-                let cur_band = self
-                    .shared
-                    .screen_pir_current_band
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let bands = pir_cfg.bands.clamp(
-                    tetherly_core::SCREEN_PIR_MIN_BANDS,
-                    tetherly_core::SCREEN_PIR_MAX_BANDS,
-                );
-                let (bx, by, bw, bh) = tetherly_core::compute_pir_band_rect(
-                    frame.rect.w as u32,
-                    frame.rect.h as u32,
-                    bands,
-                    cur_band,
-                );
-                let slice = frame.extract_sub_rect(bx as u16, by as u16, bw as u16, bh as u16)?;
-                let compressed = self.shared.screen_codec.compress_frame(
-                    &slice.bytes,
-                    slice.rect.w,
-                    slice.rect.h,
-                )?;
-                let next_band = (cur_band + 1) % bands;
-                self.shared
-                    .screen_pir_current_band
-                    .store(next_band, std::sync::atomic::Ordering::Relaxed);
-                self.shared
-                    .screen_pir_slices_sent
+            } else {
+                // Base Layer (T0): strictly references previous T0 anchor and updates T0 canvas
+                shared
+                    .screen_svc_t0_frames_sent
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if next_band == 0 {
-                    self.shared
-                        .screen_pir_sweeps_completed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if pir_cfg.mode == tetherly_core::ScreenPirMode::OnDemand {
-                        self.shared
-                            .screen_pir_active_sweep
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-                ScreenFrame {
-                    codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
-                    bytes: compressed,
-                    ..slice
-                }
-            } else if svc_cfg.is_enabled() && !frame.compressed() {
-                // ADR-114 / v2.28: 2-Layer Temporal Scalability (SVC-T) Hierarchical Delta & Leaf Branch
-                let is_t1 = (frame.seq % 2) != 0;
-                if is_t1 {
-                    // Enhancement Layer (T1): strictly references latest T0 anchor; never updates T0 anchor
-                    let t0_opt = self.shared.screen_sender_t0_canvas.read().unwrap().clone();
-                    match t0_opt {
-                        Some(t0_ref)
-                            if t0_ref.rect.w == frame.rect.w
-                                && t0_ref.rect.h == frame.rect.h
-                                && t0_ref.format == frame.format =>
+                let prev_t0_opt = shared.screen_sender_t0_canvas.read().unwrap().clone();
+                match prev_t0_opt {
+                    Some(prev_t0)
+                        if prev_t0.rect.w == frame.rect.w
+                            && prev_t0.rect.h == frame.rect.h
+                            && prev_t0.format == frame.format =>
+                    {
+                        let mut tracker =
+                            shared.screen_damage_tracker.lock().expect("damage tracker");
+                        let report = tracker.evaluate_rgba(
+                            &prev_t0.bytes,
+                            &frame.bytes,
+                            frame.rect.w as u32,
+                            frame.rect.h as u32,
+                        );
+                        drop(tracker);
+                        if let Some(rect) = report
+                            .bounding_rect
+                            .filter(|_| !report.is_static && report.dirty_ratio < 0.70)
                         {
-                            let mut tracker = self
-                                .shared
-                                .screen_damage_tracker
-                                .lock()
-                                .expect("damage tracker");
-                            let report = tracker.evaluate_rgba(
-                                &t0_ref.bytes,
-                                &frame.bytes,
-                                frame.rect.w as u32,
-                                frame.rect.h as u32,
-                            );
-                            drop(tracker);
-                            let rect =
-                                report
-                                    .bounding_rect
-                                    .unwrap_or(tetherly_core::ScreenDamageRect {
-                                        x: 0,
-                                        y: 0,
-                                        width: 1.min(frame.rect.w),
-                                        height: 1.min(frame.rect.h),
-                                    });
                             let patch =
                                 frame.extract_sub_rect(rect.x, rect.y, rect.width, rect.height)?;
-                            let compressed = self.shared.screen_codec.compress_frame(
+                            let compressed = shared.screen_codec.compress_frame(
                                 &patch.bytes,
                                 patch.rect.w,
                                 patch.rect.h,
@@ -4537,200 +4563,117 @@ impl Node {
                                 * (frame.format.bpp() as u64);
                             let patch_bytes = compressed.len() as u64;
                             if full_raw_bytes > patch_bytes {
-                                self.shared.screen_svc_saved_bytes.fetch_add(
+                                shared.screen_delta_saved_bytes.fetch_add(
                                     full_raw_bytes - patch_bytes,
                                     std::sync::atomic::Ordering::Relaxed,
                                 );
                             }
-                            self.shared
-                                .screen_svc_t1_frames_sent
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            *shared.screen_sender_t0_canvas.write().unwrap() = Some(frame.clone());
                             ScreenFrame {
-                                codec_tag: tetherly_core::SCREEN_COMPRESS_SVC_T1,
+                                codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
                                 bytes: compressed,
                                 ..patch
                             }
-                        }
-                        _ => {
-                            self.shared
-                                .screen_svc_t1_frames_sent
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        } else {
+                            *shared.screen_sender_t0_canvas.write().unwrap() = Some(frame.clone());
                             frame
                         }
                     }
-                } else {
-                    // Base Layer (T0): strictly references previous T0 anchor and updates T0 canvas
-                    self.shared
-                        .screen_svc_t0_frames_sent
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let prev_t0_opt = self.shared.screen_sender_t0_canvas.read().unwrap().clone();
-                    match prev_t0_opt {
-                        Some(prev_t0)
-                            if prev_t0.rect.w == frame.rect.w
-                                && prev_t0.rect.h == frame.rect.h
-                                && prev_t0.format == frame.format =>
-                        {
-                            let mut tracker = self
-                                .shared
-                                .screen_damage_tracker
-                                .lock()
-                                .expect("damage tracker");
-                            let report = tracker.evaluate_rgba(
-                                &prev_t0.bytes,
-                                &frame.bytes,
-                                frame.rect.w as u32,
-                                frame.rect.h as u32,
-                            );
-                            drop(tracker);
-                            if let Some(rect) = report
-                                .bounding_rect
-                                .filter(|_| !report.is_static && report.dirty_ratio < 0.70)
-                            {
-                                let patch = frame.extract_sub_rect(
-                                    rect.x,
-                                    rect.y,
-                                    rect.width,
-                                    rect.height,
-                                )?;
-                                let compressed = self.shared.screen_codec.compress_frame(
-                                    &patch.bytes,
-                                    patch.rect.w,
-                                    patch.rect.h,
-                                )?;
-                                let full_raw_bytes = (frame.rect.w as u64)
-                                    * (frame.rect.h as u64)
-                                    * (frame.format.bpp() as u64);
-                                let patch_bytes = compressed.len() as u64;
-                                if full_raw_bytes > patch_bytes {
-                                    self.shared.screen_delta_saved_bytes.fetch_add(
-                                        full_raw_bytes - patch_bytes,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                }
-                                *self.shared.screen_sender_t0_canvas.write().unwrap() =
-                                    Some(frame.clone());
-                                ScreenFrame {
-                                    codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
-                                    bytes: compressed,
-                                    ..patch
-                                }
-                            } else {
-                                *self.shared.screen_sender_t0_canvas.write().unwrap() =
-                                    Some(frame.clone());
-                                frame
-                            }
-                        }
-                        _ => {
-                            *self.shared.screen_sender_t0_canvas.write().unwrap() =
-                                Some(frame.clone());
-                            frame
-                        }
-                    }
-                }
-            } else {
-                // ADR-109 / v2.23: Dynamic Differential Delta Patch & Temporal Compression
-                let delta_cfg = *self.shared.screen_delta_config.read().unwrap();
-                if delta_cfg.enabled && !frame.compressed() {
-                    let cur_counter = self
-                        .shared
-                        .screen_delta_counter
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    if let Some(rect) = bounding_rect.filter(|_| {
-                        cur_counter < delta_cfg.keyframe_interval as u64
-                            && is_dirty
-                            && dirty_ratio < 0.70
-                    }) {
-                        let patch =
-                            frame.extract_sub_rect(rect.x, rect.y, rect.width, rect.height)?;
-                        let compressed = self.shared.screen_codec.compress_frame(
-                            &patch.bytes,
-                            patch.rect.w,
-                            patch.rect.h,
-                        )?;
-                        let full_raw_bytes = (frame.rect.w as u64)
-                            * (frame.rect.h as u64)
-                            * (frame.format.bpp() as u64);
-                        let patch_bytes = compressed.len() as u64;
-                        if full_raw_bytes > patch_bytes {
-                            self.shared.screen_delta_saved_bytes.fetch_add(
-                                full_raw_bytes - patch_bytes,
-                                std::sync::atomic::Ordering::Relaxed,
-                            );
-                        }
-                        self.shared
-                            .screen_delta_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        self.shared
-                            .screen_delta_frames_sent
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        ScreenFrame {
-                            codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
-                            bytes: compressed,
-                            ..patch
-                        }
-                    } else {
-                        self.shared
-                            .screen_delta_counter
-                            .store(0, std::sync::atomic::Ordering::Relaxed);
-                        self.shared
-                            .screen_delta_keyframes_sent
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    _ => {
+                        *shared.screen_sender_t0_canvas.write().unwrap() = Some(frame.clone());
                         frame
                     }
+                }
+            }
+        } else {
+            // ADR-109 / v2.23: Dynamic Differential Delta Patch & Temporal Compression
+            let delta_cfg = *shared.screen_delta_config.read().unwrap();
+            if delta_cfg.enabled && !frame.compressed() {
+                let cur_counter = shared
+                    .screen_delta_counter
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if let Some(rect) = bounding_rect.filter(|_| {
+                    cur_counter < delta_cfg.keyframe_interval as u64
+                        && is_dirty
+                        && dirty_ratio < 0.70
+                }) {
+                    let patch = frame.extract_sub_rect(rect.x, rect.y, rect.width, rect.height)?;
+                    let compressed = shared.screen_codec.compress_frame(
+                        &patch.bytes,
+                        patch.rect.w,
+                        patch.rect.h,
+                    )?;
+                    let full_raw_bytes =
+                        (frame.rect.w as u64) * (frame.rect.h as u64) * (frame.format.bpp() as u64);
+                    let patch_bytes = compressed.len() as u64;
+                    if full_raw_bytes > patch_bytes {
+                        shared.screen_delta_saved_bytes.fetch_add(
+                            full_raw_bytes - patch_bytes,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    shared
+                        .screen_delta_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    shared
+                        .screen_delta_frames_sent
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    ScreenFrame {
+                        codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
+                        bytes: compressed,
+                        ..patch
+                    }
                 } else {
+                    shared
+                        .screen_delta_counter
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    shared
+                        .screen_delta_keyframes_sent
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     frame
                 }
-            };
-
-            let effective_dirty = is_dirty
-                || is_pir_active
-                || is_ltr_recovery
-                || svc_cfg.is_enabled()
-                || is_motion
-                || is_tile
-                || is_tile_cache
-                || is_tile_batch;
-            let pushed = engine.push_with_damage_time(frame, effective_dirty, dirty_ratio, now_us);
-            if pushed.is_none() {
-                // Suppressed by adaptive squelch due to static screen
-                engine.consume_pacing(now_us);
-                return Ok(false);
+            } else {
+                frame
             }
-            if let Some(pseq) = pushed {
-                if let Some((orig_seq, tiles)) = tile_resend_entry {
-                    let mut buf = self.shared.screen_tile_resend_buffer.write().unwrap();
-                    buf.push_frame(pseq as u32, tiles.clone());
-                    if (pseq as u32) != orig_seq {
-                        buf.push_frame(orig_seq, tiles);
-                    }
-                }
-            }
-            engine.consume_pacing(now_us);
-            let mut outbound = engine.drain();
-            if let Some(chunks) = tile_batch_chunks_opt {
-                if let Some(pseq) = pushed {
-                    if let Some(first) = outbound.first_mut() {
-                        first.seq = pseq;
-                    }
-                    for mut chunk in chunks.into_iter().skip(1) {
-                        chunk.seq = pseq;
-                        outbound.push(chunk);
-                    }
-                }
-            }
-            outbound
         };
-        self.shared
-            .screen_interval
-            .lock()
-            .expect("interval")
-            .record();
-        self.send_screen_frames(outbound).await?;
-        if let Some(seq) = ltr_sync_seq {
-            let sync_msg = ControlMsg::LtrAnchorSync { ltr_seq: seq };
-            let _ = self.send_screen_control(sync_msg).await;
+
+        let effective_dirty = is_dirty
+            || is_pir_active
+            || is_ltr_recovery
+            || svc_cfg.is_enabled()
+            || is_motion
+            || is_tile
+            || is_tile_cache
+            || is_tile_batch;
+        let pushed = engine.push_with_damage_time(frame, effective_dirty, dirty_ratio, now_us);
+        if pushed.is_none() {
+            // Suppressed by adaptive squelch due to static screen
+            engine.consume_pacing(now_us);
+            return Ok(None);
         }
-        Ok(true)
+        if let Some(pseq) = pushed {
+            if let Some((orig_seq, tiles)) = &tile_resend_entry {
+                let mut buf = shared.screen_tile_resend_buffer.write().unwrap();
+                buf.push_frame(pseq as u32, tiles.clone());
+                if (pseq as u32) != *orig_seq {
+                    buf.push_frame(*orig_seq, tiles.clone());
+                }
+            }
+        }
+        engine.consume_pacing(now_us);
+        let mut outbound = engine.drain();
+        if let Some(chunks) = tile_batch_chunks_opt {
+            if let Some(pseq) = pushed {
+                if let Some(first) = outbound.first_mut() {
+                    first.seq = pseq;
+                }
+                for mut chunk in chunks.into_iter().skip(1) {
+                    chunk.seq = pseq;
+                    outbound.push(chunk);
+                }
+            }
+        }
+        Ok(Some(outbound))
     }
 
     pub(super) async fn send_screen_frames(
@@ -4761,18 +4704,35 @@ impl Node {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let (frags, delays_us) = {
-                let now_us = self.shared.clock.unix_us();
-                let mut engine = self.shared.screen_engine.lock().expect("screen");
-                let loss_ratio = match engine.network_health() {
-                    tetherly_core::NetworkHealth::Healthy => 0.0,
-                    tetherly_core::NetworkHealth::Warning => 0.015,
-                    tetherly_core::NetworkHealth::Congested => 0.05,
-                    tetherly_core::NetworkHealth::Critical => 0.10,
-                };
-                let frags =
-                    engine.encode_frame_to_inner_frames_with_time(&f, loss_ratio, now_us)?;
-                let delays = engine.compute_packet_delays(frags.len());
-                (frags, delays)
+                // §218-d: FEC shard encode (Reed-Solomon matrix math) must run
+                // on the blocking pool, not the scheduler workers — the pump
+                // task that awaits this is the very worker whose starvation
+                // under encode load delayed the input chain (§218). All state
+                // touched here is std-sync (screen_engine, clock), so the
+                // closure is Send and blocking-pool safe.
+                let shared = Arc::clone(&self.shared);
+                let fec = tokio::task::spawn_blocking(move || {
+                    // Executing means we are on the blocking pool by tokio's
+                    // spawn_blocking contract (worker/blocking threads share
+                    // a name, so the pool identity comes from this closure,
+                    // not from thread_name).
+                    Self::record_encode_thread("fec", &shared.screen_encode_thread);
+                    let now_us = shared.clock.unix_us();
+                    let mut engine = shared.screen_engine.lock().expect("screen");
+                    let loss_ratio = match engine.network_health() {
+                        tetherly_core::NetworkHealth::Healthy => 0.0,
+                        tetherly_core::NetworkHealth::Warning => 0.015,
+                        tetherly_core::NetworkHealth::Congested => 0.05,
+                        tetherly_core::NetworkHealth::Critical => 0.10,
+                    };
+                    let frags =
+                        engine.encode_frame_to_inner_frames_with_time(&f, loss_ratio, now_us)?;
+                    let delays = engine.compute_packet_delays(frags.len());
+                    Ok::<_, CoreError>((frags, delays))
+                })
+                .await
+                .map_err(|join| CoreError::ScreenRefused(format!("fec encode task: {join}")))??;
+                fec
             };
             // Live video: under backpressure drop the whole frame rather than
             // stall the pump or grow memory without bound. A partial frame is
@@ -4975,5 +4935,35 @@ impl Node {
 
     pub fn screen_sink_snapshot(&self) -> MemoryScreenSink {
         self.shared.screen_observer.lock().expect("sink").clone()
+    }
+
+    /// §218-d: thread name that last executed the pump's blocking-encode
+    /// stage, plus the thread name of any heavy encode-path execution that
+    /// bypassed the blocking pool (empty means none — the invariant).
+    pub fn screen_encode_thread_report(&self) -> (String, String) {
+        (
+            self.shared
+                .screen_encode_thread
+                .lock()
+                .expect("encode thread")
+                .clone(),
+            self.shared
+                .screen_inline_encode_thread
+                .lock()
+                .expect("inline encode thread")
+                .clone(),
+        )
+    }
+
+    /// §218-d: record the executing thread into `slot`, tagged with the
+    /// probe site. Heavy encode-path stages record only from inside their
+    /// `spawn_blocking` closures (blocking slot); a record landing in the
+    /// inline slot means a heavy stage executed outside the closures — the
+    /// regression the test suite asserts against.
+    fn record_encode_thread(site: &str, slot: &std::sync::Mutex<String>) {
+        let name = std::thread::current().name().unwrap_or("").to_string();
+        if let Ok(mut guard) = slot.lock() {
+            *guard = format!("{site}:{name}");
+        }
     }
 }
