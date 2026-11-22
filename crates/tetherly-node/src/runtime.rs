@@ -961,6 +961,14 @@ struct Shared {
     /// Last time a four-finger swipe was dropped for "not controlling"
     /// (throttles the debug log so stray swipes don't spam).
     pub(crate) gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64,
+    /// Sticky app-switch chord state (macOS-continuity semantics): the first
+    /// app-switch swipe injects Alt down + a Tab tap and HOLDS the modifier;
+    /// each subsequent swipe within the silence window injects only another
+    /// Tab tap (plus a Shift adjust when direction flips), and a silent
+    /// commit deadline releases Alt. Held as events, not bits, so a forced
+    /// commit replays exactly what was pressed — including Shift, which may
+    /// have been injected mid-chord to reverse direction.
+    pub(crate) gesture_sticky_chord: Mutex<tetherly_core::gesture_map::StickyChordState>,
     /// Active gesture→intent table for the gesture forwarding layer.
     /// Defaults mirror macOS trackpad semantics; a saved config overrides.
     pub(crate) gesture_map: Mutex<tetherly_core::gesture_map::GestureMap>,

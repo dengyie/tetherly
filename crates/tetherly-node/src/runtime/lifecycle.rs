@@ -647,6 +647,9 @@ impl Node {
             remote_session_auto_allowed: std::sync::atomic::AtomicBool::new(false),
             session_heartbeat_paused: std::sync::atomic::AtomicBool::new(false),
             gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64::new(0),
+            gesture_sticky_chord: Mutex::new(
+                tetherly_core::gesture_map::StickyChordState::default(),
+            ),
             gesture_map: Mutex::new(initial_gesture_map),
             screen_seq_trace: Mutex::new(Vec::new()),
             input_trace: Mutex::new(VecDeque::with_capacity(super::input::INPUT_TRACE_CAP)),

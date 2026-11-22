@@ -308,6 +308,143 @@ fn tap_mods_macos(mods_down: &[u16], taps: &[u16]) -> Vec<GestureKeyStep> {
     seq
 }
 
+/// Silence window after the last swipe within which another swipe EXTENDS
+/// the held app-switch chord instead of starting a fresh one. Chosen to sit
+/// between consecutive deliberate swipes (hundreds of ms apart) and a new
+/// unrelated interaction; the Windows Alt+Tab overlay itself commits on Alt
+/// release, so a slightly late release only means the overlay lingers.
+pub const STICKY_CHORD_SILENCE_MS: u64 = 1_200;
+
+/// State of the sticky app-switch chord (macOS-continuity semantics on a
+/// Windows target): hold the modifier, tap Tab per swipe, commit on silence.
+///
+/// Windows semantics made per-swipe full sequences wrong for continuous
+/// switching: Alt release COMMITS the switch, so a per-swipe Alt+Tab+Alt-up
+/// bounces between two windows forever (each swipe is a complete commit).
+/// The macOS gesture means "keep going one step in this direction", which on
+/// Windows maps to HOLDING Alt and tapping Tab once per swipe.
+///
+/// The controller (`drive_gesture_swipe`) owns advancing this state; the
+/// state itself is passive — held keys as ordered `GestureKeyStep`s so a
+/// forced commit replays exact key-UPs in reverse-press order, including a
+/// Shift that was injected mid-chord to reverse direction.
+#[derive(Debug, Clone, Default)]
+pub struct StickyChordState {
+    /// Currently held modifier/tap steps, in press order. Empty = idle.
+    /// A hold is [Alt down] or [Shift down, Alt down]; a mid-chord direction
+    /// flip appends Shift down to the HELD set so the reverse overlay works.
+    pub held: Vec<GestureKeyStep>,
+    /// Wall-clock (controller clock) of the last chord-advancing swipe.
+    pub last_swipe_ms: u64,
+}
+
+impl StickyChordState {
+    pub fn is_active(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// Key-UP steps that commit the chord, in reverse press order. Clears
+    /// the state — call once per commit.
+    pub fn take_commit(&mut self) -> Vec<GestureKeyStep> {
+        let ups = self
+            .held
+            .drain(..)
+            .rev()
+            .map(|s| GestureKeyStep {
+                code: s.code,
+                down: false,
+            })
+            .collect();
+        ups
+    }
+}
+
+/// Resolve the events a swipe should inject given the current sticky-chord
+/// state, for actions that support the sticky shape (currently the Windows
+/// AppSwitchNext / AppSwitchPrev pair).
+///
+/// Returns `(steps, advanced)`:
+/// - `advanced == false` means the action does not participate in the chord;
+///   `steps` is the plain per-swipe sequence (a non-app-switch action, or
+///   any action on a non-Windows target — the caller decides via the action
+///   and platform) and the chord MUST be committed first by the caller if
+///   it was active (an interrupting gesture releases the held modifier).
+/// - `advanced == true` means the chord consumed this swipe: `steps` holds
+///   only the incremental events (first swipe: modifier(s) down + Tab tap;
+///   later swipes: optional Shift adjust + Tab tap), and `state` was updated
+///   (`last_swipe_ms`, held set grown for a direction flip).
+///
+/// `now_ms` stamps `last_swipe_ms` so the caller's silence-commit timer can
+/// measure against it.
+pub fn sticky_chord_steps(
+    state: &mut StickyChordState,
+    action: GestureAction,
+    now_ms: u64,
+) -> (Vec<GestureKeyStep>, bool) {
+    match action {
+        GestureAction::AppSwitchNext | GestureAction::AppSwitchPrev => {}
+        _ => return (Vec::new(), false),
+    }
+    let shift = matches!(action, GestureAction::AppSwitchPrev);
+    let mut steps = Vec::new();
+    if state.is_active() {
+        // Extending swipe. When the direction flips, Shift must be HELD for
+        // the rest of the chord (Windows overlay: Shift held while Tabbing
+        // walks backwards; a per-swipe Shift down/up would flip the next
+        // tap forward again).
+        let shift_held = state.held.iter().any(|s| s.code == vk::LSHIFT);
+        if shift && !shift_held {
+            state.held.push(GestureKeyStep {
+                code: vk::LSHIFT,
+                down: true,
+            });
+            steps.push(GestureKeyStep {
+                code: vk::LSHIFT,
+                down: true,
+            });
+        }
+        steps.push(GestureKeyStep {
+            code: vk::TAB,
+            down: true,
+        });
+        steps.push(GestureKeyStep {
+            code: vk::TAB,
+            down: false,
+        });
+    } else {
+        // First swipe of a chord: press modifiers and HOLD them. Tab's tap
+        // selects; the overlay commits only when the modifiers release.
+        state.held.push(GestureKeyStep {
+            code: vk::LMENU,
+            down: true,
+        });
+        steps.push(GestureKeyStep {
+            code: vk::LMENU,
+            down: true,
+        });
+        if shift {
+            state.held.push(GestureKeyStep {
+                code: vk::LSHIFT,
+                down: true,
+            });
+            steps.push(GestureKeyStep {
+                code: vk::LSHIFT,
+                down: true,
+            });
+        }
+        steps.push(GestureKeyStep {
+            code: vk::TAB,
+            down: true,
+        });
+        steps.push(GestureKeyStep {
+            code: vk::TAB,
+            down: false,
+        });
+    }
+    state.last_swipe_ms = now_ms;
+    (steps, true)
+}
+
 /// The user-facing gesture→intent table. Defaults mirror macOS's own
 /// trackpad semantics so the out-of-box behavior matches what the fingers
 /// "mean" on a Mac — the swipe moves content, so `left` exposes what is to
@@ -593,6 +730,114 @@ mod tests {
         assert_eq!(m, back);
         // serde renames are the storage format — snake_case strings.
         assert!(s.contains("app_switch_next"));
+    }
+
+    // ---- sticky chord (macOS continuity app switch on Windows) ----
+
+    fn chord(code: u16, down: bool) -> GestureKeyStep {
+        GestureKeyStep { code, down }
+    }
+
+    /// First swipe of a chord: Alt down HELD, Tab tap; state active.
+    #[test]
+    fn sticky_chord_first_swipe_holds_alt() {
+        let mut state = StickyChordState::default();
+        let (steps, advanced) = sticky_chord_steps(&mut state, GestureAction::AppSwitchNext, 1_000);
+        assert!(advanced);
+        assert_eq!(
+            steps,
+            vec![
+                chord(vk::LMENU, true),
+                chord(vk::TAB, true),
+                chord(vk::TAB, false)
+            ]
+        );
+        assert!(state.is_active());
+        assert_eq!(state.last_swipe_ms, 1_000);
+    }
+
+    /// Extending swipe: ONLY another Tab tap — the held Alt must not be
+    /// re-pressed or released. This is the whole point: consecutive swipes
+    /// walk the cycle instead of committing on every Alt release.
+    #[test]
+    fn sticky_chord_extending_swipe_is_pure_tab() {
+        let mut state = StickyChordState::default();
+        let _ = sticky_chord_steps(&mut state, GestureAction::AppSwitchNext, 1_000);
+        let (steps, advanced) = sticky_chord_steps(&mut state, GestureAction::AppSwitchNext, 1_400);
+        assert!(advanced);
+        assert_eq!(steps, vec![chord(vk::TAB, true), chord(vk::TAB, false)]);
+        // Still exactly Alt held — no duplicate presses, no Shift yet.
+        assert_eq!(state.held, vec![chord(vk::LMENU, true)]);
+    }
+
+    /// Direction flip mid-chord: Shift goes down and STAYS down (held) so
+    /// every subsequent Tab walks backwards, and the commit releases
+    /// Shift-then-Alt in reverse press order.
+    #[test]
+    fn sticky_chord_direction_flip_holds_shift_and_releases_in_reverse() {
+        let mut state = StickyChordState::default();
+        let _ = sticky_chord_steps(&mut state, GestureAction::AppSwitchNext, 1_000);
+        let (steps, advanced) = sticky_chord_steps(&mut state, GestureAction::AppSwitchPrev, 1_400);
+        assert!(advanced);
+        // Shift down + Tab tap; Alt must NOT appear again.
+        assert_eq!(
+            steps,
+            vec![
+                chord(vk::LSHIFT, true),
+                chord(vk::TAB, true),
+                chord(vk::TAB, false)
+            ]
+        );
+        assert_eq!(
+            state.held,
+            vec![chord(vk::LMENU, true), chord(vk::LSHIFT, true)]
+        );
+        let ups = state.take_commit();
+        assert_eq!(ups, vec![chord(vk::LSHIFT, false), chord(vk::LMENU, false)]);
+        assert!(!state.is_active());
+    }
+
+    /// First swipe in the PREV direction: Shift+Alt both held from the start.
+    #[test]
+    fn sticky_chord_prev_first_swipe_holds_shift_and_alt() {
+        let mut state = StickyChordState::default();
+        let (steps, advanced) = sticky_chord_steps(&mut state, GestureAction::AppSwitchPrev, 1_000);
+        assert!(advanced);
+        assert_eq!(
+            steps,
+            vec![
+                chord(vk::LMENU, true),
+                chord(vk::LSHIFT, true),
+                chord(vk::TAB, true),
+                chord(vk::TAB, false)
+            ]
+        );
+        assert_eq!(
+            state.held,
+            vec![chord(vk::LMENU, true), chord(vk::LSHIFT, true)]
+        );
+    }
+
+    /// Non-app-switch actions do not participate: empty steps, advanced
+    /// false, state untouched — the caller commits the chord first.
+    #[test]
+    fn sticky_chord_non_switch_actions_do_not_participate() {
+        let mut state = StickyChordState::default();
+        let _ = sticky_chord_steps(&mut state, GestureAction::AppSwitchNext, 1_000);
+        for action in [
+            GestureAction::OverviewToggle,
+            GestureAction::DesktopLeft,
+            GestureAction::ShowDesktop,
+            GestureAction::None,
+        ] {
+            let (steps, advanced) = sticky_chord_steps(&mut state, action, 2_000);
+            assert!(!advanced, "{action:?} must not join the chord");
+            assert!(steps.is_empty());
+        }
+        // Untouched: still holding Alt from the first swipe, last_swipe_ms
+        // unchanged.
+        assert_eq!(state.held, vec![chord(vk::LMENU, true)]);
+        assert_eq!(state.last_swipe_ms, 1_000);
     }
 
     /// §192: the wire platform string is `std::env::consts::OS` ("macos"),

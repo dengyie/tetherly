@@ -1348,6 +1348,41 @@ impl Node {
     /// Query status of active virtual input tunnel session and governance policy.
     pub fn input_tunnel_status(&self) -> InputTunnelStatusReport {
         let now_ms = self.shared.clock.unix_ms();
+        // Sticky app-switch chord silence commit (1s watcher piggyback): a
+        // held Alt older than the silence window gets its key-UP injected so
+        // the Windows overlay commits even if no further swipe or real input
+        // ever arrives (user swiped twice and just rested their hand).
+        {
+            let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
+            if chord.is_active()
+                && now_ms.saturating_sub(chord.last_swipe_ms)
+                    >= tetherly_core::gesture_map::STICKY_CHORD_SILENCE_MS
+            {
+                let ups = chord.take_commit();
+                let events = {
+                    let mut server = self.shared.input_engine.lock().expect("engine");
+                    let base = server.next_seq();
+                    let evs: Vec<InputEvent> = ups
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| InputEvent::key(base + i as u64, s.code, s.down, 0))
+                        .collect();
+                    if evs.is_empty() {
+                        server.note_seq(base);
+                    } else {
+                        server.note_seq(evs.last().unwrap().seq);
+                    }
+                    evs
+                };
+                if !events.is_empty() {
+                    if let Err(e) = self.send_input_events(events, "gesture_chord_commit") {
+                        tracing::warn!(error = %e, "sticky chord silence commit failed to send");
+                    } else {
+                        tracing::debug!("sticky app-switch chord committed on silence");
+                    }
+                }
+            }
+        }
         let policy = self.input_policy();
         let mut guard = self
             .shared
@@ -1717,6 +1752,18 @@ impl Node {
         let now_ms = self.shared.clock.unix_ms();
         let sanitized_reason = InputTunnelValidator::sanitize_reason(reason);
         *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        // Leaving the remote seat with a sticky app-switch chord held: drop
+        // the chord WITHOUT injecting the Alt-up (the outbound channel is
+        // dying with this grant; a key-up racing teardown adds nothing) —
+        // clearing the state is what matters, so the NEXT stint never
+        // inherits a phantom held modifier.
+        {
+            let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
+            if chord.is_active() {
+                let _ = chord.take_commit();
+                tracing::debug!(reason, "sticky app-switch chord dropped on seat release");
+            }
+        }
         // The peer screen belongs to this grant; the next peer may differ.
         self.shared
             .input_engine
@@ -3241,6 +3288,27 @@ impl Node {
             if server.seat() != CursorSeat::Remote {
                 return Ok(());
             }
+            // Real keystroke while the sticky app-switch chord holds Alt:
+            // commit the chord first so the overlay's Alt-up lands BEFORE
+            // the keystroke — the user typing or pressing Esc must never
+            // find the modifier still injected (a keystroke into the Alt+Tab
+            // overlay does something entirely different from typing).
+            let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
+            let mut chord_ups: Vec<(u64, u16)> = Vec::new();
+            if chord.is_active() {
+                let ups = chord.take_commit();
+                let commit_base = server.next_seq();
+                chord_ups = ups
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (commit_base + i as u64, s.code))
+                    .collect();
+                if let Some((last_seq, _)) = chord_ups.last() {
+                    server.note_seq(*last_seq);
+                } else {
+                    server.note_seq(commit_base);
+                }
+            }
             let peer_platform = self.input_peer_platform();
             // Hot path: derive the profile from just the keymap name instead of
             // deep-cloning the whole policy struct per keystroke.
@@ -3253,7 +3321,12 @@ impl Node {
             let remapped_code = keymap.remap_vk(code);
             let seq = server.next_seq();
             server.note_seq(seq);
-            vec![InputEvent::key(seq, remapped_code, down, 0)]
+            let mut events: Vec<InputEvent> = chord_ups
+                .into_iter()
+                .map(|(s, c)| InputEvent::key(s, c, false, 0))
+                .collect();
+            events.push(InputEvent::key(seq, remapped_code, down, 0));
+            events
         };
         self.send_input_events(events, "drive_key")
     }
@@ -3287,68 +3360,135 @@ impl Node {
         let target_platform = self.input_peer_platform().unwrap_or_default();
         let map = self.gesture_map();
 
-        let events = {
-            let mut server = self.shared.input_engine.lock().expect("engine");
-            // Seat Remote alone is not enough: the CONTROLLED side is also in
-            // the Remote seat. Suppress only the role where THIS node is the
-            // one being driven — an ADR-138 receiving session or an input
-            // tunnel with role=Target. Everything else in the Remote seat
-            // (roaming tunnel, bare input channel, ADR-138 controlling) is a
-            // controller by construction, because the dock-swipe tap only
-            // fires while this node's capture hooks are armed for remote
-            // roaming. Slot presence (tunnel/remote_session) is NOT the
-            // source of truth here: a bare-channel controller (edge-crossing
-            // roam without a tunnel session) owns no slot but still controls.
-            if server.seat() != CursorSeat::Remote || session_receiving || tunnel_target {
-                let now = self.shared.clock.unix_ms();
-                let last = self
-                    .shared
-                    .gesture_swipe_last_ignored_ms
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if now.saturating_sub(last) > GESTURE_LOG_THROTTLE_MS {
-                    self.shared
+        let events =
+            {
+                let mut server = self.shared.input_engine.lock().expect("engine");
+                // Seat Remote alone is not enough: the CONTROLLED side is also in
+                // the Remote seat. Suppress only the role where THIS node is the
+                // one being driven — an ADR-138 receiving session or an input
+                // tunnel with role=Target. Everything else in the Remote seat
+                // (roaming tunnel, bare input channel, ADR-138 controlling) is a
+                // controller by construction, because the dock-swipe tap only
+                // fires while this node's capture hooks are armed for remote
+                // roaming. Slot presence (tunnel/remote_session) is NOT the
+                // source of truth here: a bare-channel controller (edge-crossing
+                // roam without a tunnel session) owns no slot but still controls.
+                if server.seat() != CursorSeat::Remote || session_receiving || tunnel_target {
+                    let now = self.shared.clock.unix_ms();
+                    let last = self
+                        .shared
                         .gesture_swipe_last_ignored_ms
-                        .store(now, std::sync::atomic::Ordering::Relaxed);
-                    tracing::info!(
-                        direction,
-                        gesture = gesture.as_str(),
-                        seat = ?server.seat(),
-                        tunnel_role = ?tunnel_role,
-                        session_receiving,
-                        "four-finger swipe ignored: this node is the controlled side"
-                    );
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if now.saturating_sub(last) > GESTURE_LOG_THROTTLE_MS {
+                        self.shared
+                            .gesture_swipe_last_ignored_ms
+                            .store(now, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            direction,
+                            gesture = gesture.as_str(),
+                            seat = ?server.seat(),
+                            tunnel_role = ?tunnel_role,
+                            session_receiving,
+                            "four-finger swipe ignored: this node is the controlled side"
+                        );
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            // Resolve through the gesture map: gesture → intent → raw VK
-            // sequence for the target platform. Sequences are deliberately
-            // OUTSIDE the keymap (mac_to_windows remaps Meta→Ctrl, which
-            // would turn Win+Tab into a browser tab switch). Empty result =
-            // the gesture is mapped to `none`; that is a configured no-op,
-            // not an error.
-            let action = map.action_for(gesture);
-            let steps = map.sequence_for(gesture, &target_platform);
-            let base = server.next_seq();
-            let events: Vec<InputEvent> = steps
-                .iter()
-                .enumerate()
-                .map(|(i, s)| InputEvent::key(base + i as u64, s.code, s.down, 0))
-                .collect();
-            let len = events.len();
-            if len > 0 {
-                server.note_seq(base + len as u64 - 1);
-            } else {
-                server.note_seq(base);
-            }
-            tracing::info!(
-                gesture = gesture.as_str(),
-                action = action.as_str(),
-                target_platform = %target_platform,
-                events = len,
-                "four-finger swipe resolved via gesture map"
-            );
-            events
-        };
+                // Resolve through the gesture map: gesture → intent → raw VK
+                // sequence for the target platform. Sequences are deliberately
+                // OUTSIDE the keymap (mac_to_windows remaps Meta→Ctrl, which
+                // would turn Win+Tab into a browser tab switch). Empty result =
+                // the gesture is mapped to `none`; that is a configured no-op,
+                // not an error.
+                let action = map.action_for(gesture);
+                let target_is_windows = !target_platform.to_ascii_lowercase().contains("mac")
+                    && !target_platform.to_ascii_lowercase().contains("darwin")
+                    && !target_platform.to_ascii_lowercase().contains("ios");
+                let now_ms = self.shared.clock.unix_ms();
+                // Sticky app-switch chord (macOS continuity semantics on a
+                // Windows target): hold Alt, tap Tab per swipe, commit on
+                // silence. Per-swipe full Alt+Tab sequences commit on EVERY
+                // release (Alt-up is the Windows commit key), so consecutive
+                // swipes bounce between two windows instead of walking the
+                // cycle — production 2026-11-22. The chord lives only on the
+                // Windows app-switch pair; every other action (and every other
+                // target platform) falls back to the plain per-swipe sequence,
+                // and any such swipe first COMMITS a held chord so the
+                // interrupting gesture starts from a clean modifier state.
+                let mut events: Vec<InputEvent> = Vec::new();
+                let mut chord_advanced = false;
+                if target_is_windows
+                    && matches!(
+                        action,
+                        tetherly_core::gesture_map::GestureAction::AppSwitchNext
+                            | tetherly_core::gesture_map::GestureAction::AppSwitchPrev
+                    )
+                {
+                    let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
+                    let expired = chord.is_active()
+                        && now_ms.saturating_sub(chord.last_swipe_ms)
+                            >= tetherly_core::gesture_map::STICKY_CHORD_SILENCE_MS;
+                    if expired {
+                        // Silence window elapsed: commit first, then this swipe
+                        // starts a fresh chord.
+                        let ups = chord.take_commit();
+                        let commit_base = server.next_seq();
+                        events.extend(ups.iter().enumerate().map(|(i, s)| {
+                            InputEvent::key(commit_base + i as u64, s.code, s.down, 0)
+                        }));
+                    }
+                    let (steps, advanced) =
+                        tetherly_core::gesture_map::sticky_chord_steps(&mut chord, action, now_ms);
+                    chord_advanced = advanced;
+                    let step_base = server.next_seq();
+                    events.extend(
+                        steps
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| InputEvent::key(step_base + i as u64, s.code, s.down, 0)),
+                    );
+                    if events.is_empty() {
+                        server.note_seq(step_base);
+                    } else {
+                        server.note_seq(events.last().unwrap().seq);
+                    }
+                } else {
+                    // Non-chord path: a held chord must not survive an
+                    // interrupting gesture (e.g. a mapped desktop switch while
+                    // the overlay is up) — commit it, then run the plain
+                    // sequence.
+                    let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
+                    if chord.is_active() {
+                        let ups = chord.take_commit();
+                        let commit_base = server.next_seq();
+                        events.extend(ups.iter().enumerate().map(|(i, s)| {
+                            InputEvent::key(commit_base + i as u64, s.code, s.down, 0)
+                        }));
+                    }
+                    let steps = map.sequence_for(gesture, &target_platform);
+                    let base = server.next_seq();
+                    events.extend(
+                        steps
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| InputEvent::key(base + i as u64, s.code, s.down, 0)),
+                    );
+                    if events.is_empty() {
+                        server.note_seq(base);
+                    } else {
+                        server.note_seq(events.last().unwrap().seq);
+                    }
+                }
+                tracing::info!(
+                    gesture = gesture.as_str(),
+                    action = action.as_str(),
+                    target_platform = %target_platform,
+                    events = events.len(),
+                    chord_sticky = chord_advanced,
+                    "four-finger swipe resolved via gesture map"
+                );
+                events
+            };
         let len = events.len();
         if len == 0 {
             return Ok(());
@@ -4046,11 +4186,35 @@ impl Node {
             if server.seat() != CursorSeat::Remote {
                 return Ok(());
             }
+            // A real click while the sticky app-switch chord holds Alt:
+            // commit first (Alt-up before the click), or the click lands on
+            // the Alt+Tab overlay instead of the target the user sees.
+            let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
+            let mut chord_ups: Vec<(u64, u16)> = Vec::new();
+            if chord.is_active() {
+                let ups = chord.take_commit();
+                let commit_base = server.next_seq();
+                chord_ups = ups
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (commit_base + i as u64, s.code))
+                    .collect();
+                if let Some((last_seq, _)) = chord_ups.last() {
+                    server.note_seq(*last_seq);
+                } else {
+                    server.note_seq(commit_base);
+                }
+            }
             self.note_reverse_physical_activity();
             server.note_button(mask, down);
             let seq = server.next_seq();
             server.note_seq(seq);
-            vec![InputEvent::button(seq, mask, down)]
+            let mut events: Vec<InputEvent> = chord_ups
+                .into_iter()
+                .map(|(s, c)| InputEvent::key(s, c, false, 0))
+                .collect();
+            events.push(InputEvent::button(seq, mask, down));
+            events
         };
         self.shared.input_tx_buttons.fetch_add(1, Ordering::SeqCst);
         self.trace_input(
@@ -6521,21 +6685,11 @@ mod tests {
         node.drive_gesture_swipe(1)
             .expect("controller swipe must forward");
 
-        // direction>0 = Shift+Alt+Tab: Shift down is the first event.
-        let key_down = rx.recv().await.expect("Shift down queued");
-        let ev = InputEvent::from_frame(&key_down).expect("frame is an input event");
-        assert!(
-            matches!(
-                ev.kind,
-                InputKind::Key {
-                    code: 0xA0,
-                    down: true,
-                    ..
-                }
-            ),
-            "first event of a forwarded right-swipe must be Shift down, got {:?}",
-            ev.kind
-        );
+        // direction>0 = AppSwitchPrev chord: Alt down first (HELD — no
+        // Alt-up in the whole burst), Shift down, then the Tab tap. The old
+        // per-swipe Shift+Alt+Tab+ups shape committed on every Alt release
+        // (Windows commit key), bouncing between two windows; the sticky
+        // chord is the macOS-continuity shape.
         let alt_down = rx.recv().await.expect("Alt down queued");
         let ev = InputEvent::from_frame(&alt_down).expect("frame is an input event");
         assert!(
@@ -6547,9 +6701,51 @@ mod tests {
                     ..
                 }
             ),
-            "second event must be Alt down, got {:?}",
+            "first event of a forwarded right-swipe must be Alt down (chord hold), got {:?}",
             ev.kind
         );
+        let shift_down = rx.recv().await.expect("Shift down queued");
+        let ev = InputEvent::from_frame(&shift_down).expect("frame is an input event");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA0,
+                    down: true,
+                    ..
+                }
+            ),
+            "second event must be Shift down, got {:?}",
+            ev.kind
+        );
+        // The burst ends with Tab up: the modifier downs must never be
+        // followed by their ups within one swipe.
+        let mut saw_tab_up = false;
+        while let Ok(frame) = rx.try_recv() {
+            let ev = InputEvent::from_frame(&frame).expect("frame is an input event");
+            if matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x09,
+                    down: false,
+                    ..
+                }
+            ) {
+                saw_tab_up = true;
+            }
+            assert!(
+                !matches!(
+                    ev.kind,
+                    InputKind::Key {
+                        code: 0xA4,
+                        down: false,
+                        ..
+                    }
+                ),
+                "chord swipe must not release Alt (that commits the switch)"
+            );
+        }
+        assert!(saw_tab_up, "the Tab tap must complete within the swipe");
     }
 
     // Vertical swipe (direction 0) forwards Win+Tab — Task View, the Mission
@@ -6732,6 +6928,260 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "receiving-session swipe must not queue any injected key"
+        );
+    }
+
+    // Sticky app-switch chord (macOS continuity semantics on a Windows
+    // target): the first swipe holds Alt with a Tab tap, an extending swipe
+    // injects ONLY a Tab tap (no Alt re-press/release — the Windows commit
+    // key is Alt-up, so per-swipe full sequences bounce between two windows),
+    // and a direction flip holds Shift for the rest of the chord.
+    #[tokio::test]
+    async fn test_gesture_sticky_chord_extends_with_pure_tab() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-sticky");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-speer");
+        let peer_id = other.identity().device_id().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(peer_id);
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+
+        // First swipe (right): Alt down + Tab tap (the default map sends
+        // AppSwitchNext on left; direction>0 = right = AppSwitchPrev = Shift+
+        // Alt chord). Use direction -1 twice: AppSwitchNext chord.
+        node.drive_gesture_swipe(-1).expect("first swipe forwards");
+        let alt_down = rx.recv().await.expect("Alt down queued");
+        let ev = InputEvent::from_frame(&alt_down).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA4,
+                    down: true,
+                    ..
+                }
+            ),
+            "chord starts with Alt down, got {:?}",
+            ev.kind
+        );
+        let tab_down = rx.recv().await.expect("Tab down queued");
+        let ev = InputEvent::from_frame(&tab_down).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x09,
+                    down: true,
+                    ..
+                }
+            ),
+            "then Tab down, got {:?}",
+            ev.kind
+        );
+        let tab_up = rx.recv().await.expect("Tab up queued");
+        let ev = InputEvent::from_frame(&tab_up).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x09,
+                    down: false,
+                    ..
+                }
+            ),
+            "then Tab up, got {:?}",
+            ev.kind
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "NO Alt-up after the first swipe: the chord must hold (Windows Alt-up commits the switch, which would bounce back)"
+        );
+
+        // Second swipe, same direction, within the silence window: ONLY a
+        // Tab tap — the held Alt must be untouched.
+        node.drive_gesture_swipe(-1).expect("extending swipe");
+        let tab2_down = rx.recv().await.expect("second Tab down");
+        let ev = InputEvent::from_frame(&tab2_down).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x09,
+                    down: true,
+                    ..
+                }
+            ),
+            "extending swipe must start with Tab down (no Alt re-press), got {:?}",
+            ev.kind
+        );
+        let tab2_up = rx.recv().await.expect("second Tab up");
+        let ev = InputEvent::from_frame(&tab2_up).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x09,
+                    down: false,
+                    ..
+                }
+            ),
+            "extending swipe Tab up, got {:?}",
+            ev.kind
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "extending swipe must not touch the held Alt"
+        );
+
+        // Reverse direction: Shift goes down and STAYS (held) — the third
+        // event after the flip must still walk backwards.
+        node.drive_gesture_swipe(1).expect("direction flip");
+        let shift_down = rx.recv().await.expect("Shift down");
+        let ev = InputEvent::from_frame(&shift_down).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA0,
+                    down: true,
+                    ..
+                }
+            ),
+            "flip must hold Shift, got {:?}",
+            ev.kind
+        );
+        let tab3_down = rx.recv().await.expect("third Tab down");
+        let ev = InputEvent::from_frame(&tab3_down).expect("frame");
+        assert!(matches!(
+            ev.kind,
+            InputKind::Key {
+                code: 0x09,
+                down: true,
+                ..
+            }
+        ));
+    }
+
+    // Silence commit: a chord older than the silence window is committed by
+    // the watcher's input_tunnel_status tick — key-UPs injected so the
+    // Windows overlay closes even when no further input arrives.
+    #[tokio::test]
+    async fn test_gesture_sticky_chord_commits_on_silence() {
+        let (node, _dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "gesture-commit",
+                1_000,
+            );
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-cpeer");
+        let peer_id = other.identity().device_id().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(peer_id);
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+        }
+        node.drive_gesture_swipe(-1).expect("first swipe");
+        // Drain the chord-start events (Alt down, Tab down, Tab up).
+        while let Ok(_frame) = rx.try_recv() {}
+
+        // Advance the wall clock past the silence window and tick the
+        // watcher: the held Alt must get its key-UP.
+        clock.set(1_000 + 2_000);
+        let _status = node.input_tunnel_status();
+        let alt_up = rx.recv().await.expect("Alt up on silence commit");
+        let ev = InputEvent::from_frame(&alt_up).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA4,
+                    down: false,
+                    ..
+                }
+            ),
+            "silence commit must release Alt, got {:?}",
+            ev.kind
+        );
+        assert!(rx.try_recv().is_err(), "commit is exactly one Alt-up");
+
+        // A swipe after the commit starts a FRESH chord (Alt down again).
+        node.drive_gesture_swipe(-1).expect("fresh chord");
+        let alt_down = rx.recv().await.expect("fresh Alt down");
+        let ev = InputEvent::from_frame(&alt_down).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA4,
+                    down: true,
+                    ..
+                }
+            ),
+            "post-commit swipe must start a fresh chord, got {:?}",
+            ev.kind
+        );
+    }
+
+    // A real keystroke while the chord holds Alt commits the chord first:
+    // the Alt-up lands BEFORE the keystroke (typing into the Alt+Tab overlay
+    // would do something entirely different from typing).
+    #[tokio::test]
+    async fn test_gesture_sticky_chord_commits_before_real_key() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-key");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-kpeer");
+        let peer_id = other.identity().device_id().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(peer_id);
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+        }
+        node.drive_gesture_swipe(-1).expect("first swipe");
+        while let Ok(_frame) = rx.try_recv() {}
+
+        node.drive_input_key(0x1B, true).expect("real key");
+        let alt_up = rx.recv().await.expect("Alt up before the key");
+        let ev = InputEvent::from_frame(&alt_up).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA4,
+                    down: false,
+                    ..
+                }
+            ),
+            "real key must be preceded by the chord's Alt-up, got {:?}",
+            ev.kind
+        );
+        let esc_down = rx.recv().await.expect("Esc down after commit");
+        let ev = InputEvent::from_frame(&esc_down).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x1B,
+                    down: true,
+                    ..
+                }
+            ),
+            "the real keystroke follows the commit, got {:?}",
+            ev.kind
         );
     }
 
