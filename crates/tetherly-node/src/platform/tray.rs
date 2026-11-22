@@ -976,9 +976,8 @@ mod windows_tray {
         // SAFETY: the section was just allocated for `side*side` 32bpp pixels
         // and is owned by this thread until `DeleteObject` below.
         let dst = unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, side * side * 4) };
-        let (dst, _) = dst.as_chunks_mut::<4>();
-        let (src, _) = rgba.as_chunks::<4>();
-        for (d, s) in dst.iter_mut().zip(src) {
+        // `chunks_exact` rather than `as_chunks`: the workspace MSRV is 1.82.
+        for (d, s) in dst.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
             let a = s[3] as u32;
             d[0] = ((s[2] as u32 * a + 127) / 255) as u8;
             d[1] = ((s[1] as u32 * a + 127) / 255) as u8;
