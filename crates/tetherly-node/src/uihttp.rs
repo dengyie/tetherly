@@ -1970,4 +1970,74 @@ mod tests {
             );
         }
     }
+
+    /// `PATCH /api/v1/input/gesture` contract over the real HTTP stack:
+    /// valid patch applies and round-trips through GET; unknown enum values
+    /// are 400 BadRequest (not 500); unknown fields are rejected by
+    /// `deny_unknown_fields`.
+    #[tokio::test]
+    async fn gesture_route_patch_contract() {
+        let (node, _dir) = temp_test_node("ui_gesture_route");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let auth = format!(
+            "Authorization: Bearer {}",
+            crate::apitoken::read(&_dir).expect("api.token minted")
+        );
+
+        // Valid sparse patch → 200, and GET reflects it.
+        let (code, body) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/input/gesture",
+            Some(&auth),
+            br#"{"app_switch_mode":"sticky_chord"}"#,
+        )
+        .await;
+        assert_eq!(code, 200, "valid patch: {code}");
+        assert!(String::from_utf8_lossy(&body).contains("sticky_chord"));
+
+        let (code, body) =
+            raw_request(port, "GET", "/api/v1/input/gesture", Some(&auth), b"").await;
+        assert_eq!(code, 200);
+        assert!(String::from_utf8_lossy(&body).contains("sticky_chord"));
+
+        // Unknown enum value → caller validation error → 400.
+        let (code, _) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/input/gesture",
+            Some(&auth),
+            br#"{"app_switch_mode":"hold_alt"}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "unknown app_switch_mode must be 400, got {code}");
+
+        let (code, _) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/input/gesture",
+            Some(&auth),
+            br#"{"swipe4_left":"not_an_action"}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "unknown gesture action must be 400, got {code}");
+
+        // deny_unknown_fields → 400.
+        let (code, _) = raw_request(
+            port,
+            "PATCH",
+            "/api/v1/input/gesture",
+            Some(&auth),
+            br#"{"swipe5_left":"none"}"#,
+        )
+        .await;
+        assert_eq!(code, 400, "unknown field must be rejected, got {code}");
+
+        // The failed patches must not have touched the applied mode.
+        let (code, body) =
+            raw_request(port, "GET", "/api/v1/input/gesture", Some(&auth), b"").await;
+        assert_eq!(code, 200);
+        assert!(String::from_utf8_lossy(&body).contains("sticky_chord"));
+        node.shutdown();
+    }
 }

@@ -114,13 +114,6 @@ impl AppSwitchMode {
             Self::StickyChord => "sticky_chord",
         }
     }
-
-    pub fn describe(self) -> &'static str {
-        match self {
-            Self::PerSwipe => "each swipe switches once (Alt+Tab commit)",
-            Self::StickyChord => "hold Alt across swipes; commit on pause",
-        }
-    }
 }
 
 /// What the user wants to happen on the CONTROLLING target. Intents are
@@ -431,10 +424,12 @@ pub fn sticky_chord_steps(
     let shift = matches!(action, GestureAction::AppSwitchPrev);
     let mut steps = Vec::new();
     if state.is_active() {
-        // Extending swipe. When the direction flips, Shift must be HELD for
-        // the rest of the chord (Windows overlay: Shift held while Tabbing
-        // walks backwards; a per-swipe Shift down/up would flip the next
-        // tap forward again).
+        // Extending swipe. Direction is a TWO-WAY transfer: flipping to
+        // reverse adds Shift to the HELD set and keeps it (Windows overlay:
+        // Shift held while Tabbing walks backwards; a per-swipe Shift
+        // down/up would flip the next tap forward again), and flipping BACK
+        // to forward releases it — otherwise one accidental reverse swipe
+        // would pin the chord backwards until the next commit.
         let shift_held = state.held.iter().any(|s| s.code == vk::LSHIFT);
         if shift && !shift_held {
             state.held.push(GestureKeyStep {
@@ -444,6 +439,13 @@ pub fn sticky_chord_steps(
             steps.push(GestureKeyStep {
                 code: vk::LSHIFT,
                 down: true,
+            });
+        } else if !shift && shift_held {
+            // Release BEFORE the Tab tap so this tap already walks forward.
+            state.held.retain(|s| s.code != vk::LSHIFT);
+            steps.push(GestureKeyStep {
+                code: vk::LSHIFT,
+                down: false,
             });
         }
         steps.push(GestureKeyStep {
@@ -880,6 +882,35 @@ mod tests {
         let ups = state.take_commit();
         assert_eq!(ups, vec![chord(vk::LSHIFT, false), chord(vk::LMENU, false)]);
         assert!(!state.is_active());
+    }
+
+    /// Direction flip is TWO-WAY: after a reverse swipe, swiping forward
+    /// again must RELEASE Shift (before the Tab tap, so this tap already
+    /// walks forward), keep only Alt held, and the final commit is a bare
+    /// Alt-up.
+    #[test]
+    fn sticky_chord_flip_back_to_forward_releases_shift() {
+        let mut state = StickyChordState::default();
+        let _ = sticky_chord_steps(&mut state, GestureAction::AppSwitchNext, 1_000);
+        let _ = sticky_chord_steps(&mut state, GestureAction::AppSwitchPrev, 1_400);
+        assert_eq!(
+            state.held,
+            vec![chord(vk::LMENU, true), chord(vk::LSHIFT, true)]
+        );
+        let (steps, advanced) = sticky_chord_steps(&mut state, GestureAction::AppSwitchNext, 1_800);
+        assert!(advanced);
+        // Shift-up precedes the Tab tap; no duplicate Shift or Alt events.
+        assert_eq!(
+            steps,
+            vec![
+                chord(vk::LSHIFT, false),
+                chord(vk::TAB, true),
+                chord(vk::TAB, false)
+            ]
+        );
+        assert_eq!(state.held, vec![chord(vk::LMENU, true)]);
+        let ups = state.take_commit();
+        assert_eq!(ups, vec![chord(vk::LMENU, false)]);
     }
 
     /// First swipe in the PREV direction: Shift+Alt both held from the start.

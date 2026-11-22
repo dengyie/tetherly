@@ -2098,8 +2098,11 @@ pub fn gesture_map(node: &Node) -> GestureMapDto {
 pub fn set_gesture_map(node: &Node, patch: GestureMapPatch) -> Result<GestureMapDto, CoreError> {
     let parse_action =
         |name: &str| -> Result<tetherly_core::gesture_map::GestureAction, CoreError> {
+            // InvalidConfig (not Json — that maps to 500 Internal): a bad
+            // enum string is a caller validation error and must surface as
+            // 400 BadRequest.
             tetherly_core::gesture_map::GestureAction::parse(name).ok_or_else(|| {
-                CoreError::Json(format!(
+                CoreError::InvalidConfig(format!(
                     "unknown gesture action '{name}' (expected one of {})",
                     tetherly_core::gesture_map::GestureAction::ALL
                         .iter()
@@ -2111,7 +2114,7 @@ pub fn set_gesture_map(node: &Node, patch: GestureMapPatch) -> Result<GestureMap
         };
     let parse_mode = |name: &str| -> Result<tetherly_core::gesture_map::AppSwitchMode, CoreError> {
         tetherly_core::gesture_map::AppSwitchMode::parse(name).ok_or_else(|| {
-            CoreError::Json(format!(
+            CoreError::InvalidConfig(format!(
                 "unknown app_switch_mode '{name}' (expected per_swipe|sticky_chord)"
             ))
         })

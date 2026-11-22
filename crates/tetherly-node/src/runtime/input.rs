@@ -1352,35 +1352,46 @@ impl Node {
         // held Alt older than the silence window gets its key-UP injected so
         // the Windows overlay commits even if no further swipe or real input
         // ever arrives (user swiped twice and just rested their hand).
-        {
+        // Lock-order discipline: every other chord toucher (drive_input_key,
+        // drive_input_button, drive_gesture_swipe) holds `input_engine` and
+        // THEN locks the chord; holding the chord and nesting the engine
+        // here is the reverse order — an ABBA window freezing the hook
+        // thread. So the commit is strictly two-section: take the pending
+        // commit under the chord lock and RELEASE it, then build the key-up
+        // events under the engine lock. `take_commit` is one-shot, so any
+        // interleaving toucher between the sections sees an empty chord (no
+        // double commit, no lost commit).
+        let chord_pending = {
             let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
             if chord.is_active()
                 && now_ms.saturating_sub(chord.last_swipe_ms)
                     >= tetherly_core::gesture_map::STICKY_CHORD_SILENCE_MS
             {
-                let ups = chord.take_commit();
-                let events = {
-                    let mut server = self.shared.input_engine.lock().expect("engine");
-                    let base = server.next_seq();
-                    let evs: Vec<InputEvent> = ups
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| InputEvent::key(base + i as u64, s.code, s.down, 0))
-                        .collect();
-                    if evs.is_empty() {
-                        server.note_seq(base);
-                    } else {
-                        server.note_seq(evs.last().unwrap().seq);
-                    }
-                    evs
-                };
-                if !events.is_empty() {
-                    if let Err(e) = self.send_input_events(events, "gesture_chord_commit") {
-                        tracing::warn!(error = %e, "sticky chord silence commit failed to send");
-                    } else {
-                        tracing::debug!("sticky app-switch chord committed on silence");
-                    }
-                }
+                Some(chord.take_commit())
+            } else {
+                None
+            }
+        };
+        let chord_events = chord_pending.map(|ups| {
+            let mut server = self.shared.input_engine.lock().expect("engine");
+            let base = server.next_seq();
+            let evs: Vec<InputEvent> = ups
+                .iter()
+                .enumerate()
+                .map(|(i, s)| InputEvent::key(base + i as u64, s.code, s.down, 0))
+                .collect();
+            if evs.is_empty() {
+                server.note_seq(base);
+            } else {
+                server.note_seq(evs.last().unwrap().seq);
+            }
+            evs
+        });
+        if let Some(events) = chord_events.filter(|e| !e.is_empty()) {
+            if let Err(e) = self.send_input_events(events, "gesture_chord_commit") {
+                tracing::warn!(error = %e, "sticky chord silence commit failed to send");
+            } else {
+                tracing::debug!("sticky app-switch chord committed on silence");
             }
         }
         let policy = self.input_policy();
@@ -3518,22 +3529,44 @@ impl Node {
         self.shared.gesture_map.lock().expect("gesture_map").clone()
     }
 
-    /// Replace the gesture→intent table wholesale and persist it. In-memory
-    /// swap first, file second (same order as the policy setters: a failed
-    /// disk write leaves the old file for the next start; the runtime keeps
-    /// serving what was accepted). A held sticky chord from the previous
-    /// table is dropped — a mid-edit commit of a gesture the user may have
-    /// just silenced is worse than an uncommitted overlay (its Alt-up lands
-    /// via the silence timer only in chord mode; in per_swipe mode the chord
-    /// is inert, so dropping is the only correct cleanup).
+    /// Replace the gesture→intent table wholesale and persist it. Persist
+    /// FIRST, swap second (same order as `set_input_policy`): a failed disk
+    /// write rejects the whole PATCH and leaves memory and file consistent
+    /// on the old table. A held sticky chord from the previous table is
+    /// committed out (best-effort Alt-up while the outbound channel is
+    /// still alive — leaving the Windows overlay up over a mode flip is
+    /// worse than one late commit; if the channel is already gone the state
+    /// is still cleared, which is what matters).
     pub fn set_gesture_map(
         &self,
         map: tetherly_core::gesture_map::GestureMap,
     ) -> Result<(), CoreError> {
-        {
+        let held_ups = {
             let mut chord = self.shared.gesture_sticky_chord.lock().expect("chord");
             if chord.is_active() {
-                let _ = chord.take_commit();
+                Some(chord.take_commit())
+            } else {
+                None
+            }
+        };
+        if let Some(ups) = held_ups.filter(|u| !u.is_empty()) {
+            let events = {
+                let mut server = self.shared.input_engine.lock().expect("engine");
+                let base = server.next_seq();
+                let evs: Vec<InputEvent> = ups
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| InputEvent::key(base + i as u64, s.code, s.down, 0))
+                    .collect();
+                if evs.is_empty() {
+                    server.note_seq(base);
+                } else {
+                    server.note_seq(evs.last().unwrap().seq);
+                }
+                evs
+            };
+            if let Err(e) = self.send_input_events(events, "gesture_chord_mode_flip") {
+                tracing::debug!(error = %e, "chord commit on mode flip not delivered (channel gone)");
             }
         }
         crate::store::save_gesture_map(&self.shared.cfg.data_dir, &map)
@@ -7095,12 +7128,20 @@ mod tests {
             tetherly_core::gesture_map::AppSwitchMode::StickyChord
         );
 
-        // Switch back to per_swipe: the held chord is dropped (no Alt-up
-        // injected mid-switch — the remote keeps a held Alt only until its
-        // next interaction resolves it), and the next swipe is a full
-        // sequence again.
+        // Switch back to per_swipe: the held chord is COMMITTED out while
+        // the channel is still alive (best-effort Alt-up first), then the
+        // next swipe is a full per_swipe sequence again.
         node.set_gesture_map(tetherly_core::gesture_map::GestureMap::default())
             .expect("switch back to per_swipe");
+        let commit_up = rx.recv().await.expect("mode-flip commit Alt up");
+        assert!(matches!(
+            InputEvent::from_frame(&commit_up).unwrap().kind,
+            InputKind::Key {
+                code: 0xA4,
+                down: false,
+                ..
+            }
+        ));
         node.drive_gesture_swipe(-1).expect("per_swipe swipe");
         let alt_down2 = rx.recv().await.expect("second Alt down");
         assert!(matches!(
@@ -7387,6 +7428,59 @@ mod tests {
                 }
             ),
             "the real keystroke follows the commit, got {:?}",
+            ev.kind
+        );
+    }
+
+    // Symmetric to the real-key path: a real CLICK while the chord holds Alt
+    // must commit first (Alt-up before the button down), or the click lands
+    // on the Alt+Tab overlay instead of the target the user sees.
+    #[tokio::test]
+    async fn test_gesture_sticky_chord_commits_before_real_button() {
+        let (node, _dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-bcommit");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-bcpeer");
+        let peer_id = other.identity().device_id().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(peer_id);
+
+        node.set_gesture_map(tetherly_core::gesture_map::GestureMap {
+            app_switch_mode: tetherly_core::gesture_map::AppSwitchMode::StickyChord,
+            ..Default::default()
+        })
+        .expect("mode opt-in");
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+        }
+        node.drive_gesture_swipe(-1).expect("first swipe");
+        while let Ok(_frame) = rx.try_recv() {}
+
+        node.drive_input_button(tetherly_core::BTN_LEFT, true)
+            .expect("real click");
+        let alt_up = rx.recv().await.expect("Alt up before the click");
+        let ev = InputEvent::from_frame(&alt_up).expect("frame");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA4,
+                    down: false,
+                    ..
+                }
+            ),
+            "real click must be preceded by the chord's Alt-up, got {:?}",
+            ev.kind
+        );
+        let btn_down = rx.recv().await.expect("button down after commit");
+        let ev = InputEvent::from_frame(&btn_down).expect("frame");
+        assert!(
+            matches!(ev.kind, InputKind::Button { .. }),
+            "the real click follows the commit, got {:?}",
             ev.kind
         );
     }
