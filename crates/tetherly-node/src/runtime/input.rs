@@ -6745,12 +6745,11 @@ mod tests {
         assert!(node.active_tunnel_role().is_none());
         assert!(!node.remote_session_active());
 
-        node.drive_gesture_swipe(1)
-            .expect("controller swipe must forward");
-
-        // direction>0 = AppSwitchPrev in the DEFAULT per_swipe mode: the
+        // direction<0 = AppSwitchPrev in the DEFAULT per_swipe mode: the
         // complete Shift+Alt+Tab+ups sequence — one committed reverse switch
         // per swipe.
+        node.drive_gesture_swipe(-1)
+            .expect("controller swipe must forward");
         let shift_down = rx.recv().await.expect("Shift down queued");
         let ev = InputEvent::from_frame(&shift_down).expect("frame is an input event");
         assert!(
@@ -6762,7 +6761,7 @@ mod tests {
                     ..
                 }
             ),
-            "first event of a forwarded right-swipe must be Shift down, got {:?}",
+            "first event of a forwarded left-swipe must be Shift down, got {:?}",
             ev.kind
         );
         let alt_down = rx.recv().await.expect("Alt down queued");
@@ -7012,7 +7011,7 @@ mod tests {
         );
 
         // First swipe: Alt down … Alt up within the SAME burst.
-        node.drive_gesture_swipe(-1).expect("first swipe");
+        node.drive_gesture_swipe(1).expect("first swipe");
         let alt_down = rx.recv().await.expect("Alt down");
         assert!(matches!(
             InputEvent::from_frame(&alt_down).unwrap().kind,
@@ -7055,7 +7054,7 @@ mod tests {
 
         // Second swipe: another COMPLETE sequence (Alt down again), not a
         // bare Tab tap — the sticky chord is inert in this mode.
-        node.drive_gesture_swipe(-1).expect("second swipe");
+        node.drive_gesture_swipe(1).expect("second swipe");
         let alt_down2 = rx.recv().await.expect("second Alt down");
         assert!(matches!(
             InputEvent::from_frame(&alt_down2).unwrap().kind,
@@ -7093,7 +7092,7 @@ mod tests {
         .expect("switch to sticky");
 
         // First swipe: Alt down HELD (no Alt-up in the burst).
-        node.drive_gesture_swipe(-1).expect("chord first swipe");
+        node.drive_gesture_swipe(1).expect("chord first swipe");
         let alt_down = rx.recv().await.expect("Alt down");
         assert!(matches!(
             InputEvent::from_frame(&alt_down).unwrap().kind,
@@ -7142,7 +7141,7 @@ mod tests {
                 ..
             }
         ));
-        node.drive_gesture_swipe(-1).expect("per_swipe swipe");
+        node.drive_gesture_swipe(1).expect("per_swipe swipe");
         let alt_down2 = rx.recv().await.expect("second Alt down");
         assert!(matches!(
             InputEvent::from_frame(&alt_down2).unwrap().kind,
@@ -7185,9 +7184,8 @@ mod tests {
         }
 
         // First swipe (right): Alt down + Tab tap (the default map sends
-        // AppSwitchNext on left; direction>0 = right = AppSwitchPrev = Shift+
-        // Alt chord). Use direction -1 twice: AppSwitchNext chord.
-        node.drive_gesture_swipe(-1).expect("first swipe forwards");
+        // AppSwitchNext on right; direction>0 = right = AppSwitchNext chord).
+        node.drive_gesture_swipe(1).expect("first swipe forwards");
         let alt_down = rx.recv().await.expect("Alt down queued");
         let ev = InputEvent::from_frame(&alt_down).expect("frame");
         assert!(
@@ -7237,7 +7235,7 @@ mod tests {
 
         // Second swipe, same direction, within the silence window: ONLY a
         // Tab tap — the held Alt must be untouched.
-        node.drive_gesture_swipe(-1).expect("extending swipe");
+        node.drive_gesture_swipe(1).expect("extending swipe");
         let tab2_down = rx.recv().await.expect("second Tab down");
         let ev = InputEvent::from_frame(&tab2_down).expect("frame");
         assert!(
@@ -7273,7 +7271,7 @@ mod tests {
 
         // Reverse direction: Shift goes down and STAYS (held) — the third
         // event after the flip must still walk backwards.
-        node.drive_gesture_swipe(1).expect("direction flip");
+        node.drive_gesture_swipe(-1).expect("direction flip");
         let shift_down = rx.recv().await.expect("Shift down");
         let ev = InputEvent::from_frame(&shift_down).expect("frame");
         assert!(
@@ -7330,7 +7328,7 @@ mod tests {
             let mut engine = node.shared.input_engine.lock().unwrap();
             engine.local_move_delta(100, 50, 2, 0);
         }
-        node.drive_gesture_swipe(-1).expect("first swipe");
+        node.drive_gesture_swipe(1).expect("first swipe");
         // Drain the chord-start events (Alt down, Tab down, Tab up).
         while let Ok(_frame) = rx.try_recv() {}
 
@@ -7355,7 +7353,7 @@ mod tests {
         assert!(rx.try_recv().is_err(), "commit is exactly one Alt-up");
 
         // A swipe after the commit starts a FRESH chord (Alt down again).
-        node.drive_gesture_swipe(-1).expect("fresh chord");
+        node.drive_gesture_swipe(1).expect("fresh chord");
         let alt_down = rx.recv().await.expect("fresh Alt down");
         let ev = InputEvent::from_frame(&alt_down).expect("frame");
         assert!(
@@ -7398,7 +7396,7 @@ mod tests {
             let mut engine = node.shared.input_engine.lock().unwrap();
             engine.local_move_delta(100, 50, 2, 0);
         }
-        node.drive_gesture_swipe(-1).expect("first swipe");
+        node.drive_gesture_swipe(1).expect("first swipe");
         while let Ok(_frame) = rx.try_recv() {}
 
         node.drive_input_key(0x1B, true).expect("real key");
@@ -7457,7 +7455,7 @@ mod tests {
             let mut engine = node.shared.input_engine.lock().unwrap();
             engine.local_move_delta(100, 50, 2, 0);
         }
-        node.drive_gesture_swipe(-1).expect("first swipe");
+        node.drive_gesture_swipe(1).expect("first swipe");
         while let Ok(_frame) = rx.try_recv() {}
 
         node.drive_input_button(tetherly_core::BTN_LEFT, true)

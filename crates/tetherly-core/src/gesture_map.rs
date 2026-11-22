@@ -492,8 +492,8 @@ pub fn sticky_chord_steps(
 
 /// The user-facing gesture→intent table. Defaults mirror macOS's own
 /// trackpad semantics so the out-of-box behavior matches what the fingers
-/// "mean" on a Mac — the swipe moves content, so `left` exposes what is to
-/// the LEFT of the current window (the previous one), matching how the
+/// "mean" on a Mac — the swipe moves content, so `right` exposes what is to
+/// the RIGHT of the current window (the next one), matching how the
 /// Spaces swipe reads on the local machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GestureMap {
@@ -512,8 +512,8 @@ pub struct GestureMap {
 impl Default for GestureMap {
     fn default() -> Self {
         Self {
-            swipe4_left: GestureAction::AppSwitchNext,
-            swipe4_right: GestureAction::AppSwitchPrev,
+            swipe4_left: GestureAction::AppSwitchPrev,
+            swipe4_right: GestureAction::AppSwitchNext,
             swipe4_up: GestureAction::OverviewToggle,
             // macOS has no default "swipe down" meaning in this family;
             // leave it silenced rather than surprising.
@@ -566,11 +566,11 @@ mod tests {
         let m = GestureMap::default();
         assert_eq!(
             m.action_for(GestureId::Swipe4Left),
-            GestureAction::AppSwitchNext
+            GestureAction::AppSwitchPrev
         );
         assert_eq!(
             m.action_for(GestureId::Swipe4Right),
-            GestureAction::AppSwitchPrev
+            GestureAction::AppSwitchNext
         );
         assert_eq!(
             m.action_for(GestureId::Swipe4Up),
@@ -582,14 +582,15 @@ mod tests {
     #[test]
     fn win_sequences_match_shipped_behavior() {
         let m = GestureMap::default();
-        // Left swipe == Alt down, Tab tap, Alt up. v0.2.27 replaced the old
-        // Alt+Esc shape: its ESC tap reached the focused app as
-        // WM_SYSKEYDOWN (Alt+Esc is DefWindowProc-mediated, NOT a
-        // RegisterHotKey) and exited browser HTML5 fullscreen on arrival.
+        // Left swipe == AppSwitchPrev: Shift+Alt down, Tab tap, ups.
         assert_eq!(
             m.sequence_for(GestureId::Swipe4Left, "windows"),
             vec![
                 GestureKeyStep {
+                    code: 0xA0,
+                    down: true
+                },
+                GestureKeyStep {
                     code: 0xA4,
                     down: true
                 },
@@ -603,19 +604,22 @@ mod tests {
                 },
                 GestureKeyStep {
                     code: 0xA4,
+                    down: false
+                },
+                GestureKeyStep {
+                    code: 0xA0,
                     down: false
                 },
             ]
         );
-        // Right swipe == Shift+Alt down, Tab tap, ups.
+        // Right swipe == AppSwitchNext: Alt down, Tab tap, Alt up. v0.2.27
+        // replaced the old Alt+Esc shape: its ESC tap reached the focused
+        // app as WM_SYSKEYDOWN (Alt+Esc is DefWindowProc-mediated, NOT a
+        // RegisterHotKey) and exited browser HTML5 fullscreen on arrival.
         assert_eq!(
             m.sequence_for(GestureId::Swipe4Right, "windows"),
             vec![
                 GestureKeyStep {
-                    code: 0xA0,
-                    down: true
-                },
-                GestureKeyStep {
                     code: 0xA4,
                     down: true
                 },
@@ -629,10 +633,6 @@ mod tests {
                 },
                 GestureKeyStep {
                     code: 0xA4,
-                    down: false
-                },
-                GestureKeyStep {
-                    code: 0xA0,
                     down: false
                 },
             ]
@@ -728,7 +728,7 @@ mod tests {
         let m = GestureMap::default();
         // AppSwitchNext == Cmd+` : LWIN down, grave tap, LWIN up.
         assert_eq!(
-            m.sequence_for(GestureId::Swipe4Left, "macos"),
+            m.sequence_for(GestureId::Swipe4Right, "macos"),
             vec![
                 step(0x5B, true),
                 step(0xC0, true),
@@ -738,7 +738,7 @@ mod tests {
         );
         // AppSwitchPrev == Cmd+Shift+` : downs [Shift, Win], ups [Win, Shift].
         assert_eq!(
-            m.sequence_for(GestureId::Swipe4Right, "macos"),
+            m.sequence_for(GestureId::Swipe4Left, "macos"),
             vec![
                 step(0xA0, true),
                 step(0x5B, true),
@@ -790,7 +790,7 @@ mod tests {
     /// existing config.
     #[test]
     fn legacy_map_without_mode_defaults_to_per_swipe() {
-        let legacy = r#"{"swipe4_left":"app_switch_next","swipe4_right":"app_switch_prev","swipe4_up":"overview_toggle","swipe4_down":"none"}"#;
+        let legacy = r#"{"swipe4_left":"app_switch_prev","swipe4_right":"app_switch_next","swipe4_up":"overview_toggle","swipe4_down":"none"}"#;
         let m: GestureMap = serde_json::from_str(legacy).unwrap();
         assert_eq!(m.app_switch_mode, AppSwitchMode::PerSwipe);
         assert_eq!(m, GestureMap::default());
@@ -966,7 +966,7 @@ mod tests {
         let m = GestureMap::default();
         // Cmd+` shape (LWIN down, grave tap, LWIN up) — NOT Windows Alt+Tab.
         assert_eq!(
-            m.sequence_for(GestureId::Swipe4Left, "darwin"),
+            m.sequence_for(GestureId::Swipe4Right, "darwin"),
             vec![
                 step(0x5B, true),
                 step(0xC0, true),

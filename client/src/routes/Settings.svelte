@@ -113,7 +113,7 @@
     <div class="empty">等待手势配置…</div>
   {:else}
     <div class="row">
-      <div class="main"><div class="name">四指滑动连续切换</div><div class="sub">开启后一次滑动按住 Alt，连续滑动沿同方向循环切换窗口；关闭则每次滑动直接 Alt+Tab 切一次。仅 Windows 宿主生效。</div></div>
+      <div class="main"><div class="name">四指滑动连续切换</div><div class="sub">开启后一次滑动按住 Alt，连续滑动沿同方向循环切换窗口；关闭则每次滑动直接 Alt+Tab 切一次。默认右滑=下一个窗口、左滑=上一个窗口。仅 Windows 宿主生效。</div></div>
       <Switch checked={gestureMap.app_switch_mode === "sticky_chord"} label="四指滑动连续切换" onchange={(v) => patchGestureMode(v)} />
     </div>
   {/if}
