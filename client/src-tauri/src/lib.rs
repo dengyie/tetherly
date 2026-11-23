@@ -7,6 +7,7 @@
 //! owned by [`events::run`]. No daemon code is linked here — the shell
 //! discovers it by data-dir conventions ([`token`]).
 
+pub mod dragbadge;
 pub mod events;
 pub mod proxy;
 pub mod shelllog;
@@ -155,6 +156,10 @@ pub fn run() {
             let notice_seen = std::sync::Mutex::new(tray::NoticeSeen::new());
             handle.listen(events::EVENT_CHANNEL, move |ev| {
                 if let Ok(frame) = serde_json::from_str::<events::WireEvent>(ev.payload()) {
+                    if let Some(carry) = dragbadge::carry_from_frame(&frame.ty, &frame.data) {
+                        dragbadge::apply(&fwd, carry);
+                        return;
+                    }
                     // Desktop notifications (§6.2): seat takeover/return and
                     // unread activity. `was_remote` is the fold state BEFORE
                     // this frame so repeated remote frames stay silent.

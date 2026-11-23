@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; user-select: none; cursor: default; }
+  #b {
+    display: flex; align-items: center; gap: 8px; box-sizing: border-box;
+    height: 36px; max-width: 100vw; margin: 2px; padding: 0 12px 0 10px;
+    border-radius: 10px; background: rgba(24, 24, 28, 0.92); color: #f4f4f5;
+    font: 500 13px/1 -apple-system, "Segoe UI", system-ui, sans-serif;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35); width: fit-content;
+  }
+  #b svg { flex: none; }
+  #t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+<div id="b">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+  <span id="t"></span>
+</div>
+<script src="drag-badge.js"></script>
+</body>
+</html>

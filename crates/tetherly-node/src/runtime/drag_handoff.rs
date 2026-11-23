@@ -21,7 +21,7 @@
 
 use super::*;
 use std::path::{Path, PathBuf};
-use tetherly_core::drag::DragControlMsg;
+use tetherly_core::drag::{DragCancelReason, DragControlMsg};
 use tetherly_core::frame::FileMeta;
 use tetherly_core::DeviceId;
 use tokio::sync::oneshot;
@@ -60,6 +60,9 @@ pub(crate) struct OutgoingDrag {
     pub(crate) files: Option<Vec<PathBuf>>,
     /// LMB went up on the remote screen before the probe answered.
     pub(crate) released: bool,
+    /// The drag announced to the peer at the crossing (`RemoteDragEnter`),
+    /// so its screen shows the carried files until release or return.
+    pub(crate) announced: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -132,6 +135,30 @@ impl DragHandoffState {
         let (tx, rx) = oneshot::channel();
         self.probe_waiters.insert(id, tx);
         (id, rx)
+    }
+}
+
+/// `RemoteDragEnter` for a carry announced before staging: names and sizes
+/// straight from the dragged paths.
+fn carry_enter(drag_id: u64, files: &[PathBuf]) -> DragControlMsg {
+    let first_file_name = files
+        .first()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    DragControlMsg::RemoteDragEnter {
+        drag_id,
+        file_count: files.len().min(HANDOFF_MAX_FILES) as u32,
+        total_bytes: files
+            .iter()
+            .take(HANDOFF_MAX_FILES)
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum(),
+        first_file_name,
+        norm_x: 0.5,
+        norm_y: 0.5,
+        has_directory: files.iter().any(|p| p.is_dir()),
     }
 }
 
@@ -399,7 +426,7 @@ impl Node {
         match out.files.take() {
             Some(files) => {
                 drop(st);
-                self.spawn_handoff(out.peer, files);
+                self.spawn_handoff(out.peer, files, out.announced);
             }
             None => {
                 out.released = true;
@@ -423,6 +450,7 @@ impl Node {
                 peer: peer.clone(),
                 files: None,
                 released: false,
+                announced: None,
             });
             peer
         };
@@ -440,42 +468,111 @@ impl Node {
             if files.is_empty() {
                 info!(peer = %peer, "lmb held across the edge; no dragged files on the pasteboard");
             }
-            let mut st = node.shared.drag_handoff.lock().expect("drag_handoff");
-            let Some(mut out) = st.out.take() else {
-                return; // cancelled (returned to local) while probing
+            let now = node.now_ms();
+            // Still held: tell the peer what is being carried now, so its
+            // screen shows the files while the cursor moves over it. The
+            // files are published only after the enter is queued, so a
+            // release in between hands off behind it (frames keep order).
+            let announce = {
+                let mut st = node.shared.drag_handoff.lock().expect("drag_handoff");
+                let Some(mut out) = st.out.take() else {
+                    return; // cancelled (returned to local) while probing
+                };
+                if out.peer != peer || files.is_empty() {
+                    return;
+                }
+                info!(peer = %peer, count = files.len(), "file drag left the screen");
+                if out.released {
+                    None
+                } else {
+                    let drag_id = random_u64();
+                    out.announced = Some(drag_id);
+                    st.out = Some(out);
+                    st.note_outgoing(drag_id, now);
+                    Some(drag_id)
+                }
             };
-            if out.peer != peer || files.is_empty() {
+            let Some(drag_id) = announce else {
+                node.spawn_handoff(peer, files, None);
                 return;
+            };
+            let enter = carry_enter(drag_id, &files);
+            if let Err(e) = node.send_drag_control(&peer, &enter).await {
+                warn!(peer = %peer, error = %e, "drag handoff: carry announce failed");
             }
-            info!(peer = %peer, count = files.len(), "file drag left the screen");
-            if out.released {
-                drop(st);
-                node.spawn_handoff(peer, files);
-            } else {
-                out.files = Some(files);
-                st.out = Some(out);
+            let released = {
+                let mut st = node.shared.drag_handoff.lock().expect("drag_handoff");
+                let Some(mut out) = st.out.take() else {
+                    return; // returned to local meanwhile (cancel sent there)
+                };
+                if out.released {
+                    true
+                } else {
+                    out.files = Some(files.clone());
+                    st.out = Some(out);
+                    false
+                }
+            };
+            if released {
+                node.spawn_handoff(peer, files, Some(drag_id));
             }
         });
     }
 
     /// Controller side: the cursor came back without releasing.
     pub(crate) fn drag_handoff_on_return(&self) {
-        let mut st = self.shared.drag_handoff.lock().expect("drag_handoff");
-        st.out = None;
-    }
-
-    pub(crate) fn spawn_handoff(&self, peer: DeviceId, files: Vec<PathBuf>) {
+        let out = self
+            .shared
+            .drag_handoff
+            .lock()
+            .expect("drag_handoff")
+            .out
+            .take();
+        let Some(OutgoingDrag {
+            peer,
+            announced: Some(drag_id),
+            ..
+        }) = out
+        else {
+            return;
+        };
         let node = self.clone_handle();
         let rt = tokio::runtime::Handle::try_current()
             .ok()
             .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
         if let Some(h) = rt {
-            h.spawn(async move { node.hand_off_drag_files(&peer, files).await });
+            h.spawn(async move {
+                let cancel = DragControlMsg::RemoteDragCancel {
+                    drag_id,
+                    reason: DragCancelReason::DraggedBackToLocal,
+                };
+                if let Err(e) = node.send_drag_control(&peer, &cancel).await {
+                    warn!(peer = %peer, error = %e, "drag handoff: carry cancel failed");
+                }
+            });
         }
     }
 
-    /// Stage the dragged files and offer them to `peer` as one drop.
-    pub(crate) async fn hand_off_drag_files(&self, peer: &DeviceId, paths: Vec<PathBuf>) {
+    pub(crate) fn spawn_handoff(&self, peer: DeviceId, files: Vec<PathBuf>, drag_id: Option<u64>) {
+        let node = self.clone_handle();
+        let rt = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
+        if let Some(h) = rt {
+            h.spawn(async move { node.hand_off_drag_files(&peer, files, drag_id).await });
+        }
+    }
+
+    /// Stage the dragged files and offer them to `peer` as one drop. `drag_id`
+    /// is the carry already announced at the crossing, if any; the enter is
+    /// re-sent with the staged totals either way (it also refreshes a carry
+    /// the peer may have timed out while the button was held).
+    pub(crate) async fn hand_off_drag_files(
+        &self,
+        peer: &DeviceId,
+        paths: Vec<PathBuf>,
+        drag_id: Option<u64>,
+    ) {
         let staging = self.send_staging_dir();
         let now = self.now_ms();
         let staged: Vec<Result<(PathBuf, String, u64), String>> =
@@ -505,7 +602,7 @@ impl Node {
         if ok.is_empty() {
             return;
         }
-        let drag_id = random_u64();
+        let drag_id = drag_id.unwrap_or_else(random_u64);
         self.shared
             .drag_handoff
             .lock()
@@ -633,7 +730,7 @@ mod tests {
         let src = dir.join("dragged.txt");
         std::fs::write(&src, b"payload").unwrap();
 
-        node.hand_off_drag_files(&peer, vec![src]).await;
+        node.hand_off_drag_files(&peer, vec![src], None).await;
 
         let sources: Vec<PathBuf> = node
             .shared

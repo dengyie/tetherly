@@ -541,6 +541,14 @@ pub enum UiEvent {
         scale_factor: f32,
         timestamp_ms: u64,
     },
+    /// v0.2.97: files are being dragged across from a peer and the cursor is
+    /// on this screen (`active`), or that carry ended (drop / cancel). The
+    /// desktop shell draws a badge next to the cursor while active.
+    DragCarry {
+        active: bool,
+        file_count: u32,
+        first_file_name: String,
+    },
     CursorEdgeCrossed {
         from_device: String,
         to_device: String,

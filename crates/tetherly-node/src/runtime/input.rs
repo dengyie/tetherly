@@ -4985,7 +4985,11 @@ impl Node {
                                     let apply_res = client.apply(ev);
                                     if !handoff_files.is_empty() {
                                         info!(peer = %peer_id, count = handoff_files.len(), "file drag carried back to the controller");
-                                        node.spawn_handoff(peer_id.clone(), std::mem::take(&mut handoff_files));
+                                        node.spawn_handoff(
+                                            peer_id.clone(),
+                                            std::mem::take(&mut handoff_files),
+                                            None,
+                                        );
                                     }
                                     // v0.2.31: mirror the client's counters so
                                     // `GET /api/input` shows applied vs dropped.

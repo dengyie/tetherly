@@ -63,18 +63,26 @@ impl Node {
                 norm_y,
                 has_directory,
             } => {
-                let mut target = self.shared.drag_target.lock().expect("drag_target");
-                if let Err(e) = target.handle_drag_enter(
-                    drag_id,
-                    file_count,
-                    total_bytes,
-                    first_file_name,
-                    norm_x,
-                    norm_y,
-                    has_directory,
-                    now,
-                ) {
-                    warn!(peer = %peer, drag_id, error = %e, "drag enter rejected");
+                let entered = {
+                    let mut target = self.shared.drag_target.lock().expect("drag_target");
+                    target.handle_drag_enter(
+                        drag_id,
+                        file_count,
+                        total_bytes,
+                        first_file_name.clone(),
+                        norm_x,
+                        norm_y,
+                        has_directory,
+                        now,
+                    )
+                };
+                match entered {
+                    Ok(()) => self.emit(UiEvent::DragCarry {
+                        active: true,
+                        file_count,
+                        first_file_name,
+                    }),
+                    Err(e) => warn!(peer = %peer, drag_id, error = %e, "drag enter rejected"),
                 }
             }
             DragControlMsg::RemoteDragMove {
@@ -92,6 +100,12 @@ impl Node {
                 if let Err(e) = target.handle_drag_cancel(drag_id, reason) {
                     warn!(peer = %peer, drag_id, error = %e, "drag cancel rejected");
                 }
+                drop(target);
+                self.emit(UiEvent::DragCarry {
+                    active: false,
+                    file_count: 0,
+                    first_file_name: String::new(),
+                });
                 // A cancelled drop must not linger as a pending delivery.
                 self.shared
                     .pending_drag_drops
@@ -131,6 +145,13 @@ impl Node {
                         }
                     }
                 };
+                // Released on this screen: the badge gives way to the
+                // transfer (and the reveal once it lands).
+                self.emit(UiEvent::DragCarry {
+                    active: false,
+                    file_count: 0,
+                    first_file_name: String::new(),
+                });
                 if let Some((_, file_count)) = &confirm_echo {
                     self.shared
                         .pending_drag_drops
@@ -234,6 +255,52 @@ mod tests {
     use tetherly_core::drag::{DragControlMsg, DragPhase};
     use tetherly_core::ports::TrustStore;
     use tetherly_core::TrustedPeer;
+
+    /// The target surfaces the carried files while the cursor is over it
+    /// (the shell draws a badge on `drag_carry`) and drops the badge on
+    /// release or cancel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drag_enter_announces_the_carried_files_until_drop_or_cancel() {
+        use crate::events::UiEvent;
+        use crate::runtime::clipboard_policy_tests::temp_test_node;
+        let (node, _dir) = temp_test_node("drag_carry");
+        let mut rx = node.shared.events.subscribe();
+        let peer = tetherly_core::DeviceId::from_id_pk(&[9u8; 32]);
+        let carry = |rx: &mut tokio::sync::broadcast::Receiver<UiEvent>| loop {
+            match rx.try_recv() {
+                Ok(UiEvent::DragCarry {
+                    active,
+                    file_count,
+                    first_file_name,
+                }) => return Some((active, file_count, first_file_name)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        };
+        node.receive_drag_control(
+            &peer,
+            DragControlMsg::RemoteDragEnter {
+                drag_id: 7,
+                file_count: 2,
+                total_bytes: 10,
+                first_file_name: "a.txt".into(),
+                norm_x: 0.0,
+                norm_y: 0.5,
+                has_directory: false,
+            },
+        )
+        .await;
+        assert_eq!(carry(&mut rx), Some((true, 2, "a.txt".into())));
+        node.receive_drag_control(
+            &peer,
+            DragControlMsg::RemoteDragCancel {
+                drag_id: 7,
+                reason: tetherly_core::drag::DragCancelReason::DraggedBackToLocal,
+            },
+        )
+        .await;
+        assert_eq!(carry(&mut rx).map(|c| c.0), Some(false));
+    }
 
     /// Full wire round-trip: controller A signals over the Noise session
     /// channel (45717) into receiver B's `DragTarget`, and B's drop-confirm

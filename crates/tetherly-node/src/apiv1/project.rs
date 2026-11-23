@@ -152,6 +152,7 @@ pub fn project(ev: &UiEvent) -> Vec<Mark> {
         | E::FocusStateChanged { .. }
         | E::PeerFocusStateChanged { .. }
         | E::CursorEdgeCrossed { .. }
+        | E::DragCarry { .. }
         | E::VirtualDisplaySessionStarted { .. }
         | E::VirtualDisplaySessionStopped { .. }
         | E::AudioRoutingSessionStarted { .. }
