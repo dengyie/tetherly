@@ -161,9 +161,10 @@ install_client_windows() {
     verify_release_digest "$msi" || { echo "digest mismatch for $msi_name" >&2; return 1; }
     scp -q "$msi" "${REMOTE_HOST}:E:/code/tetherly/data/updates/${msi_name}" || return 1
     # perMachine MSI: the elevated ssh session can install it silently. The
-    # client process is `tetherly-shell.exe`, distinct from the daemon's
+    # client is `tetherly-shell.exe` (listed as `TETHER~1` when launched via
+    # the 8.3 path the scheme registers), distinct from the daemon's
     # `tetherly.exe`, so stopping it never touches the daemon.
-    ps="\$ErrorActionPreference='Stop'; \$ProgressPreference='SilentlyContinue'; Get-Process tetherly-shell -ErrorAction SilentlyContinue | Stop-Process -Force; \$m='E:\\code\\tetherly\\data\\updates\\${msi_name}'; \$l='E:\\code\\tetherly\\data\\updates\\client-install.log'; \$p=Start-Process msiexec.exe -ArgumentList @('/i',('\"'+\$m+'\"'),'/qn','/norestart','/l*v',('\"'+\$l+'\"')) -Wait -PassThru; \$cmd=(Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\\tetherly\\shell\\open\\command' -ErrorAction SilentlyContinue).'(default)'; \$exe=if (\$cmd -match '^\"([^\"]+)\"') { \$Matches[1] } else { '' }; \$name=if (\$exe -and (Test-Path -LiteralPath \$exe)) { (Get-Item -LiteralPath \$exe).FullName } else { 'missing' }; Write-Output ('msi_exit=' + \$p.ExitCode + ' scheme=' + \$name)"
+    ps="\$ErrorActionPreference='Stop'; \$ProgressPreference='SilentlyContinue'; Get-Process -Name tetherly-shell,TETHER~1 -ErrorAction SilentlyContinue | Where-Object { \$_.Path -and (Get-Item -LiteralPath \$_.Path).FullName -like '*\\tetherly-shell.exe' } | Stop-Process -Force; \$m='E:\\code\\tetherly\\data\\updates\\${msi_name}'; \$l='E:\\code\\tetherly\\data\\updates\\client-install.log'; \$p=Start-Process msiexec.exe -ArgumentList @('/i',('\"'+\$m+'\"'),'/qn','/norestart','/l*v',('\"'+\$l+'\"')) -Wait -PassThru; \$cmd=(Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\\tetherly\\shell\\open\\command' -ErrorAction SilentlyContinue).'(default)'; \$exe=if (\$cmd -match '^\"([^\"]+)\"') { \$Matches[1] } else { '' }; \$name=if (\$exe -and (Test-Path -LiteralPath \$exe)) { (Get-Item -LiteralPath \$exe).FullName } else { 'missing' }; Write-Output ('msi_exit=' + \$p.ExitCode + ' scheme=' + \$name)"
     b64=$(printf '%s' "$ps" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\r\n')
     out=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -NonInteractive -EncodedCommand ${b64}" 2>/dev/null | tr -d '\r') || return 1
     echo "$out"

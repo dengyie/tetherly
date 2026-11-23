@@ -443,4 +443,5 @@
 ## §233 (2026-11-23) Windows 客户端读不到 client.token（§230 后续）
 - [x] 根因：v0.2.85 真机 Session 1 探针——`tetherly://open` 拉起 `tetherly-shell` 后立刻退出：「cannot read the daemon API token (…\AppData\Local\tetherly: no client.token or api.token)」。守护进程以 SYSTEM 运行，client.token 属主=SYSTEM，DACL `(A;;FA;;;OW)` 只命中 SYSTEM，控制台用户无读权限（旧注释误以为属主是控制台用户）。
 - [x] 修法：`client_token_sddl(console_sid)` = 原 DACL + `(A;;FR;;;<console SID>)`，无人登录时回落 `IU`；非 `S-1-<digits>-…` 形态 SID 视为缺失（防 ACE 注入）。`console_user_sid` 从 tray.rs 移到 cred.rs 共用。client.token 每次守护进程启动重签，部署重启即生效。3 个新单测。b6438e2。
-- [ ] 真机：Session 1 `tetherly://open` → tetherly-shell 常驻、不开浏览器；icacls 显示控制台用户 R。
+- [x] 真机 v0.2.87：icacls `DESKTOP-VST7EIE\mango:(R)`；Session 1 `tetherly://open` → 客户端 pid 22764 s=1 常驻，浏览器进程数不变。注意经 scheme 启动时进程名显示为 8.3 短名 `TETHER~1`（不是 tetherly-shell），deploy.sh 停客户端改为按解析后的长路径匹配。
+- [ ] 用户目视：托盘「打开主窗口」弹出客户端窗口。
