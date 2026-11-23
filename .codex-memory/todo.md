@@ -470,3 +470,8 @@
 - [x] 门禁：svelte-check 0/0、vitest 72/72、cargo check/clippy、CI 45174440930 / bump CI 45175813570 全绿；tag v0.2.91 → release 45177741848 全绿 12 资产 → deploy.sh --target all exit 0：Mac health 0.2.91 + 客户端 0.2.91，home-win 原子热重启 old_pid 29784 → new_pid 5024（SYSTEM Session 1），health 0.2.91，受保护进程 komari-agent 6920 / SRBMiner-MULTI 23580 / verge-mihomo 21272 前后 3/3 不动，msi 客户端 exit 0。
 - [x] 真机验证（AX 取证）：侧栏「已连接」绿点；布局页完整加载拓扑（屏幕边缘 已连接 1/4、本机 1470×956、已配对设备、跨屏参数），不再是占位符。调试壳验证 + 生产 v0.2.91 客户端复核双通过。
 - [ ] 用户复测：客户端启动即「已连接」；布局页可拖设备到边缘、调跨屏参数。v0.2.89 号也被本会话占用（另一会话拿了 v0.2.90），最终修复落在 v0.2.91。
+
+## §237 菜单栏双图标（v0.2.92/v0.2.93，2026-11-23）
+- 根因：daemon 每次重启轮换 api/client token，壳只在启动读一次 → 重启后 SSE 重连永久 401、客户端静默离线，托盘看门狗恢复内置图标 → 菜单栏两个 Tetherly。次因：tray_owner 认领每进程一次；隐藏的内置图标仅 alpha=0 留下可点空位。
+- 修复：Daemon::token()/SSE 重连每次重读 token（token::fresh_or）；每次 link down→up 重新认领 + 连通时 15s 复查 GET /settings；macOS 隐藏时 setLength(0)（不用 setVisible，会被 autosave 持久化）。
+- [x] 实测：Mac /system/restart 后 ~1s 重连并 tray_owner=client；双端 0.2.93 部署，Windows tray_owner=client，受保护进程未动。
