@@ -53,6 +53,21 @@ async fn api(
         .map_err(|e| e.to_string())
 }
 
+/// The current SSE connection state, PULLED by the SPA right after it
+/// subscribes. Tauri emits are broadcast-and-forget and the WebView's JS
+/// listeners register long after the loopback SSE handshake — the opening
+/// Connecting→Live pair would land in the void and the shell would show
+/// "连接中" forever while every page stayed on its waiting placeholder
+/// (production 2026-11-23). The push keeps driving later transitions; this
+/// pull only closes the startup race.
+#[tauri::command]
+fn link_state(events: State<'_, events::LinkStateCell>) -> Result<String, String> {
+    match events.get() {
+        Some(s) => serde_json::to_string(&s).map_err(|e| e.to_string()),
+        None => Ok("\"connecting\"".to_string()),
+    }
+}
+
 /// Read daemon discovery settings at startup. Called from `run` and tests.
 pub fn build_daemon_state() -> Result<Daemon, String> {
     let token = token::read_api_token().map_err(|e| {
@@ -89,10 +104,11 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .manage(daemon)
+        .manage(std::sync::Arc::new(events::LinkStateCell::default()))
         .manage(trayowner::Claimed(std::sync::atomic::AtomicBool::new(
             false,
         )))
-        .invoke_handler(tauri::generate_handler![api])
+        .invoke_handler(tauri::generate_handler![api, link_state])
         .setup(|app| {
             let handle: AppHandle = app.handle().clone();
             let port = handle.state::<Daemon>().port;
@@ -179,7 +195,8 @@ pub fn run() {
                     }
                 }
             });
-            tauri::async_runtime::spawn(events::run(handle.clone(), port, token));
+            let cell = handle.state::<std::sync::Arc<events::LinkStateCell>>().inner().clone();
+            tauri::async_runtime::spawn(events::run(handle.clone(), port, token, cell));
 
             // Tray: real-state sync (§6.2). The SSE task forwards frames to
             // the tray through app events; the tray answers menu actions the

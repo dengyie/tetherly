@@ -67,6 +67,17 @@ export class TauriTransport implements Transport {
         if (s === "connecting" || s === "live" || s === "resyncing" || s === "offline") onState(s);
       }),
     ];
+    // Tauri emits are broadcast-and-forget and the Rust SSE task handshakes
+    // in milliseconds — the opening Connecting→Live pair lands BEFORE this
+    // WebView's listeners exist, and the SPA would sit on "连接中" forever
+    // (production 2026-11-23). Pull the current state once; the push
+    // listeners above own every later transition.
+    void tauri()
+      .core.invoke<string>("link_state")
+      .then((s) => {
+        if (s === "connecting" || s === "live" || s === "resyncing" || s === "offline") onState(s);
+      })
+      .catch(() => {});
     return () => {
       for (const p of unsubs) p.then((u) => u()).catch(() => {});
     };

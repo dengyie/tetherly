@@ -170,6 +170,14 @@
       activity = ac;
     };
     let stopped = false;
+    // §220: the daemon's subscribe burst is the Snapshot alone. In the Tauri
+    // shell the SSE handshake can complete before the WebView's listeners
+    // exist, so that first snapshot frame can be lost even though the
+    // connection is healthy — every event-fed page would then sit on its
+    // waiting placeholder forever (production 2026-11-23). Remember whether
+    // a snapshot arrived; the first live/resyncing state that lands WITHOUT
+    // one triggers the same REST hydration the snapshot path uses.
+    let sawSnapshot = false;
     const unsubscribe = t.subscribe(
       null,
       (ev) => {
@@ -178,6 +186,7 @@
         if (sec) changed[sec] += 1;
         apply(ev);
         if (ev.type === "snapshot") {
+          sawSnapshot = true;
           // The daemon's burst is the Snapshot only (§220): pull the five
           // event-fed sections over REST once per (re)connection.
           const before = { ...changed };
@@ -189,7 +198,19 @@
           );
         }
       },
-      (st) => linkState.set(st),
+      (st) => {
+        linkState.set(st);
+        if ((st === "live" || st === "resyncing") && !sawSnapshot) {
+          sawSnapshot = true; // hydrate once; a real snapshot supersedes us.
+          const before = { ...changed };
+          void hydrateSections(
+            client,
+            (section) => stopped || changed[section] !== before[section],
+            apply,
+            0,
+          );
+        }
+      },
     );
     return () => {
       stopped = true;

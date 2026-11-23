@@ -28,6 +28,28 @@ pub enum LinkState {
     Offline,
 }
 
+/// The connection state as seen by the EMITTER, shared with the `link_state`
+/// command. Tauri emits are broadcast-and-forget: the WebView registers its
+/// JS listeners hundreds of ms after `setup` spawns the SSE task, so the
+/// opening Connecting→Live transition lands before any listener exists and
+/// the SPA would sit on its "connecting" default forever (production
+/// 2026-11-23). The command lets the SPA PULL the current state right after
+/// subscribing — the PUSH stays for later transitions.
+#[derive(Debug, Default)]
+pub struct LinkStateCell(std::sync::Mutex<Option<LinkState>>);
+
+impl LinkStateCell {
+    pub fn set(&self, s: LinkState) {
+        if let Ok(mut c) = self.0.lock() {
+            *c = Some(s);
+        }
+    }
+
+    pub fn get(&self) -> Option<LinkState> {
+        self.0.lock().ok().and_then(|c| *c)
+    }
+}
+
 /// One forwarded frame: the envelope minus nothing — `{seq, type, data}`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WireEvent {
@@ -117,8 +139,9 @@ const SSE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Run the single connection for the life of the app. `mutate` events drive
-/// `tetherly://event`; connection transitions drive `tetherly://link`.
-pub async fn run(app: AppHandle, port: u16, token: String) {
+/// `tetherly://event`; connection transitions drive `tetherly://link` (and
+/// update `cell` for the SPA's pull-on-subscribe).
+pub async fn run(app: AppHandle, port: u16, token: String, cell: std::sync::Arc<LinkStateCell>) {
     let mut last_seq: Option<u64> = None;
     let mut attempt: usize = 0;
     loop {
@@ -128,10 +151,12 @@ pub async fn run(app: AppHandle, port: u16, token: String) {
         } else {
             LinkState::Connecting
         };
+        cell.set(state);
         let _ = app.emit(LINK_CHANNEL, state);
-        match connect(&app, port, &token, &mut last_seq, &mut attempt).await {
+        match connect(&app, port, &token, &mut last_seq, &mut attempt, &cell).await {
             // Ok is Infallible: connect only returns via StreamEnd::Refused.
             Err(StreamEnd::Refused) => {
+                cell.set(LinkState::Offline);
                 let _ = app.emit(LINK_CHANNEL, LinkState::Offline);
                 let delay = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
                 attempt += 1;
@@ -324,10 +349,12 @@ async fn connect(
     token: &str,
     last_seq: &mut Option<u64>,
     attempt: &mut usize,
+    cell: &std::sync::Arc<LinkStateCell>,
 ) -> Result<std::convert::Infallible, StreamEnd> {
     connect_with(port, token, last_seq, |ev| match ev {
         SinkEvent::Established => {
             *attempt = 0;
+            cell.set(LinkState::Live);
             let _ = app.emit(LINK_CHANNEL, LinkState::Live);
         }
         SinkEvent::Frame(ev) => {
