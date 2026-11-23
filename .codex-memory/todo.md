@@ -475,3 +475,10 @@
 - 根因：daemon 每次重启轮换 api/client token，壳只在启动读一次 → 重启后 SSE 重连永久 401、客户端静默离线，托盘看门狗恢复内置图标 → 菜单栏两个 Tetherly。次因：tray_owner 认领每进程一次；隐藏的内置图标仅 alpha=0 留下可点空位。
 - 修复：Daemon::token()/SSE 重连每次重读 token（token::fresh_or）；每次 link down→up 重新认领 + 连通时 15s 复查 GET /settings；macOS 隐藏时 setLength(0)（不用 setVisible，会被 autosave 持久化）。
 - [x] 实测：Mac /system/restart 后 ~1s 重连并 tray_owner=client；双端 0.2.93 部署，Windows tray_owner=client，受保护进程未动。
+
+## §238 Mac 托盘面板点不开（v0.2.94，2026-11-24）
+- 现象：Mac 客户端左键菜单栏图标面板不出现（老进程 33325 确认无响应，重启客户端恢复）。按需复现失败：零宽邻居、daemon 重启、关主窗、隐藏 App、跨 Space 切换均能正常开关。教训：菜单栏图标 x 会漂移（920→957），探针必须每次 AX 现查位置，固定坐标得出的"DEAD"全是假阳性；全屏 Space 里合成 hover 唤不出菜单栏，无法脚本点击。
+- 加固（未证实根因，覆盖可能机理）：toggle 改为 panel_click_action(visible, focused)，仅"可见且聚焦"才隐藏，否则重新 show+focus（杜绝在两个不可见状态间来回切）；面板 visible_on_all_workspaces（全屏 App 所在 Space 也能弹出）。
+- 可诊断：壳日志落盘 Mac `~/Library/Logs/Tetherly/shell.log`、Win `%LOCALAPPDATA%\Tetherly\logs\shell.log`（2 MiB 滚 .1，默认 info），每次托盘点击记 visible/focused/action，失焦隐藏与 show/focus 失败也记。
+- [x] 实测：双端 0.2.94 部署，两端客户端重启（Win SessionId=1），受保护进程未动；Mac 探针 Show→Hide，shell.log 记录 `tray panel: click visible=… focused=… action=…`。注意：探针点击时若输入正漫游在 Windows（用户在用），合成点击会被转发到 Win 造成假 DEAD——探针前先看 tetherly.log 有无 crossing/return。
+- [ ] 下次复发：让用户报时间+当时前台（是否全屏 App），grep shell.log 的 "tray panel:" 行定位。
