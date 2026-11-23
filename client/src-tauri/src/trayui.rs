@@ -191,12 +191,47 @@ fn icon_for<R: Runtime>(
 }
 
 /// Show (or focus) the main window; tray double/left click and menu share it.
+/// Label of the main window declared in tauri.conf.json.
+pub const MAIN_LABEL: &str = "main";
+
+/// Whether a close request on window `label` should hide it instead (§239):
+/// the main window must survive a close so 打开主窗口 / Dock / deep links can
+/// bring it back — a destroyed window made those a silent no-op.
+pub fn hide_instead_of_close(label: &str) -> bool {
+    label == MAIN_LABEL
+}
+
+/// Surface the main window, rebuilding it from tauri.conf.json if it was
+/// destroyed (defensive: close is intercepted, but never leave the menu dead).
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-    }
+    let w = match app.get_webview_window(MAIN_LABEL) {
+        Some(w) => w,
+        None => {
+            tracing::warn!("main window missing; rebuilding from config");
+            let Some(cfg) = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|c| c.label == MAIN_LABEL)
+                .cloned()
+            else {
+                tracing::warn!("no main window config");
+                return;
+            };
+            match tauri::WebviewWindowBuilder::from_config(app, &cfg).and_then(|b| b.build()) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("main window rebuild failed: {e}");
+                    return;
+                }
+            }
+        }
+    };
+    tracing::info!("main window: show");
+    let _ = w.show();
+    let _ = w.unminimize();
+    let _ = w.set_focus();
 }
 
 /// Flip the OS autostart entry and rewrite the menu label from the NEW state.
@@ -546,4 +581,23 @@ mod toggle_tests {
         assert_eq!(panel_click_action(false, false), PanelAction::Show);
         assert_eq!(panel_click_action(false, true), PanelAction::Show);
     }
+}
+
+#[cfg(test)]
+mod main_window_tests {
+    use super::hide_instead_of_close;
+
+    #[test]
+    fn closing_the_main_window_hides_it_so_open_main_can_bring_it_back() {
+        // §239: a destroyed "main" made 打开主窗口 a silent no-op.
+        assert!(hide_instead_of_close(MAIN));
+    }
+
+    #[test]
+    fn other_windows_close_normally() {
+        assert!(!hide_instead_of_close("tray-panel"));
+        assert!(!hide_instead_of_close("other"));
+    }
+
+    use super::MAIN_LABEL as MAIN;
 }

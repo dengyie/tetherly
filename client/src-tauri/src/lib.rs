@@ -116,6 +116,17 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             trayui::show_main_window(app);
         }))
+        // §239: closing the main window hides it (tray app) so 打开主窗口
+        // can bring it back; destroying it left the menu item dead.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if trayui::hide_instead_of_close(window.label()) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    tracing::info!("main window: close -> hide");
+                }
+            }
+        })
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
@@ -324,6 +335,12 @@ pub fn run() {
             // §6.3 tray takeover: clean exit releases the claim so the
             // built-in tray returns immediately, not after the daemon's
             // 10s reclaim window. Best-effort: the watchdog covers crashes.
+            // §239: Dock icon click with the main window hidden reopens it.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                trayui::show_main_window(app);
+                return;
+            }
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 let d = app.state::<Daemon>();
                 let once = app.state::<trayowner::Claimed>();

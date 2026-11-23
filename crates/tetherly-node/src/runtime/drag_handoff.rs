@@ -437,6 +437,9 @@ impl Node {
             // seat is remote: end the local drag (Esc so nothing drops at
             // the edge) and release the button it still believes is held.
             node.handoff_inject(!files.is_empty(), true);
+            if files.is_empty() {
+                info!(peer = %peer, "lmb held across the edge; no dragged files on the pasteboard");
+            }
             let mut st = node.shared.drag_handoff.lock().expect("drag_handoff");
             let Some(mut out) = st.out.take() else {
                 return; // cancelled (returned to local) while probing

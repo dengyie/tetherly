@@ -1685,6 +1685,16 @@ pub(crate) mod system_cursor {
 /// ghost-controller bounce loop, rescue docked inside the redundancy
 /// band, Windows target's physical mouse swallowed every ~13s).
 ///
+/// §239: whether the macOS tap reports a physical button edge to the
+/// engine. Armed (seat remote) every button is forwarded; on the local seat
+/// the left button still is, so the cross-screen file drag sees the press
+/// that starts it (`drag_handoff_on_lmb`; `drive_input_button` is a no-op
+/// for local seats otherwise). Windows' hook reports buttons in both seats.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn tap_reports_button(mask: u8, armed: bool) -> bool {
+    armed || mask & tetherly_core::BTN_LEFT != 0
+}
+
 /// Returns true when the delta must be dropped (zeroed) as bogus.
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn hook_delta_is_bogus(dx: i32, dy: i32, width: i32, height: i32) -> bool {
@@ -3523,11 +3533,13 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
             }
             CGEventType::LeftMouseDown => {
                 let armed = ctx.keyboard_armed.load(Ordering::SeqCst);
-                if armed {
+                if tap_reports_button(tetherly_core::BTN_LEFT, armed) {
                     let _ = ctx.tx.send(RawInput::Button {
                         mask: tetherly_core::BTN_LEFT,
                         down: true,
                     });
+                }
+                if armed {
                     std::ptr::null_mut()
                 } else {
                     event.as_ptr()
@@ -3535,11 +3547,13 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
             }
             CGEventType::LeftMouseUp => {
                 let armed = ctx.keyboard_armed.load(Ordering::SeqCst);
-                if armed {
+                if tap_reports_button(tetherly_core::BTN_LEFT, armed) {
                     let _ = ctx.tx.send(RawInput::Button {
                         mask: tetherly_core::BTN_LEFT,
                         down: false,
                     });
+                }
+                if armed {
                     std::ptr::null_mut()
                 } else {
                     event.as_ptr()
@@ -3959,6 +3973,20 @@ pub fn start_input_hooks(_tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookC
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    /// §239: a local file drag toward a peer starts with a physical LMB
+    /// press while the tap is NOT armed. The cross-screen drag handoff
+    /// needs that press (`drag_handoff_on_lmb`) or `local_lmb_down` stays
+    /// false and the drag never leaves the screen. Windows' hook already
+    /// reports buttons in both seats; macOS dropped them until armed.
+    #[test]
+    fn mac_tap_reports_left_button_even_when_not_armed() {
+        assert!(tap_reports_button(tetherly_core::BTN_LEFT, false));
+        assert!(tap_reports_button(tetherly_core::BTN_LEFT, true));
+        assert!(!tap_reports_button(tetherly_core::BTN_RIGHT, false));
+        assert!(tap_reports_button(tetherly_core::BTN_RIGHT, true));
+        assert!(!tap_reports_button(tetherly_core::BTN_MIDDLE, false));
+    }
 
     /// v0.2.40 Deskflow OSXComputer alignment: ONE hidden flag
     /// (`m_cursorHidden`) and exactly one CGDisplayHideCursor /
