@@ -461,3 +461,12 @@
 - 共享架：Transfers 页拖入只登记路径/大小/mtime（shelf.json，≤200 条，系统/数据目录黑名单）；目录经 Shelf 帧同步给受信任对端；对端「下载」→ Fetch → 所有者复核（变更即「已失效」）→ 暂存 → 常规传输 → 请求方自动收入收件箱。
 - [x] 部署：v0.2.90 CI/release 全绿，deploy.sh --target all 双端 health=0.2.90，客户端 0.2.90 已重新拉起，home-win 受保护进程启动时间未变
 - [ ] 用户实测：mac↔win 双向拖文件过边；共享架双向下载；mac 侧共享受保护目录需「完全磁盘访问权限」
+
+## §236 桌面客户端「连接中」卡死 + 布局页空白（v0.2.91，2026-11-23）
+- 根因1（Tauri emit 竞态）：Rust SSE 任务毫秒级握手，WebView JS 监听器晚几百 ms 注册——开场 Connecting→Live 对与第一帧 snapshot 全部落空，SPA 卡「连接中 127.0.0.1:45716」、事件供给页全停在等待占位符（布局页「等待布局数据…」被误读为不能改）。
+- 修复1（pull 关启动竞态、push 管后续）：Rust `LinkStateCell`（Mutex<Option<LinkState>>）在每次 emit 前记录状态；`link_state` 命令供 JS 订阅后拉取一次；App.svelte 无 snapshot 的首个 live/resyncing 走 REST hydrate 兜底。28236a2。
+- 根因2（真机复测揪出，两处命令缺陷）：① `State<'_, LinkStateCell>` 与 `manage(Arc<LinkStateCell>)` 类型不匹配 → Tauri 按 TypeId 查找拒绝命令，JS `.catch(()=>{})` 静默吞掉；② `serde_json::to_string(&s)` 得到带引号的 `"live"`（6 字符含双引号），Tauri IPC 再序列化后 JS 收到含引号字符串，`=== "live"` 永不命中。临时 eprintln 探针证实命令已调用且 cell=Some(Live) 但 UI 仍卡——证据闭环。
+- 修复2：命令改 `State<'_, Arc<LinkStateCell>>` + 返回裸 `&'static str`（"live"/"connecting"/"resyncing"/"offline"）。af4416c + fmt 1d73e41。
+- [x] 门禁：svelte-check 0/0、vitest 72/72、cargo check/clippy、CI 45174440930 / bump CI 45175813570 全绿；tag v0.2.91 → release 45177741848 全绿 12 资产 → deploy.sh --target all exit 0：Mac health 0.2.91 + 客户端 0.2.91，home-win 原子热重启 old_pid 29784 → new_pid 5024（SYSTEM Session 1），health 0.2.91，受保护进程 komari-agent 6920 / SRBMiner-MULTI 23580 / verge-mihomo 21272 前后 3/3 不动，msi 客户端 exit 0。
+- [x] 真机验证（AX 取证）：侧栏「已连接」绿点；布局页完整加载拓扑（屏幕边缘 已连接 1/4、本机 1470×956、已配对设备、跨屏参数），不再是占位符。调试壳验证 + 生产 v0.2.91 客户端复核双通过。
+- [ ] 用户复测：客户端启动即「已连接」；布局页可拖设备到边缘、调跨屏参数。v0.2.89 号也被本会话占用（另一会话拿了 v0.2.90），最终修复落在 v0.2.91。
