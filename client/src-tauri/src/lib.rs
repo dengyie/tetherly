@@ -61,7 +61,9 @@ async fn api(
 /// (production 2026-11-23). The push keeps driving later transitions; this
 /// pull only closes the startup race.
 #[tauri::command]
-fn link_state(events: State<'_, std::sync::Arc<events::LinkStateCell>>) -> Result<&'static str, String> {
+fn link_state(
+    events: State<'_, std::sync::Arc<events::LinkStateCell>>,
+) -> Result<&'static str, String> {
     let cell = events.inner();
     Ok(match cell.get() {
         Some(events::LinkState::Live) => "live",
