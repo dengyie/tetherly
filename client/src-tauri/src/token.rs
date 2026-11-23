@@ -55,6 +55,15 @@ pub fn read_api_token() -> std::io::Result<String> {
     )))
 }
 
+/// The token as it is on disk NOW, else `fallback`. The daemon mints a new
+/// token on every restart (deploy, /system/restart), so anything that
+/// reconnects must re-read: a token cached at startup 401s forever and the
+/// shell silently stays offline (production 2026-11-23: after a daemon
+/// restart the client never relinked and the built-in tray reappeared).
+pub fn fresh_or(fallback: &str) -> String {
+    read_api_token().unwrap_or_else(|_| fallback.to_string())
+}
+
 /// The loopback UI port: `TETHERLY_UI_PORT` overrides, else the default.
 pub fn ui_port() -> u16 {
     std::env::var("TETHERLY_UI_PORT")
@@ -70,6 +79,33 @@ pub(super) mod tests {
     // Env vars are process-global: every test touching them takes this lock,
     // so parallel cargo tests serialize instead of racing (§124 flake family).
     pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn fresh_token_follows_daemon_rotation() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tetherly-tok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe {
+            std::env::remove_var("TETHERLY_API_TOKEN");
+            std::env::set_var("TETHERLY_DATA_DIR", &dir);
+        }
+        std::fs::write(dir.join("api.token"), "first\n").unwrap();
+        assert_eq!(fresh_or("stale"), "first");
+        std::fs::write(dir.join("api.token"), "rotated\n").unwrap();
+        assert_eq!(
+            fresh_or("stale"),
+            "rotated",
+            "restart rotation is picked up"
+        );
+        std::fs::remove_file(dir.join("api.token")).unwrap();
+        assert_eq!(
+            fresh_or("stale"),
+            "stale",
+            "missing file keeps the last token"
+        );
+        unsafe { std::env::remove_var("TETHERLY_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn env_discovery_sequential() {

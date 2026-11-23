@@ -153,6 +153,8 @@ pub async fn run(app: AppHandle, port: u16, token: String, cell: std::sync::Arc<
         };
         cell.set(state);
         let _ = app.emit(LINK_CHANNEL, state);
+        // Re-read per attempt: a restarted daemon rotated the token.
+        let token = crate::token::fresh_or(&token);
         match connect(&app, port, &token, &mut last_seq, &mut attempt, &cell).await {
             // Ok is Infallible: connect only returns via StreamEnd::Refused.
             Err(StreamEnd::Refused) => {

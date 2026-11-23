@@ -29,12 +29,21 @@ pub fn tray_icon_rgba() -> &'static [u8] {
     &tray::GLYPH
 }
 
-/// State handed to the `api` command: daemon port + token, read once at
-/// startup. The token lives here only; the WebView cannot read app state.
+/// State handed to the `api` command: daemon port + token. The token is
+/// re-read from disk on every use ([`token::fresh_or`]) because the daemon
+/// rotates it on restart; the startup copy is only the fallback. It lives
+/// here only; the WebView cannot read app state.
 #[derive(Debug)]
 pub struct Daemon {
     pub port: u16,
-    pub token: String,
+    startup_token: String,
+}
+
+impl Daemon {
+    /// Current daemon token (follows restart rotation).
+    pub fn token(&self) -> String {
+        token::fresh_or(&self.startup_token)
+    }
 }
 
 /// The one custom command the WebView may call: `invoke("api", {method,
@@ -48,7 +57,7 @@ async fn api(
     path: String,
     body: Option<serde_json::Value>,
 ) -> Result<proxy::ProxyReply, String> {
-    proxy::request(daemon.port, &daemon.token, &method, &path, body.as_ref())
+    proxy::request(daemon.port, &daemon.token(), &method, &path, body.as_ref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -83,7 +92,7 @@ pub fn build_daemon_state() -> Result<Daemon, String> {
     })?;
     Ok(Daemon {
         port: token::ui_port(),
-        token,
+        startup_token: token,
     })
 }
 
@@ -118,7 +127,7 @@ pub fn run() {
         .setup(|app| {
             let handle: AppHandle = app.handle().clone();
             let port = handle.state::<Daemon>().port;
-            let token = handle.state::<Daemon>().token.clone();
+            let token = handle.state::<Daemon>().token();
             // The single SSE connection for every window (main + tray panel).
             // §147: BOTH channel listeners register BEFORE the SSE task
             // spawns. The loopback handshake completes in milliseconds —
@@ -163,7 +172,7 @@ pub fn run() {
                         tauri::async_runtime::spawn(async move {
                             let d = app.state::<Daemon>();
                             let enabled = matches!(
-                                proxy::request(d.port, &d.token, "GET", "/api/v1/notify/config", None).await,
+                                proxy::request(d.port, &d.token(), "GET", "/api/v1/notify/config", None).await,
                                 Ok(r) if r.status == 200 && tray::notices_enabled(&r.body)
                             );
                             if enabled {
@@ -193,7 +202,7 @@ pub fn run() {
                 // the owner, so a once-per-process claim left two icons.
                 if fwd.state::<trayowner::Claimed>().on_link(up) {
                     let d = fwd.state::<Daemon>();
-                    let (port, token) = (d.port, d.token.clone());
+                    let (port, token) = (d.port, d.token());
                     tauri::async_runtime::spawn(async move {
                         trayowner::claim(port, &token).await;
                     });
@@ -211,7 +220,7 @@ pub fn run() {
                         .load(std::sync::atomic::Ordering::SeqCst);
                     if linked {
                         let d = rc.state::<Daemon>();
-                        let (port, token) = (d.port, d.token.clone());
+                        let (port, token) = (d.port, d.token());
                         trayowner::recheck(port, &token).await;
                     }
                 }
@@ -233,7 +242,7 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let d = app.state::<Daemon>();
                     let current =
-                        match proxy::request(d.port, &d.token, "GET", "/api/v1/settings", None)
+                        match proxy::request(d.port, &d.token(), "GET", "/api/v1/settings", None)
                             .await
                         {
                             Ok(r) if r.status == 200 => r.body,
@@ -252,7 +261,7 @@ pub fn run() {
                     let patch = serde_json::json!({"advertise": !on});
                     match proxy::request(
                         d.port,
-                        &d.token,
+                        &d.token(),
                         "PATCH",
                         "/api/v1/settings",
                         Some(&patch),
@@ -321,7 +330,7 @@ pub fn run() {
                     // Synchronous best-effort on a fresh runtime; the
                     // process is exiting, so a short deadline is plenty.
                     let port = d.port;
-                    let token = d.token.clone();
+                    let token = d.token();
                     if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -360,7 +369,7 @@ mod tests {
         // Env token present: state builds, port falls back to the default.
         unsafe { std::env::set_var("TETHERLY_API_TOKEN", "tok") };
         let d = build_daemon_state().unwrap();
-        assert_eq!(d.token, "tok");
+        assert_eq!(d.token(), "tok");
         assert_eq!(d.port, token::DEFAULT_UI_PORT);
         unsafe { std::env::remove_var("TETHERLY_API_TOKEN") };
         unsafe { std::env::remove_var("TETHERLY_DATA_DIR") };
