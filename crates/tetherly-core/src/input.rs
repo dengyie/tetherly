@@ -1029,8 +1029,9 @@ impl InputServer {
                 self.remote_interior = true;
             }
 
-            // Do not switch screen back to local while holding down a mouse
-            // button (prevent drag interruption).
+            // v0.2.89: a held button no longer blocks the return — the
+            // cross-screen file drag carries the cursor back with LMB down
+            // (the node hands the dragged files over at the crossing).
             //
             // Deskflow-style sustained-push switch-back: the shared edge (the
             // entry edge on the target) must receive an ACCUMULATED push of
@@ -1088,7 +1089,7 @@ impl InputServer {
             if window_expired || !at_shared_edge || push_toward_edge < 0 {
                 self.far_push_accum = 0;
             }
-            if push_beyond_edge > 0 && self.buttons_down == 0 {
+            if push_beyond_edge > 0 {
                 self.far_push_accum = self.far_push_accum.saturating_add(push_beyond_edge);
                 self.far_push_last = Some(now);
             }
@@ -1102,9 +1103,7 @@ impl InputServer {
             // the seat the instant the grace expired (production
             // 2026-11-13: five bounces in one 3-minute session).
             let required_push = self.current_return_push_px(now);
-            let returning_local = self.remote_interior
-                && (self.buttons_down == 0)
-                && self.far_push_accum >= required_push;
+            let returning_local = self.remote_interior && self.far_push_accum >= required_push;
 
             if returning_local {
                 self.last_return_diag = Some(ReturnDiag {
@@ -1489,6 +1488,12 @@ impl<S: InputSink> InputClient<S> {
 
     pub fn applied(&self) -> u64 {
         self.applied
+    }
+
+    /// Mouse buttons currently held by the controller on this screen
+    /// (`BTN_*` mask). A held LMB at Leave means a drag is crossing back.
+    pub fn buttons_down(&self) -> u8 {
+        self.buttons_down
     }
 
     pub fn dropped(&self) -> u64 {
@@ -2793,39 +2798,31 @@ mod tests {
     }
 
     #[test]
-    fn mouse_drag_prevents_accidental_screen_switch() {
+    fn mouse_drag_can_carry_cursor_back_to_local() {
+        // v0.2.89: a held button no longer pins the cursor on the remote
+        // screen. Cross-screen file drag needs the cursor to travel back with
+        // the button held; the sustained-push ramp alone guards accidental
+        // returns (the old gate stranded every drag at the edge).
         let mut srv = InputServer::new(1920, 1080);
         srv.set_edge(ScreenEdge::Top);
 
-        // Move to top edge and enter Remote
         let edge = srv.local_move_delta(960, 0, 0, -10);
         assert_eq!(edge, Some(ScreenEdge::Top));
         assert_eq!(srv.seat(), CursorSeat::Remote);
 
-        // Roam upwards into remote interior
         srv.local_move_delta(960, 0, 0, -100);
         assert_eq!(srv.seat(), CursorSeat::Remote);
 
-        // Hold left mouse button down (dragging)
         srv.note_button(BTN_LEFT, true);
         assert_eq!(srv.buttons_down(), BTN_LEFT);
 
-        // Pull mouse downwards towards return edge while dragging
-        // Normally this would trigger return to local, but during drag it must stay Remote!
-        let edge = srv.local_move_delta(960, 0, 0, 300);
+        // A single small push stays Remote (ramp still applies)...
+        let edge = srv.local_move_delta(960, 0, 0, 101);
         assert_eq!(edge, None);
-        assert_eq!(
-            srv.seat(),
-            CursorSeat::Remote,
-            "seat must remain Remote while dragging"
-        );
+        assert_eq!(srv.seat(), CursorSeat::Remote);
 
-        // Release mouse button (drop / finish drag)
-        srv.note_button(BTN_LEFT, false);
-        assert_eq!(srv.buttons_down(), 0);
-
-        // Now pulling mouse down triggers return to local
-        let edge = srv.local_move_delta(960, 0, 0, 50);
+        // ...a deliberate sustained push returns Local with the button held.
+        let edge = srv.local_move_delta(960, 0, 0, 400);
         assert_eq!(edge, Some(ScreenEdge::Top));
         assert_eq!(srv.seat(), CursorSeat::Local);
     }

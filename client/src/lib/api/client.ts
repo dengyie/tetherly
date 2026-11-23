@@ -35,6 +35,8 @@ import type {
   TopologyUnlinkReport,
   TopologyUnlinkRequest,
   Transfers,
+  Shelf,
+  ShelfAddReport,
 } from "./gen/api";
 import type { Transport } from "../transport/transport";
 
@@ -134,6 +136,22 @@ export class Api {
   }
   clearTransfers(): Promise<Transfers> {
     return this.t.request("DELETE", "/api/v1/transfers");
+  }
+
+  shelf(): Promise<Shelf> {
+    return this.t.request("GET", "/api/v1/shelf");
+  }
+  addShelf(paths: string[]): Promise<ShelfAddReport> {
+    return this.t.request("POST", "/api/v1/shelf", { paths });
+  }
+  removeShelf(id: string): Promise<void> {
+    return this.t.request("DELETE", `/api/v1/shelf/${encodeURIComponent(id)}`);
+  }
+  fetchShelf(owner: string, id: string): Promise<{ requested: boolean }> {
+    return this.t.request(
+      "POST",
+      `/api/v1/shelf/${encodeURIComponent(owner)}/${encodeURIComponent(id)}/fetch`,
+    );
   }
 
   inbox(): Promise<Inbox> {

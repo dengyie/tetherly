@@ -1018,4 +1018,13 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = 0)]
         anchor_y: i32,
     },
+    /// v0.2.89 (Windows, internal): read the file list of the OLE drag in
+    /// flight from the console user's session and report it to the daemon.
+    #[command(hide = true)]
+    DragProbe {
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+        #[arg(long)]
+        probe_id: u64,
+    },
 }

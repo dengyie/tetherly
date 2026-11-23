@@ -90,6 +90,11 @@ pub enum UiEvent {
     MetricsReset {
         timestamp_ms: u64,
     },
+    /// v0.2.89: the local shelf or a peer's announced catalog changed.
+    ShelfChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<String>,
+    },
     PeerCapsChanged {
         device_id: String,
         caps: Vec<String>,

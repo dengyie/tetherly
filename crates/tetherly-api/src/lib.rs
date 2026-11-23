@@ -304,10 +304,12 @@ pub enum Topic {
     Activity,
     Clipboard,
     Settings,
+    /// v0.2.89 shared shelf (local and peers' catalogs).
+    Shelf,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 10] = [
+    pub const ALL: [Topic; 11] = [
         Topic::Devices,
         Topic::Pairing,
         Topic::Input,
@@ -318,6 +320,7 @@ impl Topic {
         Topic::Activity,
         Topic::Clipboard,
         Topic::Settings,
+        Topic::Shelf,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -332,6 +335,7 @@ impl Topic {
             Topic::Activity => "activity",
             Topic::Clipboard => "clipboard",
             Topic::Settings => "settings",
+            Topic::Shelf => "shelf",
         }
     }
 
@@ -661,6 +665,62 @@ pub struct Transfers {
     /// §145: session aggregate that rode on the legacy /api/state — moved
     /// onto the transfers resource it belongs to.
     pub stats: TransferStats,
+}
+
+/// v0.2.89 shared shelf entry: a file registered for peers to pull. Only
+/// metadata — the bytes move when a peer fetches it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ShelfItem {
+    pub id: String,
+    pub name: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub mtime_ms: u64,
+    /// False once the file changed or vanished since it was registered.
+    pub available: bool,
+}
+
+/// A connected peer's shelf as last announced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ShelfPeer {
+    pub device_id: String,
+    pub name: String,
+    pub items: Vec<ShelfItem>,
+}
+
+/// `GET /api/v1/shelf`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Shelf {
+    pub mine: Vec<ShelfItem>,
+    pub peers: Vec<ShelfPeer>,
+}
+
+/// `POST /api/v1/shelf`: register local files by absolute path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ShelfAddRequest {
+    pub paths: Vec<String>,
+}
+
+/// Result of [`ShelfAddRequest`]: per-path failures do not fail the batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ShelfAddReport {
+    pub added: Vec<ShelfItem>,
+    pub errors: Vec<String>,
+}
+
+/// `POST /api/v1/drag/probe`: the Windows drag probe helper's report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DragProbeReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub probe_id: u64,
+    pub paths: Vec<String>,
 }
 
 /// §145: session aggregate transfer metrics across inbound and outbound
@@ -7131,6 +7191,12 @@ mod bindings {
             decl::<Transfer>(&cfg),
             decl::<TransferStats>(&cfg),
             decl::<Transfers>(&cfg),
+            decl::<ShelfItem>(&cfg),
+            decl::<ShelfPeer>(&cfg),
+            decl::<Shelf>(&cfg),
+            decl::<ShelfAddRequest>(&cfg),
+            decl::<ShelfAddReport>(&cfg),
+            decl::<DragProbeReport>(&cfg),
             decl::<InboxFile>(&cfg),
             decl::<Inbox>(&cfg),
             decl::<LayoutEdge>(&cfg),

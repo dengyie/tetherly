@@ -1,14 +1,48 @@
 <script lang="ts">
-  import type { Transfers } from "../lib/api/gen/api";
+  import type { Shelf, ShelfItem, Transfers } from "../lib/api/gen/api";
   import type { Api } from "../lib/api/client";
   import { bytes } from "../lib/fmt";
-  import { withToast } from "../lib/ui/toast";
+  import { pushToast, withToast } from "../lib/ui/toast";
+  import { listenFileDrops } from "../lib/shelf";
   import Icon from "../lib/ui/Icon.svelte";
   import PageHeader from "../lib/ui/PageHeader.svelte";
   import EmptyState from "../lib/ui/EmptyState.svelte";
   import ProgressBar from "../lib/ui/ProgressBar.svelte";
 
-  let { data, api }: { data: Transfers | null; api: Api } = $props();
+  let { data, api, shelfTick = 0 }: { data: Transfers | null; api: Api; shelfTick?: number } = $props();
+
+  // v0.2.89 共享架: dropping files here only registers path/size/mtime; the
+  // bytes move when another device presses 下载 (the owner re-checks then).
+  let shelf: Shelf | null = $state(null);
+  let dropOver = $state(false);
+  async function loadShelf() {
+    try {
+      shelf = await api.shelf();
+    } catch {
+      // Older daemon or transient link loss: keep the last view.
+    }
+  }
+  $effect(() => {
+    void shelfTick;
+    void loadShelf();
+  });
+  async function addPaths(paths: string[]) {
+    try {
+      const r = await api.addShelf(paths);
+      if (r.added.length > 0) pushToast(`已加入共享架 ${r.added.length} 个文件`, "success");
+      for (const e of r.errors.slice(0, 3)) pushToast(e, "error", 6000);
+      await loadShelf();
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+  $effect(() => listenFileDrops((p) => void addPaths(p), (o) => (dropOver = o)));
+  const unshare = (it: ShelfItem) => run(`mine:${it.id}`, async () => {
+    await api.removeShelf(it.id);
+    await loadShelf();
+  }, `已移出共享 ${it.name}`);
+  const fetchItem = (owner: string, it: ShelfItem) =>
+    run(`${owner}:${it.id}`, () => api.fetchShelf(owner, it.id), `已请求下载 ${it.name}，完成后在收件箱查看`);
 
   const phaseLabel: Record<string, string> = {
     transferring: "传输中",
@@ -48,6 +82,54 @@
 {/if}
 
 <div class="list-title">
+  共享架 <span class="dim font-normal">把文件拖进此窗口即可共享，其他设备点「下载」时才真正传输</span>
+</div>
+<div class="list shelf-drop" class:over={dropOver}>
+  {#if !shelf || shelf.mine.length === 0}
+    <EmptyState icon="upload" title="我的共享为空" description="拖拽文件到此窗口，登记路径后会出现在其他已信任设备的列表中。" />
+  {:else}
+    {#each shelf.mine as it (it.id)}
+      <div class="row hov">
+        <span class="ic lg text-leaf-600"><Icon name="file" size={15} /></span>
+        <div class="main">
+          <div class="flex items-center gap-2">
+            <span class="name truncate">{it.name}</span>
+            {#if !it.available}<span class="badge badge-warn">已失效</span>{/if}
+          </div>
+          <div class="sub">{bytes(it.size)}</div>
+        </div>
+        <div class="acts">
+          <button type="button" class="btn btn-sm btn-text" disabled={busyId === `mine:${it.id}`} onclick={() => unshare(it)}><Icon name="x" size={12} />移除</button>
+        </div>
+      </div>
+    {/each}
+  {/if}
+</div>
+
+{#if shelf && shelf.peers.length > 0}
+  {#each shelf.peers as peer (peer.device_id)}
+    <div class="list-title">{peer.name} 的共享 <span class="dim font-normal">{peer.items.length} 个文件</span></div>
+    <div class="list">
+      {#each peer.items as it (it.id)}
+        <div class="row hov">
+          <span class="ic lg text-sky-600"><Icon name="file" size={15} /></span>
+          <div class="main">
+            <div class="flex items-center gap-2">
+              <span class="name truncate">{it.name}</span>
+              {#if !it.available}<span class="badge badge-warn">已失效</span>{/if}
+            </div>
+            <div class="sub">{bytes(it.size)}</div>
+          </div>
+          <div class="acts">
+            <button type="button" class="btn btn-sm" disabled={!it.available || busyId === `${peer.device_id}:${it.id}`} onclick={() => fetchItem(peer.device_id, it)}><Icon name="download" size={12} />下载</button>
+          </div>
+        </div>
+      {/each}
+    </div>
+  {/each}
+{/if}
+
+<div class="list-title">
   传输队列 <span class="dim font-normal">活跃 {data?.active_count ?? 0} · 历史 {data?.terminal_count ?? 0}</span>
   {#if (data?.terminal_count ?? 0) > 0}
     <span class="acts"><button type="button" class="btn btn-sm btn-text" disabled={busyId === "__all__"} onclick={clearAll}><Icon name="trash" size={12} />清空历史</button></span>
@@ -80,3 +162,12 @@
     {/each}
   {/if}
 </div>
+
+<style>
+  .shelf-drop {
+    transition: box-shadow 120ms ease, background-color 120ms ease;
+  }
+  .shelf-drop.over {
+    box-shadow: inset 0 0 0 2px var(--accent, #4f8cff);
+  }
+</style>

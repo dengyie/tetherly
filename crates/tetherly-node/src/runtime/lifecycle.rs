@@ -200,6 +200,7 @@ impl Node {
         }
         let initial_topology_policy = load_topology_policy(&cfg.data_dir);
         let initial_input_policy = load_input_policy(&cfg.data_dir);
+        let initial_shelf = super::shelf::ShelfState::load(&cfg.data_dir);
         let initial_virtual_display_policy = load_virtual_display_policy(&cfg.data_dir);
         let initial_audio_routing_policy = load_audio_routing_policy(&cfg.data_dir);
         let initial_camera_policy = load_camera_policy(&cfg.data_dir);
@@ -694,6 +695,8 @@ impl Node {
             drag_target: Mutex::new(DragTarget::new()),
             pending_drag_drops: Mutex::new(HashMap::new()),
             transfer_drag_ids: Mutex::new(HashMap::new()),
+            drag_handoff: Mutex::new(Default::default()),
+            shelf: Mutex::new(initial_shelf),
             tray_owner: Mutex::new(tetherly_api::TrayOwner::Daemon),
             tray_keepalive: Mutex::new(None),
             tray_sse_seen: std::sync::atomic::AtomicBool::new(false),
@@ -1137,6 +1140,9 @@ impl Node {
             if let Ok(frame) = caps.to_frame() {
                 let _ = tx.try_send(frame);
             }
+            if let Some(frame) = self.shelf_catalog_frame(&peer_id) {
+                let _ = tx.try_send(frame);
+            }
             let node = self.clone_handle();
             let clock = self.shared.clock.clone();
             let mut stop = self.shared.shutdown.subscribe();
@@ -1248,6 +1254,7 @@ impl Node {
                             node.shared.drag_target.lock().expect("drag_target").reset();
                         }
                     }
+                    node.shelf_peer_down(&peer_id);
                     node.emit(UiEvent::PeerDown {
                         device_id: peer_id.to_string(),
                     });
@@ -1407,6 +1414,7 @@ impl Node {
             SessionEvent::FileReject(_) => (32u64, tetherly_core::frame::TYPE_FILE_REJECT),
             SessionEvent::FileDone(_) => (32u64, tetherly_core::frame::TYPE_FILE_DONE),
             SessionEvent::DragControl(_) => (64u64, tetherly_core::frame::TYPE_DRAG_CONTROL),
+            SessionEvent::Shelf(_) => (256u64, tetherly_core::frame::TYPE_SHELF),
             SessionEvent::Caps(_) => (32u64, tetherly_core::frame::TYPE_CAPS_UPDATE),
             SessionEvent::ActionListReq(r) => (
                 (r.request_id.len() + 32) as u64,
@@ -1691,9 +1699,15 @@ impl Node {
                         // first file of a drag-originated drop, bind its
                         // transfer_id to the drag_id so the completion hook can
                         // settle MOTW + reveal.
-                        self.claim_drag_offer(peer, &tid);
+                        let drag_claimed = self.claim_drag_offer(peer, &tid);
+                        // v0.2.89: a shelf fetch this node asked for is
+                        // expected too — both are user-initiated pulls, so a
+                        // trusted sender's offer is accepted without a prompt.
+                        let expected = drag_claimed || self.claim_expected_offer(peer, &t);
                         self.emit(file_offered(&t));
-                        let is_auto_accept = {
+                        let is_auto_accept = if expected && self.is_trusted(peer) {
+                            true
+                        } else {
                             let policy = self
                                 .shared
                                 .auto_accept_policy
@@ -1988,6 +2002,9 @@ impl Node {
             }
             SessionEvent::DragControl(msg) => {
                 self.receive_drag_control(peer, msg).await;
+            }
+            SessionEvent::Shelf(msg) => {
+                self.receive_shelf(peer, msg).await;
             }
             SessionEvent::Unknown(_) => {}
         }

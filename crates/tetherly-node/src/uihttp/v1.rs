@@ -221,6 +221,25 @@ fn outbox_resend_action(path: &str) -> Option<String> {
     (action == "resend" && !id.is_empty()).then(|| super::util::percent_decode(id))
 }
 
+/// v0.2.89: `/api/v1/shelf/{id}` -> id (single segment).
+fn shelf_item(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/v1/shelf/")?;
+    (!rest.is_empty() && !rest.contains('/')).then(|| super::util::percent_decode(rest))
+}
+
+/// v0.2.89: `/api/v1/shelf/{owner}/{id}/fetch` -> (owner, id).
+fn shelf_fetch_action(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix("/api/v1/shelf/")?;
+    let mut it = rest.split('/');
+    let (owner, id, action) = (it.next()?, it.next()?, it.next()?);
+    (it.next().is_none() && action == "fetch" && !owner.is_empty() && !id.is_empty()).then(|| {
+        (
+            super::util::percent_decode(owner),
+            super::util::percent_decode(id),
+        )
+    })
+}
+
 /// §164: `/api/v1/action/local/{id}` -> id (percent-decoded) — the
 /// remove-local-action route (legacy `DELETE /api/action/local?id=`).
 fn action_local_item(path: &str) -> Option<String> {
@@ -293,6 +312,11 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         "/api/v1/transfers/multi" | "/api/v1/transfers/batch" => Some(&["POST"]),
         "/api/v1/outbox" => Some(&["GET", "DELETE"]),
         p if outbox_resend_action(p).is_some() => Some(&["POST"]),
+        // v0.2.89: shared shelf + Windows drag probe callback.
+        "/api/v1/shelf" => Some(&["GET", "POST"]),
+        p if shelf_item(p).is_some() => Some(&["DELETE"]),
+        p if shelf_fetch_action(p).is_some() => Some(&["POST"]),
+        "/api/v1/drag/probe" => Some(&["POST"]),
         "/api/v1/storage" => Some(&["GET"]),
         "/api/v1/storage/clean" => Some(&["POST"]),
         "/api/v1/resume" => Some(&["GET"]),
@@ -729,6 +753,16 @@ pub(super) async fn route(
                 Err(e) => Err(core_error(e)),
             }
         }
+        ("GET", "/api/v1/shelf") => Ok(json(200, &node.shelf_view())),
+        ("POST", "/api/v1/shelf") => post_shelf(node, body).await,
+        ("DELETE", p) if shelf_item(p).is_some() => {
+            delete_shelf(node, &shelf_item(p).unwrap_or_default()).await
+        }
+        ("POST", p) if shelf_fetch_action(p).is_some() => {
+            let (owner, id) = shelf_fetch_action(p).unwrap_or_default();
+            post_shelf_fetch(node, &owner, &id).await
+        }
+        ("POST", "/api/v1/drag/probe") => post_drag_probe(node, body),
         ("POST", p) if outbox_resend_action(p).is_some() => {
             post_outbox_resend(node, &outbox_resend_action(p).unwrap_or_default()).await
         }
@@ -1664,6 +1698,52 @@ fn decode_send_data(
 enum SendSource {
     Path(std::path::PathBuf),
     Bytes(Vec<u8>),
+}
+
+/// v0.2.89 `POST /shelf`: register local files (metadata only).
+async fn post_shelf(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::ShelfAddRequest = parse_body_strict(body)?;
+    if req.paths.is_empty() {
+        return Err(error(ErrorCode::BadRequest, "paths must not be empty"));
+    }
+    if req.paths.len() > tetherly_core::shelf::SHELF_MAX_ENTRIES {
+        return Err(error(ErrorCode::BadRequest, "too many paths"));
+    }
+    Ok(json(200, &node.shelf_add(req.paths).await))
+}
+
+/// v0.2.89 `DELETE /shelf/{id}`.
+async fn delete_shelf(node: &Node, id: &str) -> Handled {
+    if node.shelf_remove(id).await {
+        Ok(no_content())
+    } else {
+        Err(error(
+            ErrorCode::NotFound,
+            format!("no such shelf item: {id}"),
+        ))
+    }
+}
+
+/// v0.2.89 `POST /shelf/{owner}/{id}/fetch`: pull a peer's shelf file.
+async fn post_shelf_fetch(node: &Node, owner: &str, id: &str) -> Handled {
+    let owner = node
+        .resolve_peer(owner)
+        .map_err(|e| error(ErrorCode::BadRequest, format!("bad peer id: {e}")))?;
+    node.shelf_fetch(&owner, id).await.map_err(core_error)?;
+    Ok(json(202, &serde_json::json!({ "requested": true })))
+}
+
+/// v0.2.89 `POST /drag/probe`: the Windows probe child reports its result.
+fn post_drag_probe(node: &Node, body: &[u8]) -> Handled {
+    let rep: tetherly_api::DragProbeReport = parse_body_strict(body)?;
+    if rep.paths.len() > 256 {
+        return Err(error(ErrorCode::BadRequest, "too many paths"));
+    }
+    if node.complete_drag_probe(rep.probe_id, rep.paths) {
+        Ok(no_content())
+    } else {
+        Err(error(ErrorCode::NotFound, "unknown or expired probe"))
+    }
 }
 
 /// `POST /transfers`: one file to one peer (legacy `/api/file/send`).
@@ -7405,6 +7485,27 @@ async fn write_sse_timeout(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.2.89: shelf paths parse to exactly one item / one fetch target.
+    #[test]
+    fn shelf_paths_parse_strictly() {
+        assert_eq!(shelf_item("/api/v1/shelf/ab12"), Some("ab12".into()));
+        assert_eq!(shelf_item("/api/v1/shelf/"), None);
+        assert_eq!(shelf_item("/api/v1/shelf/a/b"), None);
+        assert_eq!(
+            shelf_fetch_action("/api/v1/shelf/tdev_x/ab12/fetch"),
+            Some(("tdev_x".into(), "ab12".into()))
+        );
+        assert_eq!(shelf_fetch_action("/api/v1/shelf/tdev_x/ab12"), None);
+        assert_eq!(
+            shelf_fetch_action("/api/v1/shelf/tdev_x/ab12/fetch/x"),
+            None
+        );
+        assert_eq!(shelf_fetch_action("/api/v1/shelf//ab12/fetch"), None);
+        assert!(allowed("/api/v1/shelf").is_some());
+        assert_eq!(allowed("/api/v1/shelf/ab12"), Some(&["DELETE"][..]));
+        assert_eq!(allowed("/api/v1/drag/probe"), Some(&["POST"][..]));
+    }
 
     /// P3: open-path redaction is tier-gated — only Admin keeps the absolute
     /// path, lower tiers see an inbox-relative name.

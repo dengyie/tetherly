@@ -364,29 +364,28 @@ fn shared_edge_push_window_expires() {
 }
 
 #[test]
-fn button_held_blocks_shared_edge_return() {
+fn button_held_still_returns_after_sustained_push() {
+    // v0.2.89: a held button no longer pins the cursor on the remote screen
+    // (that gate stranded every cross-screen file drag at the edge); the
+    // sustained-push ramp alone guards accidental returns.
     let mut srv = InputServer::new(1512, 982);
     srv.set_edge(ScreenEdge::Top);
     enter_remote_via_top(&mut srv);
     roam_into_interior(&mut srv);
 
     srv.note_button(1, true);
-    for i in 0..120 {
-        let fired = srv.local_move_delta(300, 600, 0, 2).is_some();
-        assert!(
-            !fired,
-            "holding a button must block the return (drag protection, event {i})"
-        );
-        srv.drain();
-    }
-    srv.note_button(1, false);
+    assert!(
+        srv.local_move_delta(300, 600, 0, 2).is_none(),
+        "a single nudge must not return (ramp still applies)"
+    );
+    srv.drain();
     let mut returned = false;
-    for _ in 0..20 {
+    for _ in 0..200 {
         if srv.local_move_delta(300, 600, 0, 2).is_some() {
             returned = true;
             break;
         }
         srv.drain();
     }
-    assert!(returned, "release must re-arm the return");
+    assert!(returned, "a sustained push must return even with the button held");
 }

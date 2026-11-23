@@ -45,6 +45,7 @@ use tetherly_core::microphone::{
 use tetherly_core::remote_session::{
     RemoteSessionCloseFrame, RemoteSessionRequestFrame, RemoteSessionRespFrame,
 };
+use tetherly_core::shelf::ShelfMsg;
 use tetherly_core::topology::{TopologyStateFrame, TopologySyncReqFrame};
 use tetherly_core::virtual_display::{
     VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayDetachFrame,
@@ -106,6 +107,7 @@ pub enum SessionEvent {
     FileReject(FileDecision),
     FileDone(FileDone),
     DragControl(DragControlMsg),
+    Shelf(ShelfMsg),
     Caps(CapsUpdate),
     Unknown(u16),
 }
@@ -261,6 +263,9 @@ impl SessionEvent {
             TYPE_FILE_DONE => SessionEvent::FileDone(FileDone::from_payload(&frame.payload)?),
             TYPE_DRAG_CONTROL => {
                 SessionEvent::DragControl(DragControlMsg::from_payload(&frame.payload)?)
+            }
+            tetherly_core::frame::TYPE_SHELF => {
+                SessionEvent::Shelf(ShelfMsg::from_payload(&frame.payload)?)
             }
             TYPE_CAPS_UPDATE => SessionEvent::Caps(CapsUpdate::from_payload(&frame.payload)?),
             other => SessionEvent::Unknown(other),

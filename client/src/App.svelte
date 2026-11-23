@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isShelfInvalidation } from "./lib/shelf";
   import { onMount } from "svelte";
   import { HttpTransport, setApiToken } from "./lib/transport/http";
   import { TauriTransport, isTauri } from "./lib/transport/tauri";
@@ -59,6 +60,8 @@
   let pairing: PairingState = $state(initialPairing());
   let input: InputState = $state(initialInput());
   let transfers: TransfersState = $state(initialTransfers());
+  // v0.2.89: bumped whenever the shelf view must be refetched.
+  let shelfTick = $state(0);
   let inbox: InboxState = $state(initialInbox());
   let layout: LayoutState = $state(initialLayout());
   let settings: SettingsState = $state(initialSettings());
@@ -185,6 +188,7 @@
         const sec = sectionOf(ev.type);
         if (sec) changed[sec] += 1;
         apply(ev);
+        if (isShelfInvalidation(ev)) shelfTick += 1;
         if (ev.type === "snapshot") {
           sawSnapshot = true;
           // The daemon's burst is the Snapshot only (§220): pull the five
@@ -299,7 +303,7 @@
           {:else if page === "devices" && api}
             <Devices list={[...devices.byId.values()]} {api} />
           {:else if page === "transfers" && api}
-            <Transfers data={transfers.transfers} {api} />
+            <Transfers data={transfers.transfers} {api} {shelfTick} />
           {:else if page === "inbox" && api}
             <Inbox data={inbox.inbox} {api} />
           {:else if page === "activity"}

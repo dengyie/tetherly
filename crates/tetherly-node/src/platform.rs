@@ -9,6 +9,7 @@ use tetherly_core::{
 };
 
 pub mod cursor_shield;
+pub mod drag_probe;
 pub mod tray;
 
 pub struct SystemClip;

@@ -91,6 +91,7 @@ pub fn project(ev: &UiEvent) -> Vec<Mark> {
         | E::MultiDispatchCompleted { .. }
         | E::OutboxUpdated { .. }
         | E::OutboxCleared { .. } => invalidate(Topic::Transfers),
+        E::ShelfChanged { .. } => invalidate(Topic::Shelf),
         E::InboxFileDeleted { .. }
         | E::InboxCleared { .. }
         | E::InboxFileOpened { .. }

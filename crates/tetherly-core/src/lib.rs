@@ -43,6 +43,7 @@ pub mod replay;
 pub mod screen;
 pub mod screen_font;
 pub mod session;
+pub mod shelf;
 pub mod text;
 pub mod topology;
 pub mod virtual_display;
@@ -110,8 +111,8 @@ pub use frame::{
     TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_DRAG_CONTROL, TYPE_FOCUS_STATE,
     TYPE_FOCUS_SYNC_REQ, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
     TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE, TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK, TYPE_MIC_DETACH,
-    TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
-    TYPE_TOPOLOGY_SYNC_REQ,
+    TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_SHELF, TYPE_TEXT_MESSAGE,
+    TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
 };
 pub use handoff::{
     HandoffAction, HandoffEntry, HandoffStatus, ResourceHandoffValidator, SanitizedHandoffUrl,

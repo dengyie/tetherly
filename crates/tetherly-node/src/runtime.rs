@@ -53,6 +53,7 @@ mod config;
 mod discovery;
 mod drag;
 mod drag_controller;
+mod drag_handoff;
 mod drag_target;
 mod files;
 mod focus;
@@ -73,6 +74,7 @@ mod screen_mode;
 mod screen_status;
 mod screen_stream;
 mod session;
+mod shelf;
 mod shell_reveal;
 mod storage;
 mod topology;
@@ -1107,6 +1109,10 @@ struct Shared {
     /// completion hook can settle MOTW + reveal with the real source
     /// attribution. Populated when the first FileOffer of a drag arrives.
     pub(crate) transfer_drag_ids: Mutex<HashMap<String, (DeviceId, u64)>>,
+    /// v0.2.89 cross-screen drag handoff (probe, staging, echo filter).
+    pub(crate) drag_handoff: Mutex<drag_handoff::DragHandoffState>,
+    /// v0.2.89 shelf: local registered files + peers' catalogs.
+    pub(crate) shelf: Mutex<shelf::ShelfState>,
     /// §6.3 tray takeover: who owns the desktop tray surface. `client`
     /// claims mean the built-in tray hides itself; the watchdog (spawned by
     /// the daemon binary) reclaims via [`Node::tray_keepalive`] silence.
@@ -1124,6 +1130,8 @@ struct Shared {
 pub(crate) struct PendingDragDrop {
     pub(crate) peer: DeviceId,
     pub(crate) registered_ms: u64,
+    /// File offers of this drop still expected (v0.2.89 multi-file drag).
+    pub(crate) remaining: u32,
 }
 
 impl Shared {

@@ -545,6 +545,9 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::TrayPanel { .. } => {
             anyhow::bail!("tray-panel is a Windows-only internal command");
         }
+        Cmd::DragProbe { .. } => {
+            anyhow::bail!("drag-probe is a Windows-only internal command");
+        }
     }
     Ok(())
 }

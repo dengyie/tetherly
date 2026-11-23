@@ -30,6 +30,10 @@ impl Node {
         self.send_to(peer, frame).await
     }
 
+    pub(crate) fn drag_peer_label_pub(&self, peer: &DeviceId) -> String {
+        self.drag_peer_label(peer)
+    }
+
     /// Resolve the human-facing name/alias of a peer for MOTW attribution.
     /// Falls back to the raw device id string when no friendly name is known.
     fn drag_peer_label(&self, peer: &DeviceId) -> String {
@@ -100,6 +104,11 @@ impl Node {
                 drop_norm_x,
                 drop_norm_y,
             } => {
+                if self.is_outgoing_drag_echo(drag_id) {
+                    // v0.2.89: the receiver echoed our own handoff's confirm;
+                    // the files are already being offered.
+                    return;
+                }
                 // The controller tells us the user released LMB on our screen.
                 // Advance the target state machine to Dropping and record the
                 // drag_id so the first inbound FileOffer of this drop can claim
@@ -108,15 +117,21 @@ impl Node {
                 // FileOffer; we do not pull.
                 let confirm_echo = {
                     let mut target = self.shared.drag_target.lock().expect("drag_target");
+                    let file_count = target
+                        .active_session()
+                        .filter(|s| s.drag_id == drag_id)
+                        .map(|s| s.file_count)
+                        .unwrap_or(1)
+                        .max(1);
                     match target.handle_drop_confirm(drag_id, drop_norm_x, drop_norm_y, now) {
-                        Ok(echo) => Some(echo),
+                        Ok(echo) => Some((echo, file_count)),
                         Err(e) => {
                             warn!(peer = %peer, drag_id, error = %e, "drop confirm rejected");
                             None
                         }
                     }
                 };
-                if confirm_echo.is_some() {
+                if let Some((_, file_count)) = &confirm_echo {
                     self.shared
                         .pending_drag_drops
                         .lock()
@@ -126,11 +141,12 @@ impl Node {
                             crate::runtime::PendingDragDrop {
                                 peer: peer.clone(),
                                 registered_ms: now,
+                                remaining: *file_count,
                             },
                         );
                 }
                 // Echo the confirm back so the controller proceeds to stream.
-                if let Some(echo) = confirm_echo {
+                if let Some((echo, _)) = confirm_echo {
                     if let Err(e) = self.send_drag_control(peer, &echo).await {
                         warn!(peer = %peer, drag_id, error = %e, "drop confirm echo failed");
                     }
@@ -146,7 +162,7 @@ impl Node {
     /// [`PENDING_DRAG_TTL_MS`] are purged first: a confirm whose transfer
     /// never arrived (crash, dropped connection) must not mis-claim an
     /// unrelated later offer from the same peer.
-    pub(crate) fn claim_drag_offer(&self, peer: &DeviceId, transfer_id: &str) {
+    pub(crate) fn claim_drag_offer(&self, peer: &DeviceId, transfer_id: &str) -> bool {
         const PENDING_DRAG_TTL_MS: u64 = 30_000;
         let now = self.now_ms();
         let claimed = {
@@ -156,23 +172,33 @@ impl Node {
                 .lock()
                 .expect("pending_drag_drops");
             pending.retain(|_, p| now.saturating_sub(p.registered_ms) <= PENDING_DRAG_TTL_MS);
-            // Find a pending drop from this peer and claim it.
+            // A peer has at most one active drag at a time; every file offer
+            // of that drop claims it until its file count is used up.
             let found = pending
                 .iter()
                 .find(|(_, p)| p.peer == *peer)
                 .map(|(id, _)| *id);
-            found.and_then(|id| pending.remove(&id).map(|entry| (id, entry)))
+            found.and_then(|id| {
+                let entry = pending.get_mut(&id)?;
+                entry.remaining = entry.remaining.saturating_sub(1);
+                let claim = (id, entry.peer.clone());
+                if entry.remaining == 0 {
+                    pending.remove(&id);
+                }
+                Some(claim)
+            })
         };
-        if let Some((drag_id, entry)) = claimed {
-            // Source attribution rides with the claim so settlement can label
-            // MOTW with the real peer (it used to fall back to "peer" because
-            // the pending entry was already consumed here).
-            self.shared
-                .transfer_drag_ids
-                .lock()
-                .expect("transfer_drag_ids")
-                .insert(transfer_id.to_string(), (entry.peer, drag_id));
-        }
+        let Some((drag_id, source)) = claimed else {
+            return false;
+        };
+        // Source attribution rides with the claim so settlement can label
+        // MOTW with the real peer.
+        self.shared
+            .transfer_drag_ids
+            .lock()
+            .expect("transfer_drag_ids")
+            .insert(transfer_id.to_string(), (source, drag_id));
+        true
     }
 
     /// Settle a delivered drag payload when an inbound transfer lands on disk:
@@ -190,8 +216,15 @@ impl Node {
         let label = self.drag_peer_label(&peer);
         let now = self.now_ms();
         let mut target = self.shared.drag_target.lock().expect("drag_target");
-        if let Err(e) = target.on_delivery_completed(drag_id, saved_path, &label, true, now) {
-            warn!(drag_id, error = %e, "drag delivery settlement failed");
+        if target.active_session().map(|s| s.drag_id) == Some(drag_id) {
+            if let Err(e) = target.on_delivery_completed(drag_id, saved_path, &label, true, now) {
+                warn!(drag_id, error = %e, "drag delivery settlement failed");
+            }
+        } else if let Err(e) = super::shell_reveal::apply_motw(saved_path, &label) {
+            // Later files of a multi-file drop: the session already settled
+            // (and revealed the first file); tag the rest without opening one
+            // file-manager window per file.
+            warn!(drag_id, error = %e, "drag delivery MOTW failed");
         }
     }
 }
@@ -473,5 +506,33 @@ mod tests {
             "pending drop must be consumed by the offer claim"
         );
         let _ = std::fs::remove_file(&saved);
+    }
+
+    /// v0.2.89: a multi-file drag registers one pending drop that every file
+    /// offer of that drop claims (not just the first), and the claim tells
+    /// the offer handler to auto-accept regardless of the auto-accept policy.
+    #[test]
+    fn multi_file_drag_drop_claims_every_offer_then_expires() {
+        let (node, _dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("drag-multi-claim");
+        let peer = tetherly_core::DeviceId::from_id_pk(&[7u8; 32]);
+        node.shared.pending_drag_drops.lock().unwrap().insert(
+            42,
+            crate::runtime::PendingDragDrop {
+                peer: peer.clone(),
+                registered_ms: node.now_ms(),
+                remaining: 2,
+            },
+        );
+        assert!(node.claim_drag_offer(&peer, "tr_a"));
+        assert!(node.claim_drag_offer(&peer, "tr_b"));
+        assert!(
+            !node.claim_drag_offer(&peer, "tr_c"),
+            "a drop of two files must not claim a third, unrelated offer"
+        );
+        let ids = node.shared.transfer_drag_ids.lock().unwrap();
+        assert_eq!(ids.get("tr_a").map(|v| v.1), Some(42));
+        assert_eq!(ids.get("tr_b").map(|v| v.1), Some(42));
+        assert!(!ids.contains_key("tr_c"));
     }
 }

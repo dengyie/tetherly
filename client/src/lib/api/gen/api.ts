@@ -76,7 +76,7 @@ export type Snapshot = { system: System, devices: Array<Device>, pairing: Pairin
 
 export type DiagnosticFrame = { kind: string, payload: unknown, };
 
-export type Topic = "devices" | "pairing" | "input" | "system" | "layout" | "transfers" | "inbox" | "activity" | "clipboard" | "settings";
+export type Topic = "devices" | "pairing" | "input" | "system" | "layout" | "transfers" | "inbox" | "activity" | "clipboard" | "settings" | "shelf";
 
 export type Event = { "type": "snapshot", snapshot: Snapshot, } | { "type": "diagnostic", kind: string, payload: unknown, } | { "type": "device.updated", device: Device, } | { "type": "device.removed", id: string, } | { "type": "pairing.changed", pairing: Pairing, } | { "type": "input.changed", input: Input, } | { "type": "system.changed", system: System, } | { "type": "transfers.changed", transfers: Transfers, } | { "type": "inbox.changed", inbox: Inbox, } | { "type": "layout.changed", layout: Layout, } | { "type": "settings.changed", settings: Settings, } | { "type": "activity.changed", activity: Activity, } | { "type": "invalidated", topic: Topic, };
 
@@ -136,6 +136,22 @@ export type Transfers = { active_count: number, terminal_count: number, transfer
  * onto the transfers resource it belongs to.
  */
 stats: TransferStats, };
+
+export type ShelfItem = { id: string, name: string, size: number, mtime_ms: number,
+/**
+ * False once the file changed or vanished since it was registered.
+ */
+available: boolean, };
+
+export type ShelfPeer = { device_id: string, name: string, items: Array<ShelfItem>, };
+
+export type Shelf = { mine: Array<ShelfItem>, peers: Array<ShelfPeer>, };
+
+export type ShelfAddRequest = { paths: Array<string>, };
+
+export type ShelfAddReport = { added: Array<ShelfItem>, errors: Array<string>, };
+
+export type DragProbeReport = { probe_id: number, paths: Array<string>, };
 
 export type InboxFile = { name: string, size: number, modified_at_secs: number, is_safe: boolean, };
 

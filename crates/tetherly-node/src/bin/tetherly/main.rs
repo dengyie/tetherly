@@ -202,6 +202,13 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // v0.2.89: the drag probe child also needs an STA main thread (OLE).
+    #[cfg(windows)]
+    if let Cmd::DragProbe { ui_port, probe_id } = &cli.cmd {
+        let code = tetherly_node::platform::drag_probe::run_drag_probe_process(*ui_port, *probe_id);
+        std::process::exit(code);
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         // §218: same per-worker lift as the tray daemon arm (see above).

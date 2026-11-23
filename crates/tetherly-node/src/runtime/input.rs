@@ -4259,6 +4259,12 @@ impl Node {
     /// Push a physical mouse-button observation to the remote seat. No-op
     /// while the seat is local (the engine gates the same way).
     pub fn drive_input_button(&self, mask: u8, down: bool) -> Result<(), CoreError> {
+        if mask & tetherly_core::BTN_LEFT != 0 {
+            // v0.2.89 cross-screen file drag: observe every physical LMB
+            // edge (both seats) before the remote-only gate below.
+            let seat = self.shared.input_engine.lock().expect("engine").seat();
+            self.drag_handoff_on_lmb(seat, down);
+        }
         let events = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             if server.seat() != CursorSeat::Remote {
@@ -4387,6 +4393,13 @@ impl Node {
         // Diagnostic (v0.1.83): name every push batch — enter-carrying ones
         // AND lone edge-clamp Moves (rem_y==1000) — so the ghost
         // re-placement frame's producer is attributable.
+        for ev in &events {
+            match ev.kind {
+                tetherly_core::InputKind::Enter => self.drag_handoff_on_enter(),
+                tetherly_core::InputKind::Leave => self.drag_handoff_on_return(),
+                _ => {}
+            }
+        }
         for (idx, ev) in events.iter().enumerate() {
             match &ev.kind {
                 tetherly_core::InputKind::Enter => {
@@ -4672,6 +4685,7 @@ impl Node {
                                 node.shared.telemetry.record_input_rx(f_len);
                                 if let Ok(ev) = InputEvent::from_frame(&frame) {
                                     if matches!(ev.kind, tetherly_core::InputKind::Leave) {
+                                        node.drag_handoff_on_return();
                                         node.shared.input_engine.lock().expect("engine").on_remote_leave();
                                         *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
                                         node.release_input_tunnel_local("target returned to its local seat");
@@ -4895,6 +4909,9 @@ impl Node {
                                             entry_moves_logged.store(0, Ordering::SeqCst);
                                         }
                                         InputKind::Button { mask, down } => {
+                                            if *down && mask & tetherly_core::BTN_LEFT != 0 {
+                                                node.record_drag_baseline();
+                                            }
                                             node.shared
                                                 .input_rx_buttons
                                                 .fetch_add(1, Ordering::SeqCst);
@@ -4952,8 +4969,24 @@ impl Node {
                                     // refreshed on every other event kind.
                                     let is_move = matches!(ev.kind, InputKind::Move { .. });
                                     let is_leave = matches!(ev.kind, InputKind::Leave);
+                                    // v0.2.89: the controller is carrying a drag
+                                    // off this screen. Read what the OS drag holds,
+                                    // cancel it here (Esc) before the Leave releases
+                                    // the button over the edge, then ship the files.
+                                    let mut handoff_files: Vec<std::path::PathBuf> = Vec::new();
+                                    if is_leave && client.buttons_down() & tetherly_core::BTN_LEFT != 0 {
+                                        handoff_files = node.probe_drag_files().await;
+                                        if !handoff_files.is_empty() {
+                                            node.cancel_local_drag();
+                                            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                                        }
+                                    }
                                     let ev_seq = ev.seq;
                                     let apply_res = client.apply(ev);
+                                    if !handoff_files.is_empty() {
+                                        info!(peer = %peer_id, count = handoff_files.len(), "file drag carried back to the controller");
+                                        node.spawn_handoff(peer_id.clone(), std::mem::take(&mut handoff_files));
+                                    }
                                     // v0.2.31: mirror the client's counters so
                                     // `GET /api/input` shows applied vs dropped.
                                     node.shared
