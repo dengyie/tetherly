@@ -336,6 +336,25 @@ pub fn resize_panel<R: Runtime>(app: &AppHandle<R>, height: f64) {
     }
 }
 
+/// What a left click on the tray icon does to the panel (§238).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelAction {
+    Hide,
+    Show,
+}
+
+/// Hide only a panel that is both visible and focused — i.e. one the user is
+/// looking at. A "visible" but unfocused panel (left on another Space, behind
+/// a fullscreen app, or after a missed focus-out) is re-shown instead, so a
+/// click can never toggle between two invisible states.
+pub fn panel_click_action(visible: bool, focused: bool) -> PanelAction {
+    if visible && focused {
+        PanelAction::Hide
+    } else {
+        PanelAction::Show
+    }
+}
+
 /// Toggle the frameless tray panel. It is created lazily (hidden), anchored
 /// per [`PANEL_ANCHOR`] on the monitor of the click, then shown/hidden.
 /// Focus-out hides it (the window-event hook installs once at creation).
@@ -355,6 +374,9 @@ pub fn toggle_panel<R: Runtime>(app: &AppHandle<R>, cursor: &tauri::PhysicalPosi
             .skip_taskbar(true)
             .shadow(true)
             .always_on_top(true)
+            // §238: follow the user onto any Space (fullscreen apps live in
+            // their own Spaces) instead of opening off-screen.
+            .visible_on_all_workspaces(true)
             .visible(false)
             .inner_size(PANEL_W, PANEL_H);
             match b.build() {
@@ -362,6 +384,7 @@ pub fn toggle_panel<R: Runtime>(app: &AppHandle<R>, cursor: &tauri::PhysicalPosi
                     let wh = w.clone();
                     w.on_window_event(move |e| {
                         if let tauri::WindowEvent::Focused(false) = e {
+                            tracing::info!("tray panel: focus lost -> hide");
                             let _ = wh.hide();
                         }
                     });
@@ -374,7 +397,18 @@ pub fn toggle_panel<R: Runtime>(app: &AppHandle<R>, cursor: &tauri::PhysicalPosi
             }
         }
     };
-    if panel.is_visible().unwrap_or(false) {
+    let visible = panel.is_visible().unwrap_or(false);
+    let focused = panel.is_focused().unwrap_or(false);
+    let action = panel_click_action(visible, focused);
+    tracing::info!(
+        visible,
+        focused,
+        ?action,
+        x = cursor.x,
+        y = cursor.y,
+        "tray panel: click"
+    );
+    if action == PanelAction::Hide {
         let _ = panel.hide();
     } else {
         // Re-anchor on every open so multi-monitor moves follow the click.
@@ -386,8 +420,12 @@ pub fn toggle_panel<R: Runtime>(app: &AppHandle<R>, cursor: &tauri::PhysicalPosi
             .filter(|h| *h > 0.0)
             .unwrap_or(PANEL_H);
         place_panel(app, &panel, Some((cursor.x, cursor.y)), PANEL_W, h);
-        let _ = panel.show();
-        let _ = panel.set_focus();
+        if let Err(e) = panel.show() {
+            tracing::warn!("tray panel show failed: {e}");
+        }
+        if let Err(e) = panel.set_focus() {
+            tracing::warn!("tray panel focus failed: {e}");
+        }
     }
 }
 
@@ -482,5 +520,30 @@ mod placement_tests {
             12.0,
         );
         assert_eq!(x, 3024.0 - 760.0 - 12.0);
+    }
+}
+
+#[cfg(test)]
+mod toggle_tests {
+    use super::{panel_click_action, PanelAction};
+
+    #[test]
+    fn click_hides_only_a_panel_the_user_is_actually_looking_at() {
+        assert_eq!(panel_click_action(true, true), PanelAction::Hide);
+    }
+
+    #[test]
+    fn click_on_a_visible_but_unfocused_panel_reopens_it_instead_of_hiding() {
+        // §238: a panel left "visible" off-screen (other Space / fullscreen
+        // app / lost focus without the hide hook firing) must not swallow
+        // the click — otherwise clicks alternate between two invisible
+        // states and the tray looks dead.
+        assert_eq!(panel_click_action(true, false), PanelAction::Show);
+    }
+
+    #[test]
+    fn click_on_a_hidden_panel_shows_it() {
+        assert_eq!(panel_click_action(false, false), PanelAction::Show);
+        assert_eq!(panel_click_action(false, true), PanelAction::Show);
     }
 }

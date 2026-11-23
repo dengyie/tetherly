@@ -9,6 +9,7 @@
 
 pub mod events;
 pub mod proxy;
+pub mod shelllog;
 pub mod token;
 pub mod tray;
 pub mod trayowner;
