@@ -451,4 +451,6 @@
 - 修复1：trayui::panel_origin 纯函数（Windows=点击所在显示器工作区右下角，留 12px 边距；macOS=图标下方并夹在工作区内），物理像素计算；resize 后重新锚定（向上长高）。
 - 根因2：NotifyBannerConfig 默认 banners_enabled=true；客户端 notice_for 弹系统通知（键鼠接管/回到本机/新消息）完全不看该开关；紧急退出 toast 也绕过开关。
 - 修复2：默认 false；客户端每次弹通知前读 GET /api/v1/notify/config（读不到=关）；紧急退出 toast 受开关控制。开启：`tetherly notify config --banners true`（仅内存，重启回到关闭）。
-- [ ] 部署后 home-win 目测面板位置；Mac/Win 切屏不再弹通知
+- [x] v0.2.88 已部署：两端 health 0.2.88，notify config banners_enabled=false，受保护进程未受影响；两端客户端已重新拉起
+- [ ] 用户目测：Windows 面板在右下角；切屏不再弹通知
+- [ ] 待办：deploy.sh 安装客户端后自动拉起（Windows Session 1 / Mac open）
