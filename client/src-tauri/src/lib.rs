@@ -188,16 +188,31 @@ pub fn run() {
                 if let Some(ui) = fwd.try_state::<TrayUi<tauri::Wry>>() {
                     ui.on_link(up);
                 }
-                // §6.3 tray takeover: first live link claims the surface
-                // (idempotent — only the transition fires the PATCH).
-                if up {
-                    let once = fwd.state::<trayowner::Claimed>();
-                    if !once.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                        let d = fwd.state::<Daemon>();
+                // §6.3 tray takeover: every down→up edge (re)claims the
+                // surface — a restarted daemon or a watchdog reclaim resets
+                // the owner, so a once-per-process claim left two icons.
+                if fwd.state::<trayowner::Claimed>().on_link(up) {
+                    let d = fwd.state::<Daemon>();
+                    let (port, token) = (d.port, d.token.clone());
+                    tauri::async_runtime::spawn(async move {
+                        trayowner::claim(port, &token).await;
+                    });
+                }
+            });
+            // §6.3: watchdog reclaims without a link drop (sleep/wake) are
+            // invisible to the edge claim above — poll while linked.
+            let rc = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(trayowner::RECHECK).await;
+                    let linked = rc
+                        .state::<trayowner::Claimed>()
+                        .0
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    if linked {
+                        let d = rc.state::<Daemon>();
                         let (port, token) = (d.port, d.token.clone());
-                        tauri::async_runtime::spawn(async move {
-                            trayowner::claim(port, &token).await;
-                        });
+                        trayowner::recheck(port, &token).await;
                     }
                 }
             });

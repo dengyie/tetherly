@@ -665,6 +665,13 @@ mod macos_tray {
                     if let Some(button) = self.ivars().button.as_ref() {
                         button.setAlphaValue(if want { 1.0 } else { 0.0 });
                     }
+                    // Alpha alone left an invisible, still-clickable gap in
+                    // the menu bar; zero length collapses the slot. Not
+                    // setVisible(false): AppKit persists that per autosave
+                    // name and would keep the item hidden after a restart.
+                    if let Some(item) = self.ivars().item.as_ref() {
+                        item.setLength(if want { -1.0 } else { 0.0 });
+                    }
                     if !want {
                         hide_panel();
                     }
