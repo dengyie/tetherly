@@ -133,13 +133,27 @@ pub fn run() {
                             )
                         });
                     if let Some(notice) = notice {
-                        use tauri_plugin_notification::NotificationExt;
-                        let _ = fwd
-                            .notification()
-                            .builder()
-                            .title(notice.title)
-                            .body(notice.body)
-                            .show();
+                        // §234: desktop notifications are opt-in. The daemon's
+                        // banner switch (default OFF) is the single source of
+                        // truth — read it per notice so a settings change
+                        // applies at once without a cache to invalidate.
+                        let app = fwd.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let d = app.state::<Daemon>();
+                            let enabled = matches!(
+                                proxy::request(d.port, &d.token, "GET", "/api/v1/notify/config", None).await,
+                                Ok(r) if r.status == 200 && tray::notices_enabled(&r.body)
+                            );
+                            if enabled {
+                                use tauri_plugin_notification::NotificationExt;
+                                let _ = app
+                                    .notification()
+                                    .builder()
+                                    .title(notice.title)
+                                    .body(notice.body)
+                                    .show();
+                            }
+                        });
                     }
                 }
             });
@@ -232,12 +246,8 @@ pub fn run() {
                         "close" => hide_panel(),
                         "quit" => act.exit(0),
                         "resize" => {
-                            if let (Some(h), Some(panel)) = (
-                                payload["height"].as_f64(),
-                                act.get_webview_window("tray-panel"),
-                            ) {
-                                let h = h.clamp(trayui::PANEL_MIN_H, trayui::PANEL_MAX_H);
-                                let _ = panel.set_size(tauri::LogicalSize::new(trayui::PANEL_W, h));
+                            if let Some(h) = payload["height"].as_f64() {
+                                trayui::resize_panel(&act, h);
                             }
                         }
                         _ => {}

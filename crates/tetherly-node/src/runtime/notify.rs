@@ -37,7 +37,8 @@ pub struct NotifyBannerConfig {
 impl Default for NotifyBannerConfig {
     fn default() -> Self {
         Self {
-            banners_enabled: true,
+            // §234: opt-in — banners interrupt the user mid-work.
+            banners_enabled: false,
             dnd_mode: DndMode::Off,
             sound_enabled: true,
             mask_otp: true,
@@ -991,5 +992,17 @@ impl Node {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::NotifyBannerConfig;
+
+    /// Desktop banners interrupt the user mid-work (seat switches, file
+    /// receipts): they are strictly opt-in on every platform.
+    #[test]
+    fn banners_are_off_by_default() {
+        assert!(!NotifyBannerConfig::default().banners_enabled);
     }
 }

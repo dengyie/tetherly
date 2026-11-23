@@ -2452,10 +2452,12 @@ impl Node {
                             node.disarm_input_capture();
                             crate::platform::warp_mouse_position(cx, cy);
                             node.emit(UiEvent::input_seat_changed("local", true, None));
-                            crate::platform::show_system_toast(
-                                "Tetherly",
-                                "已安全返回 Mac 本地控制 (双击 Esc)",
-                            );
+                            if node.notify_config().banners_enabled {
+                                crate::platform::show_system_toast(
+                                    "Tetherly",
+                                    "已安全返回本地控制 (双击 Esc)",
+                                );
+                            }
                             break;
                         }
                     }

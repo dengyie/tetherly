@@ -3167,6 +3167,11 @@ mod locator_policy_tests {
         };
         let clock = Arc::new(ManualClock::new(10_000));
         let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+        // Banners are opt-in (§234); this test exercises focus suppression.
+        node.update_notify_config(NotifyBannerConfig {
+            banners_enabled: true,
+            ..NotifyBannerConfig::default()
+        });
 
         // 1. Initial focus status: inactive by default
         let st0 = node.focus_status();

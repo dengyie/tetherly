@@ -445,3 +445,10 @@
 - [x] 修法：`client_token_sddl(console_sid)` = 原 DACL + `(A;;FR;;;<console SID>)`，无人登录时回落 `IU`；非 `S-1-<digits>-…` 形态 SID 视为缺失（防 ACE 注入）。`console_user_sid` 从 tray.rs 移到 cred.rs 共用。client.token 每次守护进程启动重签，部署重启即生效。3 个新单测。b6438e2。
 - [x] 真机 v0.2.87：icacls `DESKTOP-VST7EIE\mango:(R)`；Session 1 `tetherly://open` → 客户端 pid 22764 s=1 常驻，浏览器进程数不变。注意经 scheme 启动时进程名显示为 8.3 短名 `TETHER~1`（不是 tetherly-shell），deploy.sh 停客户端改为按解析后的长路径匹配。
 - [ ] 用户目视：托盘「打开主窗口」弹出客户端窗口。
+
+## §234 Windows 托盘面板右下角 + 通知默认关闭（2026-11-23）
+- 根因1：客户端 tray-panel 沿用 macOS 菜单栏语义（光标下方 +6px），Windows 任务栏在底部 → 面板落到屏幕外/任务栏后。
+- 修复1：trayui::panel_origin 纯函数（Windows=点击所在显示器工作区右下角，留 12px 边距；macOS=图标下方并夹在工作区内），物理像素计算；resize 后重新锚定（向上长高）。
+- 根因2：NotifyBannerConfig 默认 banners_enabled=true；客户端 notice_for 弹系统通知（键鼠接管/回到本机/新消息）完全不看该开关；紧急退出 toast 也绕过开关。
+- 修复2：默认 false；客户端每次弹通知前读 GET /api/v1/notify/config（读不到=关）；紧急退出 toast 受开关控制。开启：`tetherly notify config --banners true`（仅内存，重启回到关闭）。
+- [ ] 部署后 home-win 目测面板位置；Mac/Win 切屏不再弹通知

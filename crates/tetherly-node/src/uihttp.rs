@@ -967,7 +967,7 @@ mod tests {
         let (_, code, body) =
             raw_with_head(port, "GET", "/api/v1/notify/config", Some(&auth)).await;
         assert_eq!(code, 200, "{body}");
-        assert_eq!(body["config"]["banners_enabled"], true, "{body}");
+        assert_eq!(body["config"]["banners_enabled"], false, "{body}");
         assert_eq!(body["totals"]["dispatched"], 0, "{body}");
 
         // Message history on a fresh node: empty, zeroed.

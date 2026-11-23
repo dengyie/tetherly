@@ -229,6 +229,15 @@ impl NoticeSeen {
     }
 }
 
+/// Whether the daemon's notification config (`GET /api/v1/notify/config`)
+/// allows desktop notifications. Anything unreadable counts as OFF (§234:
+/// notifications are opt-in on every platform).
+pub fn notices_enabled(config: &serde_json::Value) -> bool {
+    config["config"]["banners_enabled"]
+        .as_bool()
+        .unwrap_or(false)
+}
+
 /// Decide whether a forwarded frame deserves a system notification.
 /// Rules (§6.2 acceptance: 系统通知):
 /// - seat → remote: a peer took over the keyboard/mouse NOW;
@@ -314,6 +323,18 @@ pub fn notice_for(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notices_follow_the_daemon_banner_switch_and_default_off() {
+        use super::notices_enabled;
+        let on = serde_json::json!({"config": {"banners_enabled": true}});
+        let off = serde_json::json!({"config": {"banners_enabled": false}});
+        assert!(notices_enabled(&on));
+        assert!(!notices_enabled(&off));
+        // Unknown / unreadable config never buzzes the user.
+        assert!(!notices_enabled(&serde_json::json!({})));
+        assert!(!notices_enabled(&serde_json::Value::Null));
+    }
+
     use super::*;
     use serde_json::json;
 

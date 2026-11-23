@@ -229,29 +229,122 @@ const PANEL_H: f64 = 468.0;
 pub const PANEL_MIN_H: f64 = 200.0;
 pub const PANEL_MAX_H: f64 = 640.0;
 
-/// Toggle the 360×480 frameless panel. It is created lazily near the tray
-/// icon (the click's physical cursor position), then shown/hidden. Focus-out
-/// hides it (the window-event hook installs once at creation).
+/// Where the tray panel hangs relative to the tray icon (§234).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelAnchor {
+    /// macOS: the menu bar is on top — hang below the clicked icon.
+    BelowCursor,
+    /// Windows: the taskbar is at the bottom — pin to the work area's
+    /// bottom-right corner, above the taskbar, like Magpie/the system flyouts.
+    BottomRight,
+}
+
+/// The platform's panel anchor.
+pub const PANEL_ANCHOR: PanelAnchor = if cfg!(target_os = "macos") {
+    PanelAnchor::BelowCursor
+} else {
+    PanelAnchor::BottomRight
+};
+
+/// Margin between the panel and the work-area edge, logical px.
+pub const PANEL_GAP: f64 = 12.0;
+
+/// An axis-aligned rectangle in physical pixels (a monitor's work area).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PxRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// Panel top-left corner, all values physical px. Pure so tests pin the
+/// geometry: the panel always lands fully inside `work` (never behind the
+/// taskbar, never off-screen).
+pub fn panel_origin(
+    anchor: PanelAnchor,
+    cursor: (f64, f64),
+    work: PxRect,
+    size: (f64, f64),
+    gap: f64,
+) -> (f64, f64) {
+    let (w, h) = size;
+    let max_x = (work.x + work.w - w - gap).max(work.x);
+    let max_y = (work.y + work.h - h - gap).max(work.y);
+    match anchor {
+        PanelAnchor::BottomRight => (max_x, max_y),
+        PanelAnchor::BelowCursor => (
+            (cursor.0 - w / 2.0).clamp(work.x.min(max_x), max_x),
+            (cursor.1 + 6.0).clamp(work.y, max_y),
+        ),
+    }
+}
+
+/// Position `panel` (logical size `w`×`h`) for a tray click at `cursor`
+/// (physical) on the monitor that contains the click — falling back to the
+/// panel's current, then the primary monitor.
+fn place_panel<R: Runtime>(
+    app: &AppHandle<R>,
+    panel: &tauri::WebviewWindow<R>,
+    cursor: Option<(f64, f64)>,
+    w: f64,
+    h: f64,
+) {
+    let monitor = cursor
+        .and_then(|(x, y)| app.monitor_from_point(x, y).ok().flatten())
+        .or_else(|| panel.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(m) = monitor else { return };
+    let scale = m.scale_factor();
+    let wa = m.work_area();
+    let work = PxRect {
+        x: f64::from(wa.position.x),
+        y: f64::from(wa.position.y),
+        w: f64::from(wa.size.width),
+        h: f64::from(wa.size.height),
+    };
+    // No click (resize re-anchor): keep the current horizontal anchor.
+    let cursor = cursor.unwrap_or_else(|| {
+        panel
+            .outer_position()
+            .map(|p| (f64::from(p.x) + w * scale / 2.0, f64::from(p.y) - 6.0))
+            .unwrap_or((work.x + work.w, work.y))
+    });
+    let (x, y) = panel_origin(
+        PANEL_ANCHOR,
+        cursor,
+        work,
+        (w * scale, h * scale),
+        PANEL_GAP * scale,
+    );
+    let _ = panel.set_position(tauri::PhysicalPosition::new(
+        x.round() as i32,
+        y.round() as i32,
+    ));
+}
+
+/// Apply a content-reported height to the open panel and re-anchor it so a
+/// bottom-anchored (Windows) panel grows upward instead of under the taskbar.
+pub fn resize_panel<R: Runtime>(app: &AppHandle<R>, height: f64) {
+    let Some(panel) = app.get_webview_window("tray-panel") else {
+        return;
+    };
+    let h = height.clamp(PANEL_MIN_H, PANEL_MAX_H);
+    let _ = panel.set_size(tauri::LogicalSize::new(PANEL_W, h));
+    if PANEL_ANCHOR == PanelAnchor::BottomRight {
+        place_panel(app, &panel, None, PANEL_W, h);
+    }
+}
+
+/// Toggle the frameless tray panel. It is created lazily (hidden), anchored
+/// per [`PANEL_ANCHOR`] on the monitor of the click, then shown/hidden.
+/// Focus-out hides it (the window-event hook installs once at creation).
 pub fn toggle_panel<R: Runtime>(app: &AppHandle<R>, cursor: &tauri::PhysicalPosition<f64>) {
     const LABEL: &str = "tray-panel";
-    // Anchor: horizontally centered under the cursor (the tray icon), a few
-    // px below it. The click position is physical; the builder wants logical.
-    let anchor = |app: &AppHandle<R>| {
-        let scale = app
-            .primary_monitor()
-            .ok()
-            .flatten()
-            .map(|m| m.scale_factor())
-            .unwrap_or(1.0);
-        (
-            (cursor.x / scale - PANEL_W / 2.0).max(0.0),
-            (cursor.y / scale + 6.0).max(0.0),
-        )
-    };
     let panel = match app.get_webview_window(LABEL) {
         Some(w) => w,
         None => {
-            let mut b = tauri::WebviewWindowBuilder::new(
+            let b = tauri::WebviewWindowBuilder::new(
                 app,
                 LABEL,
                 tauri::WebviewUrl::App("#tray".into()),
@@ -262,9 +355,8 @@ pub fn toggle_panel<R: Runtime>(app: &AppHandle<R>, cursor: &tauri::PhysicalPosi
             .skip_taskbar(true)
             .shadow(true)
             .always_on_top(true)
+            .visible(false)
             .inner_size(PANEL_W, PANEL_H);
-            let (x, y) = anchor(app);
-            b = b.position(x, y);
             match b.build() {
                 Ok(w) => {
                     let wh = w.clone();
@@ -285,10 +377,110 @@ pub fn toggle_panel<R: Runtime>(app: &AppHandle<R>, cursor: &tauri::PhysicalPosi
     if panel.is_visible().unwrap_or(false) {
         let _ = panel.hide();
     } else {
-        // Re-anchor on every open so multi-monitor moves keep it near the icon.
-        let (x, y) = anchor(app);
-        let _ = panel.set_position(tauri::LogicalPosition::new(x, y));
+        // Re-anchor on every open so multi-monitor moves follow the click.
+        let h = panel
+            .inner_size()
+            .ok()
+            .zip(panel.scale_factor().ok())
+            .map(|(s, k)| f64::from(s.height) / k)
+            .filter(|h| *h > 0.0)
+            .unwrap_or(PANEL_H);
+        place_panel(app, &panel, Some((cursor.x, cursor.y)), PANEL_W, h);
         let _ = panel.show();
         let _ = panel.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::{panel_origin, PanelAnchor, PxRect};
+
+    // home-win: 1920×1080 screen, taskbar 48 px at the bottom → work area
+    // 0,0–1920×1032 (production probe 2026-11-23).
+    const WIN_WORK: PxRect = PxRect {
+        x: 0.0,
+        y: 0.0,
+        w: 1920.0,
+        h: 1032.0,
+    };
+
+    #[test]
+    fn windows_panel_sits_in_the_bottom_right_corner_above_the_taskbar() {
+        // Click on the tray icon (inside the taskbar, y > work bottom).
+        let (x, y) = panel_origin(
+            PanelAnchor::BottomRight,
+            (1700.0, 1056.0),
+            WIN_WORK,
+            (380.0, 468.0),
+            12.0,
+        );
+        assert_eq!((x, y), (1920.0 - 380.0 - 12.0, 1032.0 - 468.0 - 12.0));
+        // Fully inside the work area: nothing hidden behind the taskbar.
+        assert!(y + 468.0 <= 1032.0 && x + 380.0 <= 1920.0);
+    }
+
+    #[test]
+    fn windows_corner_ignores_where_on_the_taskbar_the_icon_was_clicked() {
+        let a = panel_origin(
+            PanelAnchor::BottomRight,
+            (40.0, 1060.0),
+            WIN_WORK,
+            (380.0, 300.0),
+            12.0,
+        );
+        let b = panel_origin(
+            PanelAnchor::BottomRight,
+            (1880.0, 1040.0),
+            WIN_WORK,
+            (380.0, 300.0),
+            12.0,
+        );
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn windows_corner_respects_a_secondary_monitor_offset_and_hidpi() {
+        // Monitor to the right at 150%: physical work area 1920..4800 × 0..2088.
+        let work = PxRect {
+            x: 1920.0,
+            y: 0.0,
+            w: 2880.0,
+            h: 2088.0,
+        };
+        let (x, y) = panel_origin(
+            PanelAnchor::BottomRight,
+            (4500.0, 2140.0),
+            work,
+            (570.0, 702.0),
+            18.0,
+        );
+        assert_eq!((x, y), (4800.0 - 570.0 - 18.0, 2088.0 - 702.0 - 18.0));
+    }
+
+    #[test]
+    fn macos_panel_hangs_below_the_menubar_icon_clamped_to_the_screen() {
+        let work = PxRect {
+            x: 0.0,
+            y: 50.0,
+            w: 3024.0,
+            h: 1914.0,
+        };
+        let (x, y) = panel_origin(
+            PanelAnchor::BelowCursor,
+            (1500.0, 20.0),
+            work,
+            (760.0, 936.0),
+            12.0,
+        );
+        assert_eq!((x, y), (1500.0 - 380.0, 50.0));
+        // An icon at the far right edge must not push the panel off-screen.
+        let (x, _) = panel_origin(
+            PanelAnchor::BelowCursor,
+            (3010.0, 20.0),
+            work,
+            (760.0, 936.0),
+            12.0,
+        );
+        assert_eq!(x, 3024.0 - 760.0 - 12.0);
     }
 }

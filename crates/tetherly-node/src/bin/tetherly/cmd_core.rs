@@ -1772,7 +1772,7 @@ pub(crate) fn print_event(v: &serde_json::Value) {
             println!("[notification_banner_sent] title=\"{title}\" app={app} is_otp={is_otp}");
         }
         "notify_config_changed" => {
-            let banners = v["banners_enabled"].as_bool().unwrap_or(true);
+            let banners = v["banners_enabled"].as_bool().unwrap_or(false);
             let dnd = v["dnd_mode"].as_str().unwrap_or("off");
             let sound = v["sound_enabled"].as_bool().unwrap_or(true);
             let mask_otp = v["mask_otp"].as_bool().unwrap_or(false);
