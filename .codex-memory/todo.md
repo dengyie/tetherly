@@ -459,4 +459,5 @@
 - 拖拽根因：InputServer 在 buttons_down≠0 时禁止回切本机（旧「拖拽保护」），按住左键的拖拽永远卡在边缘、鼠标过不去；且 OS 拖拽会话不跨机器，即便过去也没有文件。
 - 修复：去掉按键门控（只保留持续推挤坡道防误切）；越界时探测在途拖拽文件（mac 拖拽剪贴板 changeCount 门控；Windows 守护以控制台用户拉起 `tetherly drag-probe` 隐形 OLE drop target 读 CF_HDROP 回报 POST /api/v1/drag/probe），本地注入 Esc 取消，再走常规传输 + RemoteDragEnter/RemoteDropConfirm 免确认接收。
 - 共享架：Transfers 页拖入只登记路径/大小/mtime（shelf.json，≤200 条，系统/数据目录黑名单）；目录经 Shelf 帧同步给受信任对端；对端「下载」→ Fetch → 所有者复核（变更即「已失效」）→ 暂存 → 常规传输 → 请求方自动收入收件箱。
+- [x] 部署：v0.2.90 CI/release 全绿，deploy.sh --target all 双端 health=0.2.90，客户端 0.2.90 已重新拉起，home-win 受保护进程启动时间未变
 - [ ] 用户实测：mac↔win 双向拖文件过边；共享架双向下载；mac 侧共享受保护目录需「完全磁盘访问权限」
