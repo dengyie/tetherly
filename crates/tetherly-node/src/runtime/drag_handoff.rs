@@ -532,11 +532,13 @@ impl Node {
             }
         }
         info!(peer = %peer, drag_id, count = ok.len(), "drag handoff: offering files");
+        // The offer only announces each file; the bytes are read when the
+        // peer accepts (and again on a resume). The staged copy stays until
+        // `sweep_stale_stages` ages it out.
         for (path, name, _) in ok {
             if let Err(e) = self.offer_and_send_file(peer, &path, Some(&name)).await {
                 warn!(peer = %peer, file = %name, error = %e, "drag handoff: send failed");
             }
-            let _ = std::fs::remove_dir_all(path.parent().unwrap_or(&path));
         }
     }
 }
@@ -601,6 +603,52 @@ mod tests {
         assert!(stage_user_file(&staging, &src_dir, 0).is_err());
         assert!(stage_user_file(&staging, &root.join("missing"), 0).is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// §240: the offer only announces the file; its bytes are read when the
+    /// peer accepts, later. The staged copy must outlive the offer call
+    /// (production: "file data send failed: No such file or directory").
+    #[tokio::test]
+    async fn handoff_keeps_the_staged_file_until_the_peer_pulls_it() {
+        use crate::runtime::storage::OutboundSource;
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("drag-handoff-stage");
+        let peer = DeviceId::from_id_pk(&[42u8; 32]);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<tetherly_core::frame::InnerFrame>(16);
+        let live = crate::runtime::LivePeer {
+            device_id: peer.clone(),
+            name: "drop-peer".into(),
+            platform: "test".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            handshake_hash: [3u8; 32],
+            file_port: None,
+            input_port: None,
+            screen_port: None,
+            caps: Vec::new(),
+            path: tetherly_core::PathKind::Lan,
+            rtt_ms: None,
+            last_seen_ms: 0,
+        };
+        node.register_session(live, tx).await;
+        let src = dir.join("dragged.txt");
+        std::fs::write(&src, b"payload").unwrap();
+
+        node.hand_off_drag_files(&peer, vec![src]).await;
+
+        let sources: Vec<PathBuf> = node
+            .shared
+            .pending_out
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|o| match &o.source {
+                OutboundSource::Path(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources.len(), 1, "one offer pending");
+        assert_eq!(std::fs::read(&sources[0]).unwrap(), b"payload");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

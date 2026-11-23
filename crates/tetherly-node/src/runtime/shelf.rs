@@ -456,11 +456,10 @@ impl Node {
         // The transfer runs for as long as the file takes; do not hold the
         // session dispatch loop.
         tokio::spawn(async move {
+            // Only the offer is sent here; the bytes are read when the peer
+            // accepts. The staged copy is aged out by the stage sweep.
             if let Err(e) = node.offer_and_send_file(&peer, &staged, Some(&name)).await {
                 warn!(peer = %peer, error = %e, "shelf send failed");
-            }
-            if let Some(dir) = staged.parent() {
-                let _ = std::fs::remove_dir_all(dir);
             }
         });
         Ok(())

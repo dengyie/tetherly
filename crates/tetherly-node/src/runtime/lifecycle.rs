@@ -1671,6 +1671,22 @@ impl Node {
             SessionEvent::TextMessage(msg) => {
                 self.receive_message(peer.as_str(), msg);
             }
+            // A re-offer reopens a stale accepted transfer (same bytes, same
+            // content-addressed id). While a receive loop for that id is still
+            // running it is a duplicate frame, not a new attempt: leave it be.
+            SessionEvent::FileOffer(offer)
+                if self
+                    .shared
+                    .transfer_cancels
+                    .lock()
+                    .expect("cancels")
+                    .contains_key(&offer.transfer_id) =>
+            {
+                info!(
+                    transfer = %offer.transfer_id,
+                    "duplicate offer while its data is still arriving; ignored"
+                );
+            }
             SessionEvent::FileOffer(offer) => {
                 let total: u64 = offer.files.iter().map(|f| f.size).sum();
                 let tid = offer.transfer_id.clone();

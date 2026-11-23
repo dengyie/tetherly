@@ -166,18 +166,34 @@ impl FileHub {
         // Repeated control frames are normal around reconnects. Admit an exact
         // duplicate idempotently, but never let another peer or another payload
         // take ownership of an existing transfer id.
-        if let Some(existing) = self.incoming.get(&offer.transfer_id) {
+        let total = files.first().map(|f| f.size).unwrap_or(0);
+        let resume_from =
+            resume_hint.filter(|&off| off > 0 && off < total && off % FILE_CHUNK as u64 == 0);
+        if let Some(existing) = self.incoming.get_mut(&offer.transfer_id) {
             if existing.source != source || existing.files != files {
                 return Err(CoreError::UnknownTransfer);
+            }
+            // Ids are content-addressed, so sending the same bytes again
+            // re-offers an id this side may already have accepted. The sender
+            // only offers when it starts an attempt, so an Accepted entry here
+            // is a stale attempt whose data never finished: reopen it so the
+            // new attempt can be accepted (and resumed) instead of failing
+            // "already decided". Callers skip this while data is still flowing.
+            if existing.status == TransferStatus::Accepted {
+                existing.status = TransferStatus::Offered;
+                existing.offered_ms = now_ms;
+                existing.accepted_ms = 0;
+                existing.resume_from = resume_from;
+                tracing::info!(
+                    transfer = %existing.transfer_id,
+                    "accepted transfer re-offered; starting a new attempt"
+                );
             }
             return Ok(existing.clone());
         }
         if self.incoming.len() >= INCOMING_MAX {
             return Err(CoreError::UnknownTransfer);
         }
-        let total = files.first().map(|f| f.size).unwrap_or(0);
-        let resume_from =
-            resume_hint.filter(|&off| off > 0 && off < total && off % FILE_CHUNK as u64 == 0);
         let t = IncomingTransfer {
             transfer_id: offer.transfer_id.clone(),
             source,
@@ -432,6 +448,27 @@ mod tests {
         let other = DeviceId::from_id_pk(&[5u8; 32]);
         assert_eq!(
             hub.offer(other, offer("a.txt"), 3).unwrap_err(),
+            CoreError::UnknownTransfer
+        );
+    }
+
+    #[test]
+    fn re_offer_of_an_accepted_transfer_starts_a_new_attempt() {
+        // A drag of the same bytes repeats the content-addressed id. If the
+        // first attempt was accepted but its data never arrived, the re-offer
+        // must be acceptable again instead of failing "already decided".
+        let mut hub = FileHub::default();
+        let src = DeviceId::from_id_pk(&[4u8; 32]);
+        hub.offer(src.clone(), offer("a.txt"), 1).unwrap();
+        hub.accept("tr_1", 2).unwrap();
+        let again = hub.offer(src.clone(), offer("a.txt"), 10).unwrap();
+        assert_eq!(again.status, TransferStatus::Offered);
+        assert_eq!(again.offered_ms, 10);
+        assert!(hub.accept("tr_1", 11).is_ok());
+
+        let other = DeviceId::from_id_pk(&[5u8; 32]);
+        assert_eq!(
+            hub.offer(other, offer("a.txt"), 12).unwrap_err(),
             CoreError::UnknownTransfer
         );
     }
