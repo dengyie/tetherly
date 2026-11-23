@@ -387,5 +387,8 @@ fn button_held_still_returns_after_sustained_push() {
         }
         srv.drain();
     }
-    assert!(returned, "a sustained push must return even with the button held");
+    assert!(
+        returned,
+        "a sustained push must return even with the button held"
+    );
 }
