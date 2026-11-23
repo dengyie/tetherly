@@ -488,5 +488,5 @@
 - 修复1：platform.rs `tap_reports_button(mask, armed)`：左键双座位都送引擎（drive_input_button 对本地座位只做拖拽记账），吞事件仍只在 armed；越界按住左键但剪贴板无文件时记 info `lmb held across the edge; no dragged files`。
 - 根因2（主窗口）：关闭主窗口会销毁它，之后 get_webview_window("main")=None，show_main_window 静默无操作。
 - 修复2：on_window_event CloseRequested 对 main prevent_close+hide；show_main_window 缺窗时按 tauri.conf 重建；macOS Dock Reopen 也显示主窗口。
-- [ ] 部署 v0.2.95 + 双端客户端重启
+- [x] 部署 v0.2.95：CI 45258879074 全绿，deploy exit 0，双端 health 0.2.95，受保护进程 3/3 未动；Mac 客户端 pid 59613、Win tetherly-shell 28380（Session 1）已重启
 - [ ] 用户实测：Mac 拖 Finder 文件过上边缘到 Windows；关主窗口后托盘「打开主窗口」能再打开
