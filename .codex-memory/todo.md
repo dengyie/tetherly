@@ -482,3 +482,11 @@
 - 可诊断：壳日志落盘 Mac `~/Library/Logs/Tetherly/shell.log`、Win `%LOCALAPPDATA%\Tetherly\logs\shell.log`（2 MiB 滚 .1，默认 info），每次托盘点击记 visible/focused/action，失焦隐藏与 show/focus 失败也记。
 - [x] 实测：双端 0.2.94 部署，两端客户端重启（Win SessionId=1），受保护进程未动；Mac 探针 Show→Hide，shell.log 记录 `tray panel: click visible=… focused=… action=…`。注意：探针点击时若输入正漫游在 Windows（用户在用），合成点击会被转发到 Win 造成假 DEAD——探针前先看 tetherly.log 有无 crossing/return。
 - [ ] 下次复发：让用户报时间+当时前台（是否全屏 App），grep shell.log 的 "tray panel:" 行定位。
+
+## §239 Mac→Win 拖文件过不去 + 主窗口关后打不开（v0.2.95，2026-11-24）
+- 根因1（拖拽）：macOS 事件 tap 只在 armed（座位在远端）时上报鼠标按键；本地座位按下左键开始拖文件时 drag_handoff_on_lmb 从未收到 → local_lmb_down=false → 越界 Enter 时直接 return，日志只有 crossing/return，没有任何 "file drag" 行。Windows 钩子双座位都上报按键，所以只有 Mac 端坏。
+- 修复1：platform.rs `tap_reports_button(mask, armed)`：左键双座位都送引擎（drive_input_button 对本地座位只做拖拽记账），吞事件仍只在 armed；越界按住左键但剪贴板无文件时记 info `lmb held across the edge; no dragged files`。
+- 根因2（主窗口）：关闭主窗口会销毁它，之后 get_webview_window("main")=None，show_main_window 静默无操作。
+- 修复2：on_window_event CloseRequested 对 main prevent_close+hide；show_main_window 缺窗时按 tauri.conf 重建；macOS Dock Reopen 也显示主窗口。
+- [ ] 部署 v0.2.95 + 双端客户端重启
+- [ ] 用户实测：Mac 拖 Finder 文件过上边缘到 Windows；关主窗口后托盘「打开主窗口」能再打开
