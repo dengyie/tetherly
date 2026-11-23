@@ -61,11 +61,15 @@ async fn api(
 /// (production 2026-11-23). The push keeps driving later transitions; this
 /// pull only closes the startup race.
 #[tauri::command]
-fn link_state(events: State<'_, events::LinkStateCell>) -> Result<String, String> {
-    match events.get() {
-        Some(s) => serde_json::to_string(&s).map_err(|e| e.to_string()),
-        None => Ok("\"connecting\"".to_string()),
-    }
+fn link_state(events: State<'_, std::sync::Arc<events::LinkStateCell>>) -> Result<&'static str, String> {
+    let cell = events.inner();
+    Ok(match cell.get() {
+        Some(events::LinkState::Live) => "live",
+        Some(events::LinkState::Connecting) => "connecting",
+        Some(events::LinkState::Resyncing) => "resyncing",
+        Some(events::LinkState::Offline) => "offline",
+        None => "connecting",
+    })
 }
 
 /// Read daemon discovery settings at startup. Called from `run` and tests.
