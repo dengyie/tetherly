@@ -455,7 +455,7 @@
 - [ ] 用户目测：Windows 面板在右下角；切屏不再弹通知
 - [ ] 待办：deploy.sh 安装客户端后自动拉起（Windows Session 1 / Mac open）
 
-## §235 共享架 + 跨屏文件拖拽（v0.2.89，2026-11-23）
+## §235 共享架 + 跨屏文件拖拽（v0.2.90，2026-11-23；v0.2.89 号被并行会话占用）
 - 拖拽根因：InputServer 在 buttons_down≠0 时禁止回切本机（旧「拖拽保护」），按住左键的拖拽永远卡在边缘、鼠标过不去；且 OS 拖拽会话不跨机器，即便过去也没有文件。
 - 修复：去掉按键门控（只保留持续推挤坡道防误切）；越界时探测在途拖拽文件（mac 拖拽剪贴板 changeCount 门控；Windows 守护以控制台用户拉起 `tetherly drag-probe` 隐形 OLE drop target 读 CF_HDROP 回报 POST /api/v1/drag/probe），本地注入 Esc 取消，再走常规传输 + RemoteDragEnter/RemoteDropConfirm 免确认接收。
 - 共享架：Transfers 页拖入只登记路径/大小/mtime（shelf.json，≤200 条，系统/数据目录黑名单）；目录经 Shelf 帧同步给受信任对端；对端「下载」→ Fetch → 所有者复核（变更即「已失效」）→ 暂存 → 常规传输 → 请求方自动收入收件箱。
