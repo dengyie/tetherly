@@ -497,3 +497,4 @@
 - 功能（Win 侧文件标识）：控制端探测到拖拽文件即发 RemoteDragEnter（不再等松手），拖回本地发 RemoteDragCancel；接收端发 diagnostic `drag_carry {active,file_count,first_file_name}`；壳 dragbadge.rs 起透明、点击穿透、不抢焦点的 "drag-badge" 小窗跟随光标显示「文件名 等 N 个文件」，drop/cancel 隐藏，60s 兜底。页面 client/public/drag-badge.html/.js（CSP 禁内联脚本）。622927a / v0.2.97。
 - [ ] 部署 v0.2.97 + 双端客户端重启
 - [ ] 用户实测：Mac 拖文件到 Win，Win 侧光标旁出现文件名角标，松手后文件到达
+- 接手（2026-11-24）：v0.2.97 CI/release 红因=dist 零差异门（drag-badge 未同步进 dist），已提交 20e1202 修复并推 main/分支，本地门禁（fmt/clippy/test 478）全绿；待 CI 绿后重打 v0.2.97 tag → release → deploy --target all。
