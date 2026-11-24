@@ -490,3 +490,10 @@
 - 修复2：on_window_event CloseRequested 对 main prevent_close+hide；show_main_window 缺窗时按 tauri.conf 重建；macOS Dock Reopen 也显示主窗口。
 - [x] 部署 v0.2.95：CI 45258879074 全绿，deploy exit 0，双端 health 0.2.95，受保护进程 3/3 未动；Mac 客户端 pid 59613、Win tetherly-shell 28380（Session 1）已重启
 - [ ] 用户实测：Mac 拖 Finder 文件过上边缘到 Windows；关主窗口后托盘「打开主窗口」能再打开
+
+## §240 Mac→Win 拖拽卡在传输 + Win 侧无文件标识（v0.2.96/v0.2.97，2026-11-24）
+- 根因1（卡传输）：drag_handoff 在 offer 后立刻删除暂存副本，对端拉取时源文件已不在 → 发送端卡住、Win 收不到。修复：暂存副本保留到对端拉取（handoff_keeps_the_staged_file_until_the_peer_pulls_it）。
+- 根因2：transfer_id 内容寻址，接收端 FileHub 的 Accepted 条目保留 1h，同内容重拖被当重复 offer 直接返回旧 Accepted 条目、不会再次接收。修复：同源同文件的 Accepted 重 offer 重置为 Offered 新一轮（re_offer_of_an_accepted_transfer_starts_a_new_attempt）；数据仍在接收中（transfer_cancels 有该 id）的重复 offer 忽略。a128671 / v0.2.96。
+- 功能（Win 侧文件标识）：控制端探测到拖拽文件即发 RemoteDragEnter（不再等松手），拖回本地发 RemoteDragCancel；接收端发 diagnostic `drag_carry {active,file_count,first_file_name}`；壳 dragbadge.rs 起透明、点击穿透、不抢焦点的 "drag-badge" 小窗跟随光标显示「文件名 等 N 个文件」，drop/cancel 隐藏，60s 兜底。页面 client/public/drag-badge.html/.js（CSP 禁内联脚本）。622927a / v0.2.97。
+- [ ] 部署 v0.2.97 + 双端客户端重启
+- [ ] 用户实测：Mac 拖文件到 Win，Win 侧光标旁出现文件名角标，松手后文件到达
