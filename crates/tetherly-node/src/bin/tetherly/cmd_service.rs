@@ -315,7 +315,7 @@ use macos::{install, status, uninstall};
 #[cfg(windows)]
 mod windows_impl {
     use super::*;
-
+    use std::os::windows::process::CommandExt; // `.creation_flags(CREATE_NO_WINDOW)`
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     fn powershell(script: &str) -> Result<String> {
@@ -405,13 +405,13 @@ use windows_impl::{install, status, uninstall};
 #[cfg(not(any(target_os = "macos", windows)))]
 mod unsupported {
     use super::*;
-    fn install(_json: bool) -> Result<()> {
+    pub(crate) fn install(_json: bool) -> Result<()> {
         anyhow::bail!("`tetherly service install` is not implemented for this platform; use a user session manager (e.g. systemd user units)")
     }
-    fn uninstall(_json: bool) -> Result<()> {
+    pub(crate) fn uninstall(_json: bool) -> Result<()> {
         anyhow::bail!("`tetherly service uninstall` is not implemented for this platform")
     }
-    fn status(_json: bool) -> Result<()> {
+    pub(crate) fn status(_json: bool) -> Result<()> {
         anyhow::bail!("`tetherly service status` is not implemented for this platform")
     }
 }
