@@ -191,18 +191,17 @@ mod macos {
             }
         }
 
-        // Write + bootstrap. The tmp+rename keeps a crash mid-write from
-        // leaving a truncated plist (the store.rs convention).
+        // Write + reload. launchd caches ProgramArguments: overwriting the
+        // plist and ignoring "already loaded" leaves the OLD executable
+        // running forever (production 2026-11-25: debug daemon survived the
+        // CI deployment). Bootout the cached job before loading the new one.
+        // The tmp+rename keeps a crash mid-write from leaving a truncated plist.
         let tmp = path.with_extension("plist.tmp");
         std::fs::write(&tmp, &body)?;
         std::fs::rename(&tmp, &path)?;
-        match launchctl(&["bootstrap", &gui_domain()?, &path.to_string_lossy()]) {
-            Ok(_) => {}
-            // Already loaded from a previous incarnation of this plist.
-            Err(e) if e.to_string().contains("already bootstrapped") => {}
-            Err(e) if e.to_string().contains("Input/output error") => {}
-            Err(e) => return Err(e),
-        }
+        let domain = gui_domain()?;
+        let _ = launchctl(&["bootout", &format!("{domain}/{SERVICE_LABEL}")]);
+        launchctl(&["bootstrap", &domain, &path.to_string_lossy()])?;
         report_status_line(json, "installed", &exe)
     }
 
