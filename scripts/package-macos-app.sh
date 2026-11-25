@@ -261,6 +261,13 @@ fi
 
 if [ "$RESTART" = true ]; then
     echo "==> [4/4] Restarting via LaunchServices (open $APP_DIR)..."
+    # Re-register the daemon autostart BEFORE relaunching so a crash right
+    # after the swap still leaves launchd able to pull the daemon back up
+    # (production 2026-11-25: a reboot with no autostart registration took
+    # every paired peer offline). Idempotent: identical content is a no-op.
+    echo "==> Ensuring daemon autostart (tetherly service install)..."
+    "$APP_DIR/Contents/MacOS/Tetherly" service install || \
+        echo "WARN: service install failed — autostart may be stale" >&2
     open "$APP_DIR"
     sleep 1
     echo "==> Verifying accessibility status:"

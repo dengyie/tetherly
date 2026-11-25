@@ -177,6 +177,14 @@ install_client_windows() {
         *) echo "tetherly:// scheme is not registered to tetherly-shell.exe" >&2; return 1 ;;
     esac
     echo "==> Desktop client installed on ${REMOTE_HOST}."
+    # Daemon autostart (2026-11-25): the scheduled task was hand-registered
+    # outside this repo, so a new machine or a wiped task silently lost
+    # boot persistence. The binary now self-registers; idempotent.
+    ps="\$out = E:\code\tetherly\target\release\tetherly.exe service install 2>&1; Write-Output \$out"
+    b64=$(printf '%s' "$ps" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\r\n')
+    out=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -NonInteractive -EncodedCommand ${b64}" 2>/dev/null | tr -d '\r') || \
+        out="(service install ssh failed — verify autostart manually)"
+    echo "==> Daemon autostart: $out"
 }
 
 # ------------------------------------------------------------------------------

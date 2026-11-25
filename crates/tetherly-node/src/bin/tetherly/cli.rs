@@ -530,6 +530,14 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: MicCmd,
     },
+    /// Install, remove or report the OS autostart entry for this daemon.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+        /// Output raw JSON (top-level flag, applies to all actions).
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Cross-device link throughput benchmark & bandwidth profiling pipeline (v1.84 / ADR-077).
     Bench {
         #[command(subcommand)]

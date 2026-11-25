@@ -282,6 +282,9 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Mic { action } => {
             cmd_mic::mic(action).await?;
         }
+        Cmd::Service { action, json } => {
+            cmd_service::service(action, json).await?;
+        }
         Cmd::Bench { action } => {
             cmd_bench::bench(action).await?;
         }

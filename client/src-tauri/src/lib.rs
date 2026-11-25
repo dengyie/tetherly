@@ -86,26 +86,27 @@ fn link_state(
 }
 
 /// Read daemon discovery settings at startup. Called from `run` and tests.
-pub fn build_daemon_state() -> Result<Daemon, String> {
-    let token = token::read_api_token().map_err(|e| {
-        format!(
-            "cannot read the daemon API token ({e}). Is the daemon running? Start it with `tetherly run` first."
-        )
-    })?;
-    Ok(Daemon {
+///
+/// Production 2026-11-25: this used to fail the whole shell when the token
+/// could not be read (`exit(1)` in `run`). With daemon autostart (launchd
+/// LaunchAgent / scheduled task) installed, login can race: the shell may
+/// come up BEFORE the daemon has minted its first `api.token`, and a dead
+/// tray is strictly worse than an offline tray. The shell now always starts;
+/// the SSE loop retries with backoff and re-reads the token every attempt
+/// (`token::fresh_or`), so it links up as soon as the daemon is serving.
+pub fn build_daemon_state() -> Daemon {
+    // Empty fallback: until the daemon mints a token, every loopback call
+    // 401s/REFUSES and the UI shows the existing offline state; nothing to
+    // recover manually — `fresh_or` picks up the real token on the next
+    // backoff attempt.
+    Daemon {
         port: token::ui_port(),
-        startup_token: token,
-    })
+        startup_token: token::read_api_token().unwrap_or_default(),
+    }
 }
 
 pub fn run() {
-    let daemon = match build_daemon_state() {
-        Ok(d) => d,
-        Err(msg) => {
-            eprintln!("tetherly-shell: {msg}");
-            std::process::exit(1);
-        }
-    };
+    let daemon = build_daemon_state();
     tracing::info!(port = daemon.port, "shell starting against loopback daemon");
 
     tauri::Builder::default()
@@ -383,15 +384,19 @@ mod tests {
         let _guard = token::tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // No env token, no data dir: must fail with the guidance message.
+        // No env token, no data dir: the shell must STILL build state
+        // (degraded mode) — it used to exit(1) and die before the tray
+        // existed when login raced the daemon's first token mint
+        // (production 2026-11-25).
         unsafe { std::env::remove_var("TETHERLY_API_TOKEN") };
         unsafe { std::env::set_var("TETHERLY_DATA_DIR", "/nonexistent-shell-test") };
-        let err = build_daemon_state().unwrap_err();
-        assert!(err.contains("API token"), "{err}");
+        let d = build_daemon_state();
+        assert_eq!(d.token(), "");
+        assert_eq!(d.port, token::DEFAULT_UI_PORT);
 
-        // Env token present: state builds, port falls back to the default.
+        // Env token present: state builds with it, port falls back to default.
         unsafe { std::env::set_var("TETHERLY_API_TOKEN", "tok") };
-        let d = build_daemon_state().unwrap();
+        let d = build_daemon_state();
         assert_eq!(d.token(), "tok");
         assert_eq!(d.port, token::DEFAULT_UI_PORT);
         unsafe { std::env::remove_var("TETHERLY_API_TOKEN") };

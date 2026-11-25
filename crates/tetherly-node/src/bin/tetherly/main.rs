@@ -64,6 +64,8 @@ mod cmd_screen_replay;
 mod cmd_screen_session;
 mod cmd_screen_tile;
 mod cmd_topology;
+mod cmd_service;
+pub(crate) use cmd_service::ServiceAction;
 mod dispatch;
 mod util;
 use dispatch::dispatch;
