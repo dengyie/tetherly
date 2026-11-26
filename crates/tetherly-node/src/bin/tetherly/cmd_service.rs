@@ -16,6 +16,7 @@
 
 use super::*;
 use clap::Subcommand;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 #[derive(Subcommand, Debug, Clone, Copy)]
@@ -51,6 +52,7 @@ pub(crate) const SERVICE_TASK_NAME: &str = "TetherlyDaemon";
 /// scheduled task points HERE, so a dev build registers its own debug
 /// binary and a packaged build registers the .app binary — no path
 /// guessing (`lifecycle.rs` uses the same trick for self-restart).
+#[cfg(any(target_os = "macos", windows))]
 fn daemon_exe() -> Result<PathBuf> {
     std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))
 }
@@ -64,9 +66,10 @@ mod macos {
     const LAUNCH_AGENTS: &str = "Library/LaunchAgents";
 
     fn plist_path() -> Result<PathBuf> {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
-        Ok(PathBuf::from(home).join(LAUNCH_AGENTS).join(format!("{SERVICE_LABEL}.plist")))
+        let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+        Ok(PathBuf::from(home)
+            .join(LAUNCH_AGENTS)
+            .join(format!("{SERVICE_LABEL}.plist")))
     }
 
     /// Render the managed plist body. Pure function so tests can pin the
@@ -167,7 +170,8 @@ mod macos {
         // Migrate legacy hand-made daemon plists (e.g. `cn.mango.tetherly`
         // from the 2026-11-25 manual fix) so two KeepAlive agents do not
         // fight over the same `run` binary after the next login.
-        let agents_dir = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(LAUNCH_AGENTS);
+        let agents_dir =
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(LAUNCH_AGENTS);
         if let Ok(entries) = std::fs::read_dir(&agents_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
@@ -176,10 +180,15 @@ mod macos {
                 }
                 if let Ok(other) = std::fs::read_to_string(&p) {
                     if is_legacy_tetherly_plist(&other) {
-                        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        let name = p
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
                         // Bootout by label when the file's Label matches its name.
                         let legacy_label = name.trim_end_matches(".plist");
-                        let _ = launchctl(&["bootout", &format!("{}/{}", gui_domain()?, legacy_label)]);
+                        let _ =
+                            launchctl(&["bootout", &format!("{}/{}", gui_domain()?, legacy_label)]);
                         std::fs::remove_file(&p).map_err(|e| {
                             anyhow::anyhow!("cannot remove legacy plist {}: {e}", p.display())
                         })?;
@@ -213,11 +222,8 @@ mod macos {
             }
             return Ok(());
         }
-        match launchctl(&["bootout", &format!("{}/{}", gui_domain()?, SERVICE_LABEL)]) {
-            Ok(_) => {}
-            // Not currently loaded is fine — the goal is that it stops firing.
-            Err(_) => {}
-        }
+        // Not currently loaded is fine — the goal is that it stops firing.
+        let _ = launchctl(&["bootout", &format!("{}/{}", gui_domain()?, SERVICE_LABEL)]);
         std::fs::remove_file(&path)?;
         report_status_line(json, "uninstalled", &daemon_exe()?)
     }
@@ -281,9 +287,12 @@ mod macos {
 
         #[test]
         fn plist_has_keepalive_and_run_args() {
-            let body = render_plist(Path::new("/Applications/Tetherly.app/Contents/MacOS/Tetherly"),
-                Path::new("/tmp/launchd.log"));
-            assert!(body.contains("<string>/Applications/Tetherly.app/Contents/MacOS/Tetherly</string>"));
+            let body = render_plist(
+                Path::new("/Applications/Tetherly.app/Contents/MacOS/Tetherly"),
+                Path::new("/tmp/launchd.log"),
+            );
+            assert!(body
+                .contains("<string>/Applications/Tetherly.app/Contents/MacOS/Tetherly</string>"));
             assert!(body.contains("<string>run</string>"));
             assert!(body.contains("<key>KeepAlive</key>"));
             assert!(body.contains("<key>RunAtLoad</key>"));
@@ -339,7 +348,6 @@ mod windows_impl {
     /// interval keeps a crashed daemon coming back within 5 minutes.
     pub(crate) fn install(json: bool) -> Result<()> {
         let exe = daemon_exe()?;
-        let action = format!("\"{}\" run", exe.display());
         // Two-step build via New-ScheduledTaskAction keeps quoting sane.
         let script = format!(
             r#"$a = New-ScheduledTaskAction -Execute '{exe}' -Argument 'run'
