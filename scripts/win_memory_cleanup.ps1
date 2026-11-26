@@ -131,7 +131,12 @@ Write-Output ("{0}trimmed working sets of {1} processes (~{2} MB resident before
     $(if ($DryRun) { '[dry-run] ' } else { '' }), $trimmed, $trimmedMB)
 
 Write-Output ("after:  " + (Get-MemSummary))
-$alive = @(Get-Process $protectedNames -ErrorAction SilentlyContinue).Count
+# Count DISTINCT protected process names, not instances: verge-mihomo can
+# legitimately run in two sessions (Session 0 service + Session 1 tray), so
+# an instance count (4) would never equal the name count (3) and abort every
+# deploy on a healthy host. What matters is that each name is still alive.
+$alive = @(Get-Process $protectedNames -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty ProcessName -Unique).Count
 Write-Output ("protected processes alive: {0}/{1}; stale processes killed: {2}" -f $alive, $protectedNames.Count, $killed)
 if ($alive -ne $protectedNames.Count) { exit 2 }
 exit 0
