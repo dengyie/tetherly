@@ -63,6 +63,17 @@ pub fn drag_pasteboard_files() -> Vec<String> {
     paths
 }
 
+/// Type identifiers on the drag pasteboard (macOS), for probe diagnostics
+/// when a drag carried no file URLs.
+#[cfg(target_os = "macos")]
+pub fn drag_pasteboard_types() -> Vec<String> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardNameDrag};
+    let pb = NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameDrag });
+    pb.types()
+        .map(|arr| arr.iter().take(16).map(|t| t.to_string()).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn drag_pasteboard_files() -> Vec<String> {
     Vec::new()

@@ -453,7 +453,7 @@
 - 修复2：默认 false；客户端每次弹通知前读 GET /api/v1/notify/config（读不到=关）；紧急退出 toast 受开关控制。开启：`tetherly banner config --banners true`（仅内存，重启回到关闭）。
 - [x] v0.2.88 已部署：两端 health 0.2.88，notify config banners_enabled=false，受保护进程未受影响；两端客户端已重新拉起
 - [ ] 用户目测：Windows 面板在右下角；切屏不再弹通知
-- [ ] 待办：deploy.sh 安装客户端后自动拉起（Windows Session 1 / Mac open）
+- [x] 待办：deploy.sh 安装客户端后自动拉起（Windows Session 1 / Mac open）→ §241 Windows 一次性 Interactive 计划任务拉起
 
 ## §235 共享架 + 跨屏文件拖拽（v0.2.90，2026-11-23；v0.2.89 号被并行会话占用）
 - 拖拽根因：InputServer 在 buttons_down≠0 时禁止回切本机（旧「拖拽保护」），按住左键的拖拽永远卡在边缘、鼠标过不去；且 OS 拖拽会话不跨机器，即便过去也没有文件。
@@ -495,6 +495,23 @@
 - 根因1（卡传输）：drag_handoff 在 offer 后立刻删除暂存副本，对端拉取时源文件已不在 → 发送端卡住、Win 收不到。修复：暂存副本保留到对端拉取（handoff_keeps_the_staged_file_until_the_peer_pulls_it）。
 - 根因2：transfer_id 内容寻址，接收端 FileHub 的 Accepted 条目保留 1h，同内容重拖被当重复 offer 直接返回旧 Accepted 条目、不会再次接收。修复：同源同文件的 Accepted 重 offer 重置为 Offered 新一轮（re_offer_of_an_accepted_transfer_starts_a_new_attempt）；数据仍在接收中（transfer_cancels 有该 id）的重复 offer 忽略。a128671 / v0.2.96。
 - 功能（Win 侧文件标识）：控制端探测到拖拽文件即发 RemoteDragEnter（不再等松手），拖回本地发 RemoteDragCancel；接收端发 diagnostic `drag_carry {active,file_count,first_file_name}`；壳 dragbadge.rs 起透明、点击穿透、不抢焦点的 "drag-badge" 小窗跟随光标显示「文件名 等 N 个文件」，drop/cancel 隐藏，60s 兜底。页面 client/public/drag-badge.html/.js（CSP 禁内联脚本）。622927a / v0.2.97。
-- [ ] 部署 v0.2.97 + 双端客户端重启
+- [x] 部署 v0.2.97 + 双端客户端重启（并行会话 2026-11-24 完成）
 - [ ] 用户实测：Mac 拖文件到 Win，Win 侧光标旁出现文件名角标，松手后文件到达
 - 接手（2026-11-24）：v0.2.97 CI/release 红因=dist 零差异门（drag-badge 未同步进 dist），已提交 20e1202 修复并推 main/分支，本地门禁（fmt/clippy/test 478）全绿；待 CI 绿后重打 v0.2.97 tag → release → deploy --target all。
+
+## §241 双 daemon 竞争 + CI 红 + 拖拽探针竞态 + Win 客户端未拉起（v0.2.99，2026-11-27）
+- 验收发现（v0.2.98 `tetherly service` 引入）：
+  - main CI 自 00f713c 起红：cmd_service.rs fmt + clippy single_match；Windows 分支未用变量 `action`、Linux 上 `daemon_exe`/`Path` 死代码被 fmt 先失败遮住。786c30d 修复，CI 45876170012 三平台全绿。
+  - Mac 双启动实证：2026-11-26 14:09:41–42Z pid 38240/38259 相隔 0.4s，后者 `bind failed 127.0.0.1:45717 Address already in use`。根因 package-macos-app.sh `service install`（launchd RunAtLoad 起一个）后又 `open`（再起一个）；两者都在绑端口前轮换 api.token/client.token，输家会让赢家 token 失效 → 壳/CLI 401。
+  - Windows：`service install` 注册了用户级 `TetherlyDaemon`（无 --data-dir），与 SYSTEM 链 `TetherlySystemLauncher` 下次登录会双启动（输家轮换 token；赢家若是用户级则丢 UAC 注入）。
+  - Win 客户端：11-26 23:33 部署装 MSI 时停掉后无人拉起。
+  - 拖拽：11-26 14:30:49Z 「lmb held across the edge; no dragged files on the pasteboard」；11-23（launchd 托管前）同路径正常。
+- 修复：
+  - 单实例锁 `instance_lock.rs`：`run` 在生成 token/绑端口之前锁 `<data_dir>/daemon.lock`（unix flock / Windows share_mode(0)），最多等 5s（覆盖自重启前后交接），被占则 exit 0；无法评估的 IO 错误（SYSTEM/用户 ACL）告警后照常启动。
+  - LaunchAgent plist：`KeepAlive {SuccessfulExit=false}`（只拉崩溃，API 停机/锁冲突的干净退出不重拉）、`ProcessType Interactive`（Background 会被 launchd 限 CPU/IO）。
+  - package-macos-app.sh：停机前先 `launchctl bootout`（旧 KeepAlive 会立刻拉起旧二进制致 pgrep 等待超时）；重启只靠 `service install`+`kickstart`，失败才 `open`；等 /api/v1/health。
+  - Windows `service install`：存在 `TetherlySystemLauncher` 时不注册并删除遗留 `TetherlyDaemon`；`status` 报告 SYSTEM 链；`uninstall` 容错。
+  - deploy.sh：MSI 装完无条件用一次性 Interactive 计划任务以控制台用户身份在 Session 1 拉起客户端（已在 home-win 手动验证 relaunch=ok session=1）。
+  - 拖拽探针竞态：基线原在按下时异步读取，读得晚于 Finder 开拖就拿到拖后计数 → 判「无文件」（launchd Background 限流放大）。改为每次松开时刷新基线（松开到下次按下之间不可能开拖），按下只补缺；跨屏时同步快照基线传给探针；无文件时日志带 baseline/change_count/types 便于事后区分。
+- [ ] 发布 v0.2.99 + deploy --target all + 双端验证（单实例、plist 新键、TetherlyDaemon 已删、客户端拉起）
+- [ ] 用户实测：Mac 拖文件到 Win 出角标、松手到达；失败时看 `drag probe:` 日志

@@ -74,7 +74,9 @@ pub(crate) struct DragHandoffState {
     next_probe: u64,
     /// Physical LMB state while the seat is local (controller side).
     pub(crate) local_lmb_down: bool,
-    /// Drag pasteboard change count captured at the last LMB down (macOS).
+    /// Drag pasteboard change count captured while no drag could be in
+    /// flight (macOS): at every LMB release on the controller (v0.2.99),
+    /// at the injected LMB down on the controlled side.
     pub(crate) pb_baseline: Option<i64>,
     pub(crate) out: Option<OutgoingDrag>,
 }
@@ -305,28 +307,55 @@ impl Node {
             .pb_baseline = cc;
     }
 
+    /// The current pasteboard baseline (see [`DragHandoffState::pb_baseline`]).
+    pub(crate) fn drag_baseline(&self) -> Option<i64> {
+        self.shared
+            .drag_handoff
+            .lock()
+            .expect("drag_handoff")
+            .pb_baseline
+    }
+
     /// Ask the OS which files the drag in flight under the cursor carries.
-    pub(crate) async fn probe_drag_files(&self) -> Vec<PathBuf> {
+    /// `baseline` is the pasteboard count from before this gesture (macOS);
+    /// callers snapshot it synchronously so a concurrent refresh cannot
+    /// replace it with a post-drag value.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    pub(crate) async fn probe_drag_files(&self, baseline: Option<i64>) -> Vec<PathBuf> {
         #[cfg(target_os = "macos")]
         {
-            let baseline = self
-                .shared
-                .drag_handoff
-                .lock()
-                .expect("drag_handoff")
-                .pb_baseline;
             let Some(baseline) = baseline else {
+                info!("drag probe: no pasteboard baseline yet (first press after start)");
                 return Vec::new();
             };
-            let found = tokio::task::spawn_blocking(move || {
+            let (cc, found, types) = tokio::task::spawn_blocking(move || {
                 use crate::platform::drag_probe as p;
-                match p::drag_pasteboard_change_count() {
-                    Some(cc) if cc != baseline => p::drag_pasteboard_files(),
-                    _ => Vec::new(),
+                let cc = p::drag_pasteboard_change_count();
+                match cc {
+                    Some(c) if c != baseline => {
+                        let files = p::drag_pasteboard_files();
+                        let types = if files.is_empty() {
+                            p::drag_pasteboard_types()
+                        } else {
+                            Vec::new()
+                        };
+                        (cc, files, types)
+                    }
+                    _ => (cc, Vec::new(), Vec::new()),
                 }
             })
             .await
             .unwrap_or_default();
+            if found.is_empty() {
+                // Tells "not a drag" (count unchanged) from "a drag with no
+                // file URLs" (types say what it carried) after the fact.
+                info!(
+                    baseline,
+                    change_count = ?cc,
+                    types = ?types,
+                    "drag probe: no file URLs on the drag pasteboard"
+                );
+            }
             found.into_iter().map(PathBuf::from).collect()
         }
         #[cfg(windows)]
@@ -398,20 +427,38 @@ impl Node {
 
     /// Controller side: physical LMB observed (any seat).
     pub(crate) fn drag_handoff_on_lmb(&self, seat: CursorSeat, down: bool) {
+        // v0.2.99: the baseline is refreshed on every RELEASE (any seat).
+        // No OS drag can start between a release and the next press, so the
+        // count read here predates the next gesture's drag however late the
+        // blocking read runs. Reading it at the press (pre-v0.2.99) raced
+        // the drag itself: a delayed read saw the post-drag count, and the
+        // probe reported "no files" (production 2026-11-26, daemon under
+        // launchd Background throttling). A press only fills a missing one.
+        // Only macOS has a drag pasteboard; elsewhere the baseline stays None.
+        let refresh = cfg!(target_os = "macos")
+            && (!down
+                || self
+                    .shared
+                    .drag_handoff
+                    .lock()
+                    .expect("drag_handoff")
+                    .pb_baseline
+                    .is_none());
+        if refresh {
+            // Off the hook thread: the pasteboard read is an IPC.
+            let node = self.clone_handle();
+            let rt = tokio::runtime::Handle::try_current()
+                .ok()
+                .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
+            if let Some(h) = rt {
+                h.spawn_blocking(move || node.record_drag_baseline());
+            }
+        }
         if seat != CursorSeat::Remote {
             let mut st = self.shared.drag_handoff.lock().expect("drag_handoff");
             st.local_lmb_down = down;
             if down {
                 st.out = None;
-                drop(st);
-                // Off the hook thread: the pasteboard read is an IPC.
-                let node = self.clone_handle();
-                let rt = tokio::runtime::Handle::try_current()
-                    .ok()
-                    .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
-                if let Some(h) = rt {
-                    h.spawn_blocking(move || node.record_drag_baseline());
-                }
             }
             return;
         }
@@ -438,7 +485,7 @@ impl Node {
     /// Controller side: the seat just moved to Remote. With the left button
     /// held this may be a file drag leaving the screen.
     pub(crate) fn drag_handoff_on_enter(&self) {
-        let peer = {
+        let (peer, baseline) = {
             let mut st = self.shared.drag_handoff.lock().expect("drag_handoff");
             if !st.local_lmb_down {
                 return;
@@ -452,7 +499,7 @@ impl Node {
                 released: false,
                 announced: None,
             });
-            peer
+            (peer, st.pb_baseline)
         };
         let node = self.clone_handle();
         let rt = tokio::runtime::Handle::try_current()
@@ -460,7 +507,7 @@ impl Node {
             .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
         let Some(h) = rt else { return };
         h.spawn(async move {
-            let files = node.probe_drag_files().await;
+            let files = node.probe_drag_files(baseline).await;
             // The physical release never reaches this machine's OS while the
             // seat is remote: end the local drag (Esc so nothing drops at
             // the edge) and release the button it still believes is held.
@@ -705,6 +752,36 @@ mod tests {
     /// §240: the offer only announces the file; its bytes are read when the
     /// peer accepts, later. The staged copy must outlive the offer call
     /// (production: "file data send failed: No such file or directory").
+    /// v0.2.99: the pasteboard baseline is taken at release, never
+    /// overwritten at a press (where it raced the drag it guards).
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn baseline_refreshes_on_release_not_on_press() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("drag-baseline");
+        let wait = || tokio::time::sleep(std::time::Duration::from_millis(300));
+        node.shared.drag_handoff.lock().unwrap().pb_baseline = Some(-7);
+        node.drag_handoff_on_lmb(CursorSeat::Local, true);
+        wait().await;
+        assert_eq!(
+            node.drag_baseline(),
+            Some(-7),
+            "press keeps the release baseline"
+        );
+        node.drag_handoff_on_lmb(CursorSeat::Local, false);
+        wait().await;
+        let after = node.drag_baseline();
+        assert!(
+            after.is_some() && after != Some(-7),
+            "release re-reads the count: {after:?}"
+        );
+        // A press with no baseline yet (first gesture after start) fills it.
+        node.shared.drag_handoff.lock().unwrap().pb_baseline = None;
+        node.drag_handoff_on_lmb(CursorSeat::Local, true);
+        wait().await;
+        assert!(node.drag_baseline().is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn handoff_keeps_the_staged_file_until_the_peer_pulls_it() {
         use crate::runtime::storage::OutboundSource;

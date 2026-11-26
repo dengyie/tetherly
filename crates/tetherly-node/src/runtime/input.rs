@@ -4975,7 +4975,7 @@ impl Node {
                                     // the button over the edge, then ship the files.
                                     let mut handoff_files: Vec<std::path::PathBuf> = Vec::new();
                                     if is_leave && client.buttons_down() & tetherly_core::BTN_LEFT != 0 {
-                                        handoff_files = node.probe_drag_files().await;
+                                        handoff_files = node.probe_drag_files(node.drag_baseline()).await;
                                         if !handoff_files.is_empty() {
                                             node.cancel_local_drag();
                                             tokio::time::sleep(std::time::Duration::from_millis(30)).await;

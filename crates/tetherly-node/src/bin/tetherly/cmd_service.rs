@@ -7,7 +7,10 @@
 //! Platform targets:
 //! - **macOS**: a LaunchAgent plist under `~/Library/LaunchAgents` with
 //!   `RunAtLoad` + `KeepAlive`, loaded via `launchctl bootstrap gui/<uid>`.
-//!   `KeepAlive` is what makes crash recovery work; `RunAtLoad` covers login.
+//!   `KeepAlive {SuccessfulExit=false}` respawns crashes only (a clean exit —
+//!   API shutdown, or a duplicate losing `instance_lock` — stays down);
+//!   `RunAtLoad` covers login; `ProcessType=Interactive` avoids launchd's
+//!   Background CPU/IO throttling.
 //! - **Windows**: a per-user scheduled task (`Register-ScheduledTask`,
 //!   logon trigger + restart-on-failure) — the same shape as the manual
 //!   `TetherlySystemLauncher` task the deploy chain assumed, but registered
@@ -45,8 +48,10 @@ pub(crate) async fn service(action: ServiceAction, json: bool) -> Result<()> {
 /// platforms keeps `status` trivial.
 #[cfg(target_os = "macos")]
 pub(crate) const SERVICE_LABEL: &str = "dev.tetherly.tetherly";
+#[cfg(any(windows, test))]
+const WINDOWS_TASK_NAME: &str = "TetherlyDaemon";
 #[cfg(windows)]
-pub(crate) const SERVICE_TASK_NAME: &str = "TetherlyDaemon";
+pub(crate) const SERVICE_TASK_NAME: &str = WINDOWS_TASK_NAME;
 
 /// The daemon executable this process is running from. The LaunchAgent /
 /// scheduled task points HERE, so a dev build registers its own debug
@@ -55,6 +60,58 @@ pub(crate) const SERVICE_TASK_NAME: &str = "TetherlyDaemon";
 #[cfg(any(target_os = "macos", windows))]
 fn daemon_exe() -> Result<PathBuf> {
     std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))
+}
+
+/// The hand-built production chain on home-win: a SYSTEM logon task
+/// that launches the daemon into the console session (UAC/elevated
+/// window injection needs SYSTEM). When it exists it IS the autostart;
+/// a second, per-user task would race it on the same data dir
+/// (v0.2.98 regression).
+#[cfg(any(windows, test))]
+pub(crate) const SYSTEM_LAUNCHER_TASK: &str = "TetherlySystemLauncher";
+
+/// PowerShell for `install`; prints `system-launcher` or `installed`.
+#[cfg(any(windows, test))]
+pub(crate) fn install_script(exe: &str) -> String {
+    format!(
+        r#"$sys = Get-ScheduledTask -TaskName '{sys}' -ErrorAction SilentlyContinue
+if ($sys) {{
+  if (Get-ScheduledTask -TaskName '{name}' -ErrorAction SilentlyContinue) {{
+Unregister-ScheduledTask -TaskName '{name}' -Confirm:$false
+  }}
+  'system-launcher'
+}} else {{
+  $a = New-ScheduledTaskAction -Execute '{exe}' -Argument 'run'
+  $t = New-ScheduledTaskTrigger -AtLogOn
+  $s = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable
+  Register-ScheduledTask -TaskName '{name}' -Action $a -Trigger $t -Settings $s -RunLevel Highest -Force | Out-Null
+  'installed'
+}}"#,
+        exe = exe.replace('\'', "''"),
+        name = WINDOWS_TASK_NAME,
+        sys = SYSTEM_LAUNCHER_TASK,
+    )
+}
+
+#[cfg(test)]
+mod windows_script_tests {
+    use super::*;
+
+    #[test]
+    fn install_defers_to_system_launcher_and_removes_stray_task() {
+        let ps = install_script(r"C:\Program Files\Tetherly\tetherly.exe");
+        let sys_branch = ps.split("} else {").next().unwrap();
+        assert!(sys_branch.contains("Get-ScheduledTask -TaskName 'TetherlySystemLauncher'"));
+        assert!(sys_branch.contains("Unregister-ScheduledTask -TaskName 'TetherlyDaemon'"));
+        assert!(!sys_branch.contains("Register-ScheduledTask -TaskName"));
+        assert!(ps.contains("Register-ScheduledTask -TaskName 'TetherlyDaemon'"));
+    }
+
+    #[test]
+    fn install_script_escapes_single_quotes() {
+        let ps = install_script(r"C:\Users\o'brien\tetherly.exe");
+        assert!(ps.contains("o''brien"));
+    }
 }
 
 // ---- macOS ----
@@ -93,9 +150,12 @@ mod macos {
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
     <key>StandardOutPath</key>
     <string>{log_path}</string>
     <key>StandardErrorPath</key>
@@ -296,6 +356,13 @@ mod macos {
             assert!(body.contains("<string>run</string>"));
             assert!(body.contains("<key>KeepAlive</key>"));
             assert!(body.contains("<key>RunAtLoad</key>"));
+            // Crash-only respawn: a clean exit (API shutdown during deploy,
+            // or a duplicate losing the instance lock) must stay down.
+            assert!(body.contains("<key>SuccessfulExit</key>\n        <false/>"));
+            // Background jobs get CPU/IO throttled by launchd — wrong for
+            // an input-forwarding daemon.
+            assert!(body.contains("<string>Interactive</string>"));
+            assert!(!body.contains("<string>Background</string>"));
         }
 
         #[test]
@@ -343,36 +410,35 @@ mod windows_impl {
         Ok(text)
     }
 
-    /// Register the per-user logon task. `RunLevel Highest` mirrors the
-    /// manual `TetherlySystemLauncher` chain's assumption; the restart
-    /// interval keeps a crashed daemon coming back within 5 minutes.
+    /// Register the per-user logon task, unless the SYSTEM launcher chain
+    /// already autostarts the daemon (then remove any stray per-user task).
+    /// The restart interval keeps a crashed daemon coming back within
+    /// 5 minutes; the daemon's instance lock makes any overlap harmless.
     pub(crate) fn install(json: bool) -> Result<()> {
         let exe = daemon_exe()?;
-        // Two-step build via New-ScheduledTaskAction keeps quoting sane.
-        let script = format!(
-            r#"$a = New-ScheduledTaskAction -Execute '{exe}' -Argument 'run'
-$t = New-ScheduledTaskTrigger -AtLogOn
-$s = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable
-Register-ScheduledTask -TaskName '{name}' -Action $a -Trigger $t -Settings $s -RunLevel Highest -Force | Out-Null"#,
-            exe = exe.display(),
-            name = SERVICE_TASK_NAME,
-        );
-        powershell(&script)?;
-        if !json {
-            println!("installed: scheduled task '{SERVICE_TASK_NAME}' (logon trigger, restart on failure)");
-            println!("runs: {} run", exe.display());
+        let out = powershell(&install_script(&exe.display().to_string()))?;
+        let result = if out.contains("system-launcher") {
+            "system-launcher"
         } else {
+            "installed"
+        };
+        if json {
             println!(
                 "{}",
-                serde_json::json!({"platform": "windows", "result": "installed", "task": SERVICE_TASK_NAME})
+                serde_json::json!({"platform": "windows", "result": result, "task": SERVICE_TASK_NAME})
             );
+        } else if result == "system-launcher" {
+            println!("autostart provided by scheduled task '{SYSTEM_LAUNCHER_TASK}' (SYSTEM); '{SERVICE_TASK_NAME}' not registered");
+        } else {
+            println!("installed: scheduled task '{SERVICE_TASK_NAME}' (logon trigger, restart on failure)");
+            println!("runs: {} run", exe.display());
         }
         Ok(())
     }
 
     pub(crate) fn uninstall(json: bool) -> Result<()> {
         powershell(&format!(
-            "Unregister-ScheduledTask -TaskName '{SERVICE_TASK_NAME}' -Confirm:$false"
+            "Unregister-ScheduledTask -TaskName '{SERVICE_TASK_NAME}' -Confirm:$false -ErrorAction SilentlyContinue"
         ))?;
         if !json {
             println!("uninstalled: {SERVICE_TASK_NAME}");
@@ -382,8 +448,9 @@ Register-ScheduledTask -TaskName '{name}' -Action $a -Trigger $t -Settings $s -R
 
     pub(crate) fn status(json: bool) -> Result<()> {
         let info = powershell(&format!(
-            "$t = Get-ScheduledTask -TaskName '{SERVICE_TASK_NAME}' -ErrorAction SilentlyContinue; \
-             if ($t) {{ $t.State }} else {{ 'NotFound' }}"
+            "$s = Get-ScheduledTask -TaskName '{SYSTEM_LAUNCHER_TASK}' -ErrorAction SilentlyContinue; \
+             $t = Get-ScheduledTask -TaskName '{SERVICE_TASK_NAME}' -ErrorAction SilentlyContinue; \
+             if ($t) {{ $t.State }} elseif ($s) {{ 'SystemLauncher' }} else {{ 'NotFound' }}"
         ))?;
         let state = info.trim().to_string();
         if json {
@@ -397,6 +464,8 @@ Register-ScheduledTask -TaskName '{name}' -Action $a -Trigger $t -Settings $s -R
             );
         } else if state == "NotFound" {
             println!("not installed ({SERVICE_TASK_NAME})");
+        } else if state == "SystemLauncher" {
+            println!("installed: {SYSTEM_LAUNCHER_TASK} (SYSTEM launcher chain)");
         } else {
             println!("installed: {SERVICE_TASK_NAME} (state: {state})");
         }

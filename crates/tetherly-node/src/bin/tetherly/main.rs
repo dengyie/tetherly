@@ -139,6 +139,28 @@ fn main() -> Result<()> {
             "tetherly daemon starting"
         );
     }
+    // v0.2.99: one daemon per data dir, taken before any token is minted or
+    // socket bound (a losing duplicate used to rotate the live tokens and
+    // then die on AddrInUse). Held until the process exits. The wait covers
+    // a self-restart, whose predecessor exits within ~1 s.
+    let _instance_lock = if matches!(&cli.cmd, Cmd::Run { .. }) {
+        match tetherly_node::instance_lock::acquire(&data_dir, std::time::Duration::from_secs(5)) {
+            Ok(lock) => Some(lock),
+            Err(e @ tetherly_node::instance_lock::LockError::Held(_)) => {
+                // Exit 0: a clean exit keeps launchd (KeepAlive
+                // SuccessfulExit=false) and the logon task from respawning.
+                tracing::warn!(error = %e, "daemon already running; this instance exits");
+                eprintln!("tetherly: {e}; exiting");
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "instance lock unavailable; starting without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
     if std::env::var("TETHERLY_INSECURE_LOG").ok().as_deref() == Some("1") {
         tracing::warn!("TETHERLY_INSECURE_LOG=1 is set; debug profile only");
     }

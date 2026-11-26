@@ -135,6 +135,12 @@ if [ "$RESTART" = true ]; then
     # code-signing validation. A daemon that refuses to exit is a hard
     # failure — proceeding would truncate a live image and brick the install.
     echo "==> Stopping previous daemon before replacing its binary..."
+    # v0.2.99: a launchd-managed daemon must leave launchd first — with a
+    # KeepAlive plist the shutdown below would just be respawned (old
+    # binary) and the pgrep wait would abort the deploy. `service install`
+    # re-bootstraps it after the swap. Not loaded => harmless error.
+    LAUNCHD_LABEL="dev.tetherly.tetherly"
+    launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
     # v0.2.52 (P0-1): shutdown needs the daemon's per-start API token
     # (0600 file in the user's data dir). §169: the endpoint moved to
     # `POST /api/v1/system/shutdown` (Admin tier) in v0.2.64.
@@ -260,16 +266,24 @@ else
 fi
 
 if [ "$RESTART" = true ]; then
-    echo "==> [4/4] Restarting via LaunchServices (open $APP_DIR)..."
-    # Re-register the daemon autostart BEFORE relaunching so a crash right
-    # after the swap still leaves launchd able to pull the daemon back up
-    # (production 2026-11-25: a reboot with no autostart registration took
-    # every paired peer offline). Idempotent: identical content is a no-op.
+    echo "==> [4/4] Restarting the daemon..."
+    # The LaunchAgent (RunAtLoad) is the ONE starter: `service install`
+    # bootstraps it, which launches the new binary. Also calling
+    # `open "$APP_DIR"` started a second daemon 0.4 s later (production
+    # 2026-11-26: it rotated the live tokens, then died on AddrInUse).
+    # Fall back to LaunchServices only when registration failed.
     echo "==> Ensuring daemon autostart (tetherly service install)..."
-    "$APP_DIR/Contents/MacOS/Tetherly" service install || \
-        echo "WARN: service install failed — autostart may be stale" >&2
-    open "$APP_DIR"
-    sleep 1
+    if "$APP_DIR/Contents/MacOS/Tetherly" service install; then
+        # Already-loaded job (identical plist) is not restarted by install.
+        launchctl kickstart "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
+    else
+        echo "WARN: service install failed — starting via LaunchServices" >&2
+        open "$APP_DIR"
+    fi
+    for _ in $(seq 1 40); do
+        curl -fs http://127.0.0.1:45716/api/v1/health >/dev/null 2>&1 && break
+        sleep 0.25
+    done
     echo "==> Verifying accessibility status:"
     # §169: `GET /api/v1/input` (Read tier) reports the input engine state;
     # the legacy `/api/input/ensure` is gone. This is a best-effort print.

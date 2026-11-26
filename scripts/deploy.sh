@@ -188,6 +188,33 @@ install_client_windows() {
         *) echo "tetherly:// scheme is not registered to tetherly-shell.exe" >&2; return 1 ;;
     esac
     echo "==> Desktop client installed on ${REMOTE_HOST}."
+    # Relaunch the client in the console user's desktop session (v0.2.99;
+    # production 2026-11-26: the install above stopped it and nothing
+    # brought it back). ssh runs in session 0, so a plain Start-Process
+    # would be invisible: a one-shot Interactive task runs it as the console
+    # user, then is removed. Unconditional — a client a previous deploy
+    # already left dead must come back too. Best-effort.
+    ps=$(cat <<'PS1'
+$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
+$cmd=(Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\tetherly\shell\open\command').'(default)'
+$exe=if ($cmd -match '^"([^"]+)"') { (Get-Item -LiteralPath $Matches[1]).FullName } else { throw 'scheme missing' }
+$u=(Get-CimInstance Win32_ComputerSystem).UserName
+if (-not $u) { Write-Output 'relaunch=skipped(no console user)'; exit 0 }
+if (Get-Process -Name tetherly-shell,TETHER~1 -ErrorAction SilentlyContinue) { Write-Output 'relaunch=already-running'; exit 0 }
+$n='TetherlyClientRelaunch'
+$a=New-ScheduledTaskAction -Execute $exe
+$p=New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName $n -Action $a -Principal $p -Force | Out-Null
+Start-ScheduledTask -TaskName $n
+$ok=$false; foreach ($i in 1..20) { Start-Sleep -Milliseconds 250; $s=Get-Process -Name tetherly-shell,TETHER~1 -ErrorAction SilentlyContinue; if ($s) { $ok=$true; break } }
+Unregister-ScheduledTask -TaskName $n -Confirm:$false
+if ($ok) { Write-Output ('relaunch=ok session=' + ($s | Select-Object -First 1).SessionId) } else { Write-Output 'relaunch=failed' }
+PS1
+)
+    b64=$(printf '%s' "$ps" | LC_ALL=C iconv -f UTF-8 -t UTF-16LE | base64 | LC_ALL=C tr -d '\r\n')
+    out=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -NonInteractive -EncodedCommand ${b64}" 2>/dev/null | LC_ALL=C tr -d '\r') || \
+        out="relaunch=ssh-failed"
+    echo "==> Client relaunch: $out"
     # Daemon autostart (2026-11-25): the scheduled task was hand-registered
     # outside this repo, so a new machine or a wiped task silently lost
     # boot persistence. The binary now self-registers; idempotent.

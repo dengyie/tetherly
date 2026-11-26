@@ -8,6 +8,7 @@ pub mod apitoken;
 pub mod apiv1;
 pub mod cred;
 pub mod events;
+pub mod instance_lock;
 pub mod lan;
 pub mod logging;
 pub mod logsink;
