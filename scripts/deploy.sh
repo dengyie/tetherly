@@ -26,6 +26,7 @@ REMOTE_PORT=45716
 DATA_DIR="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}"
 LOCAL_PORT=45716
 RUN_SMOKE=false
+STAGING_DIR=""
 PROTECT_PROCS="SRBMiner-MULTI,verge-mihomo,komari-agent"
 
 usage() {
@@ -36,6 +37,8 @@ usage() {
     echo "  --tag <vX.Y.Z>               GitHub Release tag to fetch from (default: latest release)"
     echo "  --run-id <ID>                GitHub Actions workflow run ID to fetch artifacts from"
     echo "  --remote-host <host>         Windows SSH host alias (default: home-win)"
+    echo "  --staging-dir <dir>          Use pre-downloaded, verified release assets from this dir"
+    echo "                               (useful when gh release download keeps hitting network EOF)"
     echo "  --smoke                      Run verify_cross_platform_smoke.sh after deploy"
     echo "  -h, --help                   Show this help message"
     exit 0
@@ -57,6 +60,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --remote-host)
             REMOTE_HOST="$2"
+            shift 2
+            ;;
+        --staging-dir)
+            STAGING_DIR="$2"
             shift 2
             ;;
         --smoke)
@@ -286,7 +293,16 @@ deploy_windows() {
     WIN_BIN="$TMP_DIR/tetherly-windows-x86_64.exe"
     WIN_CLI="$TMP_DIR/tetherly-cli-windows-x86_64.exe"
 
-    if [ -n "$RUN_ID" ]; then
+    if [ -n "$STAGING_DIR" ]; then
+        # Pre-downloaded assets (production 2026-11-26: gh release download
+        # hit `unexpected EOF` on every attempt; curl -C - resume loop got
+        # the files through). Digest checks below still apply unchanged.
+        echo "==> Using pre-staged assets from ${STAGING_DIR}..."
+        cp "$STAGING_DIR"/tetherly-windows-x86_64.exe "$WIN_BIN"
+        [ -f "$STAGING_DIR/tetherly-cli-windows-x86_64.exe" ] && \
+            cp "$STAGING_DIR"/tetherly-cli-windows-x86_64.exe "$WIN_CLI"
+        cp "$STAGING_DIR"/SHA256SUMS "$TMP_DIR/SHA256SUMS"
+    elif [ -n "$RUN_ID" ]; then
         echo "==> Fetching Windows binaries from GitHub Actions run ${RUN_ID}..."
         gh run download "$RUN_ID" -n "tetherly-windows-x86_64" -D "$TMP_DIR" --skip-existing
         gh run download "$RUN_ID" -n "tetherly-release-digests" -D "$TMP_DIR" --skip-existing
