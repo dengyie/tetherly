@@ -218,7 +218,10 @@ PS1
     # Daemon autostart (2026-11-25): the scheduled task was hand-registered
     # outside this repo, so a new machine or a wiped task silently lost
     # boot persistence. The binary now self-registers; idempotent.
-    ps="\$out = E:\code\tetherly\target\release\tetherly.exe service install 2>&1; Write-Output \$out"
+    # Start-Process -Wait + file redirects: the release exe is GUI-subsystem,
+    # so `$out = exe ... 2>&1` neither waits nor captures (v0.2.99 deploy
+    # printed an empty line and the stray TetherlyDaemon task survived).
+    ps="\$ProgressPreference='SilentlyContinue'; \$o=\"\$env:TEMP\\tetherly-svc.out\"; \$e=\"\$env:TEMP\\tetherly-svc.err\"; \$p = Start-Process -FilePath 'E:\code\tetherly\target\release\tetherly.exe' -ArgumentList 'service','install','--json' -NoNewWindow -Wait -PassThru -RedirectStandardOutput \$o -RedirectStandardError \$e; \$r = ((Get-Content \$o,\$e -ErrorAction SilentlyContinue) -join ' ').Trim(); Write-Output \"exit=\$(\$p.ExitCode) \$r\""
     b64=$(printf '%s' "$ps" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\r\n')
     out=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -NonInteractive -EncodedCommand ${b64}" 2>/dev/null | tr -d '\r') || \
         out="(service install ssh failed — verify autostart manually)"

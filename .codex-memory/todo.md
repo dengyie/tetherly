@@ -513,5 +513,7 @@
   - Windows `service install`：存在 `TetherlySystemLauncher` 时不注册并删除遗留 `TetherlyDaemon`；`status` 报告 SYSTEM 链；`uninstall` 容错。
   - deploy.sh：MSI 装完无条件用一次性 Interactive 计划任务以控制台用户身份在 Session 1 拉起客户端（已在 home-win 手动验证 relaunch=ok session=1）。
   - 拖拽探针竞态：基线原在按下时异步读取，读得晚于 Finder 开拖就拿到拖后计数 → 判「无文件」（launchd Background 限流放大）。改为每次松开时刷新基线（松开到下次按下之间不可能开拖），按下只补缺；跨屏时同步快照基线传给探针；无文件时日志带 baseline/change_count/types 便于事后区分。
-- [ ] 发布 v0.2.99 + deploy --target all + 双端验证（单实例、plist 新键、TetherlyDaemon 已删、客户端拉起）
+- [x] 发布 v0.2.99 + deploy --target all + 双端验证：ed574c7 CI 45878406045 全绿 → bump 41750e4 → release 45879758122 全绿 14 资产 → deploy exit 0。Mac health 0.2.99，单 daemon pid 14179 持 daemon.lock，plist SuccessfulExit/Interactive，launchd running，鉴权 200（token 未被轮换）；home-win 热重启 22956→19588（SYSTEM 链，Session 1，--data-dir），daemon.lock 在，受保护进程 3/3，客户端 relaunch=ok session=1（tetherly-shell pid 31836）。
+  - 部署中发现：deploy.sh 的 `$out = tetherly.exe service install 2>&1` 输出为空且 TetherlyDaemon 未删——release exe 是 GUI 子系统，PowerShell 既不等待也不捕获。改 `Start-Process -Wait -PassThru` + stdout/stderr 文件重定向并带 `--json`/exit 码；远端实测 `exit=0 {"result":"system-launcher"}`，TetherlyDaemon 已删除。
+  - 遗留：home-win `TetherlyApp`（用户级、TimeTrigger、带 --data-dir）仍 Ready，属手工任务；有单实例锁后与 SYSTEM 链重叠无害（后到者 exit 0），是否删除待用户定。
 - [ ] 用户实测：Mac 拖文件到 Win 出角标、松手到达；失败时看 `drag probe:` 日志
