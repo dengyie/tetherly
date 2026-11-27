@@ -51,6 +51,7 @@ Heterogeneous desktop and mobile setups frequently suffer from protocol fragment
 | **Motion Vector Reuse** | Ultra-efficient bandwidth conservation | Detects block-level translations (`TILE_SUBCODEC_MOTION`), compressing frame deltas down to 5-byte movement signals (up to 3276:1 ratio). |
 | **Native ANCS Hub** | iPhone BLE notification ingestion without app | Directly communicates via Apple Notification Center Service over WinRT (Windows), CoreBluetooth (macOS), and BlueZ (Linux). |
 | **Local OTP Safeguard** | Isolated one-time password extraction | High-confidence heuristic extractor captures 4-to-8 digit auth codes locally without propagating raw sensitive message payloads. |
+| **Native Cross-Screen Drag** | Drag files & folders straight into any app on the peer | Files dragged across the screen edge become a real OS drag on the receiver (Windows OLE `DoDragDrop`, released only once bytes land); folders travel as one tar bundle; SHA-256 dedupe skips content the receiver already holds. |
 | **Resumable File Pipeline** | Reliable high-throughput data transfer | Streaming binary channel with incremental SHA-256 verification, resume offset alignment, and rate-limited chunk scheduling. |
 | **Dual-Tree CLI** | Comprehensive node governance | Headless daemon accompanied by `tetherly-cli` providing 485 validated command paths through hardened loopback HTTP/SSE APIs. |
 

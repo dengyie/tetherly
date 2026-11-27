@@ -1887,3 +1887,4 @@ v0.2.71 双端部署（health 0.2.71，受保护进程未动）后用 Playwright
 - v0.3.3 §243（2026-11-27）：交互/性能（69f8841：回到本机的 carry 不二次接管、DoDragDrop 被拒重试、轮询提速、角标静止不重设位置）+ 文件夹拖拽（b783882：Mac 发送端原先跳过目录；改为打 tar 一次传输 bundle=dir-tar，接收端解包为真实文件夹，原生拖拽 CF_HDROP 直接给文件夹）。CI 绿（m3_2 flake 重跑）→ release 14 资产 → deploy all exit 0，双端 0.3.3，受保护进程完好。待用户实测拖文件夹。
 - v0.3.4 §243（2026-11-27）：文件夹拖拽在 Win 未接管为原生拖拽（`native_drag_begin` 遗留 has_directory 拒绝门）→ 新增 dragdir 能力门控放行；CI/release（android 429 重跑）绿，deploy all exit 0 双端 0.3.4。待用户实测拖文件夹到任意窗口。
 - v0.3.5 §244（2026-11-28）：阶段 review，修 dedupe 缓存别名被改写仍命中（P1）+ 文件夹解包不完整静默成功（P2）+ 小项；新增交接文档 docs/HANDOFF_NATIVE_DRAG_v0.3.md。
+- v0.4.0 §245（2026-11-28）：大版本里程碑（v0.3.x 原生拖拽系列收官），README/发布说明/Obsidian 同步。

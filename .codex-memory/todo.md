@@ -547,3 +547,7 @@
 - 修复（0161731）：P1 dedupe `.cache/<sha>` 与交付副本共享 inode，原地同尺寸改写后仍按原 sha 零字节交付 → 未索引命中须重算哈希、不符即删；P2 文件夹解包条目失败静默成功 → `Unpacked{files,skipped}` + warn + UI 提示；P3 staging JoinError 被吞、注释错位。
 - 交接文档：`docs/HANDOFF_NATIVE_DRAG_v0.3.md`（链路图、caps、日志签名、不变量、遗留清单、发布 SOP）。
 - [ ] 遗留：helper OLE 偶发卡死根因；大文件夹先打包后发的首帧延迟/双倍磁盘；tar 头未计入 FILE_MAX；`.<tid>.unpack` 崩溃残留清扫。
+
+## §245 大版本 v0.4.0（2026-11-28）
+- 用户："当前的项目先做一个大版本吧，部署线上更新 github 和 obsidian 文档"；版本号由用户选定 v0.4.0（不选 1.0.0，不对外承诺稳定 API）。
+- 内容：v0.3.x 原生拖拽/去重/文件夹传输的里程碑。README 中英文新增"跨屏原生拖拽"特性行，发布说明在 `docs/releases/v0.4.0.md`（同步为 GitHub Release 正文），Obsidian `tetherly 开发文档` 与 projects 路由已更新。
