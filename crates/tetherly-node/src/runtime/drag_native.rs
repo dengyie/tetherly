@@ -30,7 +30,7 @@
 
 use super::*;
 use std::path::{Path, PathBuf};
-use tetherly_core::drag::{DragCancelReason, DragControlMsg, DRAG_PULL_CAP};
+use tetherly_core::drag::{DragCancelReason, DragControlMsg, DRAG_DIR_CAP, DRAG_PULL_CAP};
 use tetherly_core::DeviceId;
 use tracing::{info, warn};
 
@@ -169,6 +169,13 @@ impl Node {
             .is_some_and(|p| p.caps.iter().any(|c| c == cap))
     }
 
+    /// Whether `peer` can answer a pull for this carry: it must understand
+    /// `RemoteDragPull`, and for a carry with a folder also send folders.
+    pub(crate) fn native_drag_peer_ok(&self, peer: &DeviceId, has_directory: bool) -> bool {
+        self.peer_has_cap(peer, DRAG_PULL_CAP)
+            && (!has_directory || self.peer_has_cap(peer, DRAG_DIR_CAP))
+    }
+
     fn native_drag_root(&self) -> PathBuf {
         self.shared.cfg.data_dir.join("inbox").join(NATIVE_DRAG_DIR)
     }
@@ -182,10 +189,11 @@ impl Node {
         file_count: u32,
         has_directory: bool,
     ) -> bool {
-        if has_directory || file_count == 0 || !self.native_drag_supported() {
+        if file_count == 0 || !self.native_drag_supported() {
             return false;
         }
-        if !self.peer_has_cap(peer, DRAG_PULL_CAP) {
+        if !self.native_drag_peer_ok(peer, has_directory) {
+            info!(peer = %peer, drag_id, has_directory, "native drag: peer cannot serve this carry");
             return false;
         }
         let now = self.now_ms();
@@ -705,6 +713,52 @@ mod tests {
         let inbox = node.shared.cfg.data_dir.join("inbox");
         assert_eq!(std::fs::read(inbox.join("proj/sub/x.txt")).unwrap(), b"x");
         assert!(!inbox.join(NATIVE_DRAG_DIR).join("17").exists());
+    }
+
+    /// v0.3.3: a folder carry goes native only for a sender that sends
+    /// folders; a plain-file carry needs just the pull capability.
+    #[tokio::test]
+    async fn folder_carry_needs_the_folder_capability() {
+        let (node, _dir) = temp_test_node("native_dircap");
+        let register = |id: u8, caps: Vec<String>| {
+            let node = &node;
+            async move {
+                let peer = DeviceId::from_id_pk(&[id; 32]);
+                let (tx, _rx) = tokio::sync::mpsc::channel::<tetherly_core::frame::InnerFrame>(4);
+                let live = crate::runtime::LivePeer {
+                    device_id: peer.clone(),
+                    name: format!("p{id}"),
+                    platform: "test".into(),
+                    addr: "127.0.0.1:1".parse().unwrap(),
+                    handshake_hash: [id; 32],
+                    file_port: None,
+                    input_port: None,
+                    screen_port: None,
+                    caps,
+                    path: tetherly_core::PathKind::Lan,
+                    rtt_ms: None,
+                    last_seen_ms: 0,
+                };
+                node.register_session(live, tx).await;
+                peer
+            }
+        };
+        let old = register(61, vec![DRAG_PULL_CAP.into()]).await;
+        let new = register(62, vec![DRAG_PULL_CAP.into(), DRAG_DIR_CAP.into()]).await;
+        let none = register(63, vec![]).await;
+        assert!(node.native_drag_peer_ok(&old, false));
+        assert!(
+            !node.native_drag_peer_ok(&old, true),
+            "old sender skips folders"
+        );
+        assert!(node.native_drag_peer_ok(&new, true));
+        assert!(!node.native_drag_peer_ok(&none, false));
+        assert!(node
+            .shared
+            .local_caps
+            .lock()
+            .unwrap()
+            .contains(DRAG_DIR_CAP));
     }
 
     /// Carried back to the controller: delivered quietly, and an unknown

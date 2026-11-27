@@ -96,6 +96,12 @@ pub enum DragControlMsg {
 /// [`DragControlMsg::RemoteDragPull`].
 pub const DRAG_PULL_CAP: &str = "dragpull";
 
+/// Capability token advertised by nodes whose drag handoff sends folders
+/// (packed as one `BUNDLE_DIR_TAR` transfer, v0.3.3). A receiver only turns
+/// a carry containing a folder into a native drag for such a sender; an
+/// older one skips folders, so nothing would ever be offered.
+pub const DRAG_DIR_CAP: &str = "dragdir";
+
 impl DragControlMsg {
     /// Serialize into an inner frame for the session channel.
     pub fn to_frame(&self) -> Result<crate::frame::InnerFrame, CoreError> {
