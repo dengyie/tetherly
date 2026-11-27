@@ -24,7 +24,10 @@
 
 param(
     [switch]$DryRun,
-    [double]$MinAgeHours = 6
+    [double]$MinAgeHours = 6,
+    # Comma list of protected names that must still be alive at the end
+    # (default: all). Names outside it stay protected, just not required.
+    [string]$Require = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -135,8 +138,9 @@ Write-Output ("after:  " + (Get-MemSummary))
 # legitimately run in two sessions (Session 0 service + Session 1 tray), so
 # an instance count (4) would never equal the name count (3) and abort every
 # deploy on a healthy host. What matters is that each name is still alive.
-$alive = @(Get-Process $protectedNames -ErrorAction SilentlyContinue |
+$requiredNames = if ($Require) { @($Require -split ',' | Where-Object { $_ }) } else { $protectedNames }
+$alive = @(Get-Process $requiredNames -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty ProcessName -Unique).Count
-Write-Output ("protected processes alive: {0}/{1}; stale processes killed: {2}" -f $alive, $protectedNames.Count, $killed)
-if ($alive -ne $protectedNames.Count) { exit 2 }
+Write-Output ("protected processes alive: {0}/{1}; stale processes killed: {2}" -f $alive, $requiredNames.Count, $killed)
+if ($alive -ne $requiredNames.Count) { exit 2 }
 exit 0

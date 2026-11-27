@@ -123,6 +123,48 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
         })
     };
 
+    // Watchdog: independent of the main (OLE) thread, so a wedged drag loop
+    // can never leak the helper. It reports and exits on its own.
+    let finished = Arc::new(AtomicBool::new(false));
+    {
+        let status = status.clone();
+        let finished = finished.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut terminal_since: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                if finished.load(Ordering::SeqCst) {
+                    return;
+                }
+                let state = status
+                    .lock()
+                    .map(|s| s.state.clone())
+                    .unwrap_or_else(|e| e.into_inner().state.clone());
+                let terminal = matches!(state.as_str(), "cancel" | "failed");
+                terminal_since = if terminal {
+                    terminal_since.or_else(|| Some(Instant::now()))
+                } else {
+                    None
+                };
+                if let Some(why) =
+                    watchdog_verdict(started.elapsed(), terminal_since.map(|t| t.elapsed()))
+                {
+                    if finished.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let outcome = if state == "cancel" {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    };
+                    tracing::warn!(drag_id, why, outcome, "drag source watchdog: exiting");
+                    std::process::exit(post_result(ui_port, drag_id, outcome).max(3));
+                }
+            }
+        });
+    }
+
     // Wait for the names (the bytes may still be in flight).
     let start = Instant::now();
     let early: Option<&'static str> = loop {
@@ -155,10 +197,43 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
             }
         }
     };
+    finished.store(true, Ordering::SeqCst);
     stop.store(true, Ordering::Relaxed);
     let _ = poller.join();
     tracing::info!(drag_id, outcome, "drag source finished");
+    post_result(ui_port, drag_id, outcome)
+}
 
+/// How long a cancelled/failed drag may keep the helper alive before the
+/// watchdog ends the process (the OLE loop normally exits within one tick).
+#[cfg_attr(not(windows), allow(dead_code))]
+const WATCHDOG_TERMINAL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Hard lifetime cap: no carried drag legitimately lasts this long.
+#[cfg_attr(not(windows), allow(dead_code))]
+const WATCHDOG_LIFETIME_CAP: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+/// Watchdog decision: why the helper must exit now, if it must.
+///
+/// v0.3.1 field bug: a helper whose drag was cancelled spun its main thread
+/// forever (100% of a core, never reported); the daemon had already moved
+/// on, so nothing but this check can reap it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn watchdog_verdict(
+    alive: std::time::Duration,
+    terminal_for: Option<std::time::Duration>,
+) -> Option<&'static str> {
+    if terminal_for.is_some_and(|t| t >= WATCHDOG_TERMINAL_GRACE) {
+        Some("stuck after the drag ended")
+    } else if alive >= WATCHDOG_LIFETIME_CAP {
+        Some("lifetime cap reached")
+    } else {
+        None
+    }
+}
+
+/// Report the outcome to the daemon; the process exit code.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn post_result(ui_port: u16, drag_id: u64, outcome: &str) -> i32 {
     let body = serde_json::json!({ "drag_id": drag_id, "outcome": outcome });
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -577,7 +652,22 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::hdrop_bytes;
+    use super::{hdrop_bytes, watchdog_verdict, WATCHDOG_LIFETIME_CAP, WATCHDOG_TERMINAL_GRACE};
+    use std::time::Duration;
+
+    #[test]
+    fn watchdog_reaps_only_ended_or_overlong_drags() {
+        let s = Duration::from_secs;
+        assert_eq!(watchdog_verdict(s(1), None), None, "live drag");
+        assert_eq!(watchdog_verdict(s(600), None), None, "long hold is fine");
+        assert_eq!(
+            watchdog_verdict(s(10), Some(s(1))),
+            None,
+            "grace for OLE exit"
+        );
+        assert!(watchdog_verdict(s(10), Some(WATCHDOG_TERMINAL_GRACE)).is_some());
+        assert!(watchdog_verdict(WATCHDOG_LIFETIME_CAP, None).is_some());
+    }
 
     #[test]
     fn hdrop_payload_is_wide_and_double_nul_terminated() {

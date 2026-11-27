@@ -28,6 +28,11 @@ LOCAL_PORT=45716
 RUN_SMOKE=false
 STAGING_DIR=""
 PROTECT_PROCS="SRBMiner-MULTI,verge-mihomo,komari-agent"
+# Protected names that may already be stopped before the deploy (comma list,
+# e.g. TETHERLY_ALLOW_STOPPED=SRBMiner-MULTI when it was stopped on purpose).
+# They stay protected (never touched); the deploy just does not refuse to run,
+# and the post-check requires every process that was alive beforehand.
+ALLOW_STOPPED="${TETHERLY_ALLOW_STOPPED:-}"
 
 usage() {
     echo "Usage: $0 [options]"
@@ -300,9 +305,15 @@ deploy_windows() {
     echo "==> Pre-checking protected production processes on ${REMOTE_HOST}..."
     WIN_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Get-Process ${PROTECT_PROCS} -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, SessionId | ConvertTo-Json -Compress\"" 2>/dev/null || true)
     echo "Protected processes live status: $WIN_AUDIT"
+    ALIVE_BEFORE=""
     for p in $(echo "$PROTECT_PROCS" | tr ',' ' '); do
-        if ! echo "$WIN_AUDIT" | grep -qi "\"${p}\""; then
+        if echo "$WIN_AUDIT" | grep -qi "\"${p}\""; then
+            ALIVE_BEFORE="${ALIVE_BEFORE:+${ALIVE_BEFORE},}${p}"
+        elif echo ",${ALLOW_STOPPED}," | grep -qi ",${p},"; then
+            echo "WARN: protected process ${p} was already stopped before deploy (allowed by TETHERLY_ALLOW_STOPPED); it will not be touched or started." >&2
+        else
             echo "Error: protected process ${p} is not running! Aborting deployment to prevent interference." >&2
+            echo "       (if it was stopped on purpose: TETHERLY_ALLOW_STOPPED=${p} $0 ...)" >&2
             exit 1
         fi
     done
@@ -314,7 +325,7 @@ deploy_windows() {
     echo "==> Cleaning Windows memory before deploy (stale ssh sessions + working-set trim)..."
     scp -q "$SCRIPT_DIR/win_memory_cleanup.ps1" "${REMOTE_HOST}:E:/code/tetherly/data/win_memory_cleanup.ps1"
     set +e
-    ssh "${REMOTE_HOST}" "powershell -NoProfile -ExecutionPolicy Bypass -File E:\\code\\tetherly\\data\\win_memory_cleanup.ps1"
+    ssh "${REMOTE_HOST}" "powershell -NoProfile -ExecutionPolicy Bypass -File E:\\code\\tetherly\\data\\win_memory_cleanup.ps1 -Require ${ALIVE_BEFORE}"
     CLEAN_RC=$?
     set -e
     if [ "$CLEAN_RC" -eq 2 ]; then
@@ -386,7 +397,7 @@ deploy_windows() {
     ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path 'C:\Users\mango\AppData\Local\tetherly\updates' | Out-Null; Copy-Item 'E:\code\tetherly\data\updates\\${REMOTE_STAGING_NAME}' 'C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}' -Force\""
 
     echo "==> Capturing old daemon PID and process start-time rollback anchor..."
-    OLD_PROCESS=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$p=Get-Process tetherly -ErrorAction Stop | Select-Object -First 1; [pscustomobject]@{pid=\$p.Id; start_ticks=\$p.StartTime.ToUniversalTime().Ticks; path=\$p.Path} | ConvertTo-Json -Compress\"")
+    OLD_PROCESS=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$d=Get-CimInstance Win32_Process | Where-Object { \$_.Name -eq 'tetherly.exe' -and \$_.CommandLine -match ' run\s*\$' } | Select-Object -First 1; \$p=Get-Process -Id \$d.ProcessId -ErrorAction Stop; [pscustomobject]@{pid=\$p.Id; start_ticks=\$p.StartTime.ToUniversalTime().Ticks; path=\$p.Path} | ConvertTo-Json -Compress\"")
     OLD_PID=$(printf '%s' "$OLD_PROCESS" | jq -r '.pid // empty')
     OLD_START_TICKS=$(printf '%s' "$OLD_PROCESS" | jq -r '.start_ticks // empty')
     OLD_EXE=$(printf '%s' "$OLD_PROCESS" | jq -r '.path // empty')
@@ -416,7 +427,7 @@ deploy_windows() {
     EXPECTED_VERSION="${TAG#v}"
     READY=false
     for _ in $(seq 1 30); do
-        PROBE=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$p=Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object -First 1; \$h=try { Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health -ErrorAction Stop } catch { \$null }; \$s=try { Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/system -Headers @{'X-Tetherly-Token'=(Get-Content -Raw 'C:\\Users\\mango\\AppData\\Local\\tetherly\\api.token').Trim()} -ErrorAction Stop } catch { \$null }; if (\$p -and \$h -and \$s) { [pscustomobject]@{pid=\$p.Id; start_ticks=\$p.StartTime.ToUniversalTime().Ticks; health_pid=\$s.pid; version=\$h.version; ok=\$h.ok} | ConvertTo-Json -Compress }\"")
+        PROBE=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$d=Get-CimInstance Win32_Process | Where-Object { \$_.Name -eq 'tetherly.exe' -and \$_.CommandLine -match ' run\s*\$' } | Select-Object -First 1; \$p=if (\$d) { Get-Process -Id \$d.ProcessId -ErrorAction SilentlyContinue }; \$h=try { Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/health -ErrorAction Stop } catch { \$null }; \$s=try { Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/v1/system -Headers @{'X-Tetherly-Token'=(Get-Content -Raw 'C:\\Users\\mango\\AppData\\Local\\tetherly\\api.token').Trim()} -ErrorAction Stop } catch { \$null }; if (\$p -and \$h -and \$s) { [pscustomobject]@{pid=\$p.Id; start_ticks=\$p.StartTime.ToUniversalTime().Ticks; health_pid=\$s.pid; version=\$h.version; ok=\$h.ok} | ConvertTo-Json -Compress }\"")
         NEW_PID=$(printf '%s' "$PROBE" | jq -r '.pid // empty' 2>/dev/null || true)
         NEW_START_TICKS=$(printf '%s' "$PROBE" | jq -r '.start_ticks // empty' 2>/dev/null || true)
         HEALTH_PID=$(printf '%s' "$PROBE" | jq -r '.health_pid // empty' 2>/dev/null || true)
@@ -443,7 +454,7 @@ deploy_windows() {
 
     echo "==> Post-checking protected production processes on ${REMOTE_HOST}..."
     WIN_POST_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Get-Process ${PROTECT_PROCS} -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, SessionId | ConvertTo-Json -Compress\"" 2>/dev/null || true)
-    for p in $(echo "$PROTECT_PROCS" | tr ',' ' '); do
+    for p in $(echo "$ALIVE_BEFORE" | tr ',' ' '); do
         if ! echo "$WIN_POST_AUDIT" | grep -qi "\"${p}\""; then
             echo "FATAL: protected process ${p} was interrupted during deployment!" >&2
             exit 2
