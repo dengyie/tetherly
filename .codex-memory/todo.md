@@ -516,4 +516,13 @@
 - [x] 发布 v0.2.99 + deploy --target all + 双端验证：ed574c7 CI 45878406045 全绿 → bump 41750e4 → release 45879758122 全绿 14 资产 → deploy exit 0。Mac health 0.2.99，单 daemon pid 14179 持 daemon.lock，plist SuccessfulExit/Interactive，launchd running，鉴权 200（token 未被轮换）；home-win 热重启 22956→19588（SYSTEM 链，Session 1，--data-dir），daemon.lock 在，受保护进程 3/3，客户端 relaunch=ok session=1（tetherly-shell pid 31836）。
   - 部署中发现：deploy.sh 的 `$out = tetherly.exe service install 2>&1` 输出为空且 TetherlyDaemon 未删——release exe 是 GUI 子系统，PowerShell 既不等待也不捕获。改 `Start-Process -Wait -PassThru` + stdout/stderr 文件重定向并带 `--json`/exit 码；远端实测 `exit=0 {"result":"system-launcher"}`，TetherlyDaemon 已删除。
   - 遗留：home-win `TetherlyApp`（用户级、TimeTrigger、带 --data-dir）仍 Ready，属手工任务；有单实例锁后与 SYSTEM 链重叠无害（后到者 exit 0），是否删除待用户定。
-- [ ] 用户实测：Mac 拖文件到 Win 出角标、松手到达；失败时看 `drag probe:` 日志
+- [x] 用户实测：Mac 拖文件到 Win 文件确实到达（2026-11-27 用户确认）；`TetherlyApp` 计划任务用户同意删除，已删
+
+## §242 接收端原生拖拽：Win 侧鼠标直接拖住文件副本落到任意目标（v0.3.0，2026-11-27）
+- 用户诉求：文件从 Mac 拖到 Win 后不必先落下载目录再从资源管理器拖一次；光标过边即在 Win 侧变成真实的文件拖拽，按住不放直接拖进任意项目/窗口。选择：松手等传完；没落到目标或 Esc → 照旧存下载目录并选中。
+- 协议：`DragControlMsg::RemoteDragPull{drag_id}`，仅对 caps 含 `dragpull`（`DRAG_PULL_CAP`）的对端发送（旧版遇未知变体会断会话）。接收端收到 carry 的 RemoteDragEnter → `native_drag_begin` 注册 pending drop（自动接收）+ 回发 Pull + 以控制台用户身份拉起 `tetherly drag-source --ui-port --drag-id` helper；控制端收 Pull 立即投递（无需等松手，刷新 enter 带 staged 数），松手只补一个 RemoteDropConfirm 作兜底。
+- 落盘：被认领的 offer 绑定固定路径 `inbox/.drag/<drag_id>/<name>`（files.rs accept_file rename 到该路径，不弹选中、照打 MOTW）；结果 dropped 保留副本（1h 清扫）；否则经 `reserve_inbox_target` 移回 inbox 并 reveal（拖回控制端不 reveal）。
+- helper（platform/drag_source.rs）：轮询 `/api/v1/drag/native/poll`，在 1-alpha 窗口上注入 LEFTDOWN 后 `DoDragDrop`（CF_HDROP，仅 COPY），`QueryContinueDrag` 在 state!=ready 时扣住 drop；结束 POST `/api/v1/drag/native/result`。
+- 兜底：Pull 还没换来任何 offer 就松手 → `native_drag_to_legacy` 把这次 drop 交还 v0.2.x 旧路径（inbox+reveal）；名字结算窗口从刷新 enter 起算 8s（大文件 staging 慢）。关闭开关 `TETHERLY_NO_NATIVE_DRAG=1`；单测里 `cfg!(test)` 关闭（否则 Windows CI 会真拉起 helper，fb321a8）。
+- 发布：a65c457 CI Windows 红（旧双节点 wire 测试被原生路径接管）→ fixup fb321a8 CI 45922730052 全绿 → bump v0.3.0 c0f60c4 → tag → release 45923498245 全绿 14 资产 → `deploy.sh --target all --tag v0.3.0` exit 0：Mac health/客户端 0.3.0；home-win 热重启 19588→27412（SYSTEM），受保护进程 3/3 不动，msi exit 0，客户端 relaunch=ok session=1；Mac `/api/v1/devices` 显示 DESKTOP-VST7EIE 在线且 caps 含 dragpull。
+- [ ] 用户实测：Mac 拖 Finder 文件过边到 Win，光标即为文件拖拽，按住直接落到资源管理器/应用里得到副本；未落目标/Esc 时文件进下载目录并选中。失败查 Win 日志 `native drag` / `drag-source`
