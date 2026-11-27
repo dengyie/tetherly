@@ -147,8 +147,11 @@ impl Node {
     /// Whether this node turns carried drags into native OS drags: Windows
     /// only (the `drag-source` helper), opt-out via
     /// `TETHERLY_NO_NATIVE_DRAG=1`.
+    /// Off in unit tests: `begin` spawns the real helper (the test binary
+    /// would be re-executed as `drag-source`); the state machine is tested
+    /// through `native_drag_install` directly.
     pub(crate) fn native_drag_supported(&self) -> bool {
-        cfg!(windows) && std::env::var_os("TETHERLY_NO_NATIVE_DRAG").is_none()
+        cfg!(windows) && !cfg!(test) && std::env::var_os("TETHERLY_NO_NATIVE_DRAG").is_none()
     }
 
     pub(crate) fn peer_has_cap(&self, peer: &DeviceId, cap: &str) -> bool {
