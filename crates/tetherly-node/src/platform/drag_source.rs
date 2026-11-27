@@ -102,9 +102,11 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
                         })
                         .flatten()
                 });
+                let mut ready = false;
                 match parsed {
                     Some(s) => {
                         failures = 0;
+                        ready = s.state == "ready";
                         let mut st = status.lock().expect("status");
                         st.state = s.state;
                         st.released = s.released;
@@ -118,7 +120,7 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
                         }
                     }
                 }
-                std::thread::sleep(Duration::from_millis(120));
+                std::thread::sleep(poll_interval(ready));
             }
         })
     };
@@ -229,6 +231,24 @@ fn watchdog_verdict(
     } else {
         None
     }
+}
+
+/// Poll fast until the payload is ready (drag start and a release waiting
+/// on the bytes both hang on this), then relax.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn poll_interval(ready: bool) -> std::time::Duration {
+    std::time::Duration::from_millis(if ready { 120 } else { 40 })
+}
+
+/// How long `DoDragDrop` keeps being retried after an immediate failure.
+const DRAG_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// Retry a `DoDragDrop` that failed on entry (E_FAIL: another OLE drag —
+/// e.g. a previous helper still unwinding — or a press not yet visible)?
+/// Only while the drag is still live and within the budget.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn retry_drag(state: &str, elapsed: std::time::Duration) -> bool {
+    !matches!(state, "cancel" | "failed") && elapsed < DRAG_RETRY_BUDGET
 }
 
 /// Report the outcome to the daemon; the process exit code.
@@ -595,27 +615,6 @@ mod win {
             SetLayeredWindowAttributes(hwnd, 0, 1, LWA_ALPHA);
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
-        // Let the window reach the hit-test tree before the press.
-        pump_until_pressed(std::time::Duration::from_millis(30));
-        let injected = !lmb_down();
-        if injected {
-            mouse(MOUSEEVENTF_LEFTDOWN);
-            pump_until_pressed(std::time::Duration::from_millis(300));
-        }
-        let pressed = PRESSED.with(|p| p.get());
-        let forced = !thread_lmb_down() && force_thread_lmb_down();
-        tracing::info!(
-            injected,
-            pressed,
-            forced,
-            global_down = lmb_down(),
-            thread_down = thread_lmb_down(),
-            "drag source: press state before DoDragDrop"
-        );
-        unsafe {
-            ShowWindow(hwnd, SW_HIDE);
-            SetTimer(hwnd, 1, TICK_MS, None);
-        }
         let reason = Arc::new(Mutex::new(None));
         let data: IDataObject = FileData {
             hdrop: super::hdrop_bytes(&paths),
@@ -626,15 +625,60 @@ mod win {
             reason: reason.clone(),
         }
         .into();
-        let mut effect = DROPEFFECT_NONE;
-        let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
-        let outcome = if hr == DRAGDROP_S_DROP && effect != DROPEFFECT_NONE {
-            "dropped"
-        } else if hr == DRAGDROP_S_DROP || hr == DRAGDROP_S_CANCEL {
-            reason.lock().expect("reason").unwrap_or("missed")
-        } else {
-            tracing::warn!(hr = hr.0, "drag source: DoDragDrop failed");
-            "failed"
+        unsafe { SetTimer(hwnd, 1, TICK_MS, None) };
+        let started = std::time::Instant::now();
+        let mut injected = false;
+        let mut attempt = 0u32;
+        let outcome = loop {
+            attempt += 1;
+            if attempt > 1 {
+                unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+            }
+            // Let the window reach the hit-test tree before the press.
+            pump_until_pressed(std::time::Duration::from_millis(30));
+            if !lmb_down() {
+                injected = true;
+                mouse(MOUSEEVENTF_LEFTDOWN);
+                pump_until_pressed(std::time::Duration::from_millis(300));
+            }
+            let pressed = PRESSED.with(|p| p.get());
+            let forced = !thread_lmb_down() && force_thread_lmb_down();
+            tracing::info!(
+                attempt,
+                injected,
+                pressed,
+                forced,
+                global_down = lmb_down(),
+                thread_down = thread_lmb_down(),
+                "drag source: press state before DoDragDrop"
+            );
+            unsafe { ShowWindow(hwnd, SW_HIDE) };
+            let mut effect = DROPEFFECT_NONE;
+            let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
+            if hr == DRAGDROP_S_DROP && effect != DROPEFFECT_NONE {
+                break "dropped";
+            }
+            if hr == DRAGDROP_S_DROP || hr == DRAGDROP_S_CANCEL {
+                break reason.lock().expect("reason").unwrap_or("missed");
+            }
+            let state = status.lock().expect("status").state.clone();
+            if !super::retry_drag(&state, started.elapsed()) {
+                tracing::warn!(hr = hr.0, attempt, "drag source: DoDragDrop failed");
+                break if state == "cancel" {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+            }
+            tracing::info!(
+                hr = hr.0,
+                attempt,
+                "drag source: DoDragDrop refused; retrying"
+            );
+            // v0.3.2: a previous helper still unwinding its OLE loop made
+            // this one fail at once and the daemon popped Explorer.
+            PRESSED.with(|p| p.set(false));
+            pump_until_pressed(std::time::Duration::from_millis(100));
         };
         // The press this helper injected must not outlive the drag when the
         // controller already released (its button-up may have raced ahead).
@@ -652,7 +696,10 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{hdrop_bytes, watchdog_verdict, WATCHDOG_LIFETIME_CAP, WATCHDOG_TERMINAL_GRACE};
+    use super::{
+        hdrop_bytes, poll_interval, retry_drag, watchdog_verdict, DRAG_RETRY_BUDGET,
+        WATCHDOG_LIFETIME_CAP, WATCHDOG_TERMINAL_GRACE,
+    };
     use std::time::Duration;
 
     #[test]
@@ -667,6 +714,17 @@ mod tests {
         );
         assert!(watchdog_verdict(s(10), Some(WATCHDOG_TERMINAL_GRACE)).is_some());
         assert!(watchdog_verdict(WATCHDOG_LIFETIME_CAP, None).is_some());
+    }
+
+    #[test]
+    fn refused_drag_retries_only_while_live_and_in_budget() {
+        let early = Duration::from_millis(200);
+        assert!(retry_drag("pending", early));
+        assert!(retry_drag("ready", early));
+        assert!(!retry_drag("cancel", early));
+        assert!(!retry_drag("failed", early));
+        assert!(!retry_drag("ready", DRAG_RETRY_BUDGET));
+        assert!(poll_interval(false) < poll_interval(true));
     }
 
     #[test]

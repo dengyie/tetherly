@@ -41,6 +41,8 @@ const NATIVE_SWEEP_MS: u64 = 60 * 60 * 1000;
 /// Names are settled once every announced file was offered, or this long
 /// after the enter when fewer arrived (the controller skipped a file).
 const NAMES_SETTLE_MS: u64 = 8_000;
+/// How long a carried-back drag id is remembered (stale enters dropped).
+const RETURNED_TTL_MS: u64 = 30_000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct NativeFile {
@@ -90,6 +92,10 @@ impl NativeDrag {
 #[derive(Debug, Default)]
 pub(crate) struct NativeDragState {
     pub(crate) cur: Option<NativeDrag>,
+    /// Native drags the controller carried back (drag id → when). The
+    /// controller mints a new id per crossing, so a later enter with one of
+    /// these ids is a stale echo of a pull that raced the return.
+    returned: HashMap<u64, u64>,
 }
 
 /// Helper-facing view of the drag (`POST /api/v1/drag/native/poll`).
@@ -371,14 +377,28 @@ impl Node {
         }
     }
 
+    /// A carry enter for a native drag the controller already took back.
+    pub(crate) fn native_drag_is_stale_enter(&self, drag_id: u64) -> bool {
+        let now = self.now_ms();
+        let mut st = self.shared.native_drag.lock().expect("native_drag");
+        st.returned
+            .retain(|_, at| now.saturating_sub(*at) <= RETURNED_TTL_MS);
+        st.returned.contains_key(&drag_id) && st.cur.as_ref().is_none_or(|d| d.drag_id != drag_id)
+    }
+
     /// `RemoteDragCancel` for the native drag.
     pub(crate) fn native_drag_cancelled(&self, drag_id: u64, reason: DragCancelReason) -> bool {
-        let reveal = !matches!(reason, DragCancelReason::DraggedBackToLocal);
+        let back = matches!(reason, DragCancelReason::DraggedBackToLocal);
+        let reveal = !back;
         {
+            let now = self.now_ms();
             let mut st = self.shared.native_drag.lock().expect("native_drag");
             match st.cur.as_mut().filter(|d| d.drag_id == drag_id) {
                 Some(d) => d.cancelled = true,
                 None => return false,
+            }
+            if back {
+                st.returned.insert(drag_id, now);
             }
         }
         self.native_drag_resolve(drag_id, NativeOutcome::Fallback { reveal });
@@ -683,6 +703,9 @@ mod tests {
             .exists());
         assert_eq!(node.native_drag_view(99).state, "cancel");
         assert!(!node.native_drag_report(99, "dropped"));
+        // A pull that raced the return re-announces 13: stale, not a new carry.
+        assert!(node.native_drag_is_stale_enter(13));
+        assert!(!node.native_drag_is_stale_enter(14));
     }
 
     /// Released before any offer arrived: the drop stays registered, so the

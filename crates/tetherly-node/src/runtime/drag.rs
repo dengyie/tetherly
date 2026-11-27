@@ -16,7 +16,7 @@
 use super::*;
 use tetherly_core::drag::DragControlMsg;
 use tetherly_core::{CoreError, DeviceId};
-use tracing::warn;
+use tracing::{info, warn};
 
 impl Node {
     /// Transmit a drag control signal to a connected peer over the session
@@ -65,6 +65,13 @@ impl Node {
             } => {
                 if self.native_drag_refresh(drag_id, file_count) {
                     return; // v0.3.0: the pulled handoff's refreshed enter
+                }
+                if self.native_drag_is_stale_enter(drag_id) {
+                    // v0.3.2: a pull that raced the return re-announced a
+                    // carry that is already over; taking it over again
+                    // started a second helper (E_FAIL, Explorer popped).
+                    info!(peer = %peer, drag_id, "carry enter for a returned drag ignored");
+                    return;
                 }
                 let entered = {
                     let mut target = self.shared.drag_target.lock().expect("drag_target");

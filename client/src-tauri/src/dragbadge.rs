@@ -110,7 +110,7 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, carry: Carry) {
             let Some(w) = badge_window(app, &label) else {
                 return;
             };
-            place(app, &w);
+            let mut last = place(app, &w, None);
             let _ = w.show();
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -121,7 +121,7 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, carry: Carry) {
                         let _ = w.hide();
                         break;
                     }
-                    place(&app, &w);
+                    last = place(&app, &w, last);
                     tokio::time::sleep(FOLLOW_EVERY).await;
                 }
             });
@@ -129,10 +129,26 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, carry: Carry) {
     }
 }
 
-fn place<R: Runtime>(app: &AppHandle<R>, w: &tauri::WebviewWindow<R>) {
-    if let Ok(p) = app.cursor_position() {
-        let _ = w.set_position(tauri::PhysicalPosition::new(p.x + OFFSET.0, p.y + OFFSET.1));
+/// Move the badge next to the cursor; returns where it now is. A resting
+/// cursor costs no window move (each one is a main-thread round trip and a
+/// compositor update — 60/s of them made the carry feel sluggish).
+fn place<R: Runtime>(
+    app: &AppHandle<R>,
+    w: &tauri::WebviewWindow<R>,
+    last: Option<(i32, i32)>,
+) -> Option<(i32, i32)> {
+    let Ok(p) = app.cursor_position() else {
+        return last;
+    };
+    let at = badge_origin(p.x, p.y);
+    if last != Some(at) {
+        let _ = w.set_position(tauri::PhysicalPosition::new(at.0, at.1));
     }
+    Some(at)
+}
+
+fn badge_origin(x: f64, y: f64) -> (i32, i32) {
+    ((x + OFFSET.0).round() as i32, (y + OFFSET.1).round() as i32)
 }
 
 /// The badge window, created on first use with `label` preloaded (the page
@@ -211,6 +227,12 @@ mod tests {
         assert_eq!(badge_label(1, "a.txt"), "a.txt");
         assert_eq!(badge_label(4, "a.txt"), "a.txt 等 4 个文件");
         assert_eq!(badge_label(1, ""), "文件");
+    }
+
+    #[test]
+    fn badge_origin_is_stable_for_a_resting_cursor() {
+        assert_eq!(badge_origin(100.2, 50.4), badge_origin(100.4, 50.2));
+        assert_eq!(badge_origin(100.0, 50.0), (118, 72));
     }
 
     #[test]

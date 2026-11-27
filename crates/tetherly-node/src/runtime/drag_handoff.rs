@@ -82,6 +82,11 @@ pub(crate) struct DragHandoffState {
     /// at the injected LMB down on the controlled side.
     pub(crate) pb_baseline: Option<i64>,
     pub(crate) out: Option<OutgoingDrag>,
+    /// Carries the cursor brought back (drag id → when). A pull honoured
+    /// just before the return must not re-announce the carry afterwards:
+    /// v0.3.2 field log, the late enter made the receiver take the same
+    /// drag over twice (two helpers, `DoDragDrop` E_FAIL, Explorer popped).
+    returned: HashMap<u64, u64>,
 }
 
 impl DragHandoffState {
@@ -89,6 +94,18 @@ impl DragHandoffState {
         self.outgoing
             .retain(|_, at| now.saturating_sub(*at) <= OUTGOING_TTL_MS);
         self.outgoing.insert(drag_id, now);
+    }
+
+    pub(crate) fn note_returned(&mut self, drag_id: u64, now: u64) {
+        self.returned
+            .retain(|_, at| now.saturating_sub(*at) <= OUTGOING_TTL_MS);
+        self.returned.insert(drag_id, now);
+    }
+
+    pub(crate) fn was_returned(&mut self, drag_id: u64, now: u64) -> bool {
+        self.returned
+            .retain(|_, at| now.saturating_sub(*at) <= OUTGOING_TTL_MS);
+        self.returned.contains_key(&drag_id)
     }
 
     pub(crate) fn is_outgoing(&mut self, drag_id: u64, now: u64) -> bool {
@@ -603,13 +620,15 @@ impl Node {
 
     /// Controller side: the cursor came back without releasing.
     pub(crate) fn drag_handoff_on_return(&self) {
-        let out = self
-            .shared
-            .drag_handoff
-            .lock()
-            .expect("drag_handoff")
-            .out
-            .take();
+        let now = self.now_ms();
+        let out = {
+            let mut st = self.shared.drag_handoff.lock().expect("drag_handoff");
+            let out = st.out.take();
+            if let Some(id) = out.as_ref().and_then(|o| o.announced) {
+                st.note_returned(id, now);
+            }
+            out
+        };
         let Some(OutgoingDrag {
             peer,
             announced: Some(drag_id),
@@ -737,11 +756,15 @@ impl Node {
             return;
         }
         let drag_id = drag_id.unwrap_or_else(random_u64);
-        self.shared
-            .drag_handoff
-            .lock()
-            .expect("drag_handoff")
-            .note_outgoing(drag_id, now);
+        {
+            let mut st = self.shared.drag_handoff.lock().expect("drag_handoff");
+            if !confirm && st.was_returned(drag_id, self.now_ms()) {
+                // The pull raced the cursor coming back: the carry is over.
+                info!(peer = %peer, drag_id, "drag handoff: pulled carry returned; not offered");
+                return;
+            }
+            st.note_outgoing(drag_id, now);
+        }
         let enter = DragControlMsg::RemoteDragEnter {
             drag_id,
             file_count: ok.len() as u32,
@@ -947,6 +970,64 @@ mod tests {
             .filter(|m| matches!(m, DragControlMsg::RemoteDragEnter { drag_id: 77, .. }))
             .count();
         assert_eq!((enters, confirms), (1, 1), "{msgs:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A pull honoured just before the cursor came back must not announce
+    /// the carry again after the return's cancel.
+    #[tokio::test]
+    async fn pull_racing_the_return_offers_nothing() {
+        use tetherly_core::drag::DragControlMsg;
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("drag-pull-ret");
+        let peer = DeviceId::from_id_pk(&[44u8; 32]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<tetherly_core::frame::InnerFrame>(64);
+        let live = crate::runtime::LivePeer {
+            device_id: peer.clone(),
+            name: "pull-peer".into(),
+            platform: "test".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            handshake_hash: [4u8; 32],
+            file_port: None,
+            input_port: None,
+            screen_port: None,
+            caps: vec![tetherly_core::drag::DRAG_PULL_CAP.into()],
+            path: tetherly_core::PathKind::Lan,
+            rtt_ms: None,
+            last_seen_ms: 0,
+        };
+        node.register_session(live, tx).await;
+        let src = dir.join("returned.txt");
+        std::fs::write(&src, b"bytes").unwrap();
+        node.shared.drag_handoff.lock().unwrap().out = Some(OutgoingDrag {
+            peer: peer.clone(),
+            files: None,
+            released: false,
+            announced: Some(78),
+            pulled: true,
+        });
+        node.drag_handoff_on_return();
+        // The pulled handoff that was already under way runs after it.
+        node.hand_off_drag_files_with(&peer, vec![src], Some(78), false)
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(node.shared.pending_out.lock().unwrap().len(), 0, "no offer");
+        let mut msgs = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            if let Ok(m) = DragControlMsg::from_payload(&f.payload) {
+                msgs.push(m);
+            }
+        }
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| matches!(m, DragControlMsg::RemoteDragEnter { .. })),
+            "no late enter: {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, DragControlMsg::RemoteDragCancel { drag_id: 78, .. })),
+            "the return still cancels: {msgs:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
