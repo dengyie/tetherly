@@ -541,3 +541,9 @@
 - v0.3.4（用户"文件夹能拖过去但拖到别的 window 本地文件夹没成功"）：Win 日志文件夹拖拽从无 `native drag: carry taken over`，全部走旧路径 `drop confirmed on target` → inbox\muse2api-extension (n) + reveal。根因：`native_drag_begin` 保留了 v0.3.0 的 `has_directory` 拒绝门。修：新增 cap `dragdir`（core `DRAG_DIR_CAP`，v0.3.3+ 发送端会打包文件夹），门改为 `native_drag_peer_ok`（dragpull 且有目录时需 dragdir）；测试 `folder_carry_needs_the_folder_capability`。b379f49 CI 46011992571 绿 → tag v0.3.4 → release 46013743616（android 首轮 Maven Central 429，重跑绿）14 资产 → deploy all exit 0：Mac 0.3.4；home-win 32544→8964 health 0.3.4，客户端 MSI Session 1 重启，受保护进程完好（komari-agent PID 31572 部署前已变化，非本次）。
 - [ ] 用户实测：Mac 拖文件夹到 Win 资源管理器/应用直接落下为文件夹
 - [ ] 用户实测：Mac 拖文件到 Win 直接落进应用（资源管理器/聊天窗口/编辑器）生效；同一文件再发一次秒完成、不再生成新副本。失败查 Win 日志 `press state before DoDragDrop` 与 `offer matches a local file`
+
+## §244 阶段 review + 交接（v0.3.5，2026-11-28）
+- 用户："深度 review 下做下阶段性汇总和项目调试优化，方便下阶段继续开发"。review 范围 v0.2.99..v0.3.4（32 文件 +3546）。
+- 修复（0161731）：P1 dedupe `.cache/<sha>` 与交付副本共享 inode，原地同尺寸改写后仍按原 sha 零字节交付 → 未索引命中须重算哈希、不符即删；P2 文件夹解包条目失败静默成功 → `Unpacked{files,skipped}` + warn + UI 提示；P3 staging JoinError 被吞、注释错位。
+- 交接文档：`docs/HANDOFF_NATIVE_DRAG_v0.3.md`（链路图、caps、日志签名、不变量、遗留清单、发布 SOP）。
+- [ ] 遗留：helper OLE 偶发卡死根因；大文件夹先打包后发的首帧延迟/双倍磁盘；tar 头未计入 FILE_MAX；`.<tid>.unpack` 崩溃残留清扫。
