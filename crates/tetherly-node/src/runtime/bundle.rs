@@ -111,29 +111,43 @@ fn safe_rel(path: &Path) -> Option<PathBuf> {
     (!out.as_os_str().is_empty()).then_some(out)
 }
 
-/// Unpack the bundle `tar_path` into `dst` (created if missing). Returns the
-/// regular files written. Entries that are unsafe or cannot be created on
-/// this platform are skipped and logged.
-pub(crate) fn unpack_into(tar_path: &Path, dst: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// What [`unpack_into`] produced.
+#[derive(Debug, Default)]
+pub(crate) struct Unpacked {
+    /// Regular files written.
+    pub(crate) files: Vec<PathBuf>,
+    /// Entries not reproduced (unsafe, not a file or folder, or not
+    /// creatable here, e.g. a Windows path-length or name limit): the folder
+    /// is incomplete and the user must be told.
+    pub(crate) skipped: usize,
+}
+
+/// Unpack the bundle `tar_path` into `dst` (created if missing). Entries
+/// that are unsafe or cannot be created on this platform are skipped,
+/// logged and counted.
+pub(crate) fn unpack_into(tar_path: &Path, dst: &Path) -> std::io::Result<Unpacked> {
     std::fs::create_dir_all(dst)?;
     let file = std::fs::File::open(tar_path)?;
     let mut archive = tar::Archive::new(std::io::BufReader::new(file));
     archive.set_preserve_permissions(false);
     archive.set_overwrite(true);
-    let mut written = Vec::new();
+    let mut out = Unpacked::default();
     for (n, entry) in archive.entries()?.enumerate() {
         if n >= MAX_ENTRIES {
             tracing::warn!(dst = %dst.display(), "bundle: entry limit reached; rest skipped");
+            out.skipped += 1;
             break;
         }
         let mut entry = entry?;
         let kind = entry.header().entry_type();
         if !(kind.is_file() || kind.is_dir()) {
+            out.skipped += 1;
             continue;
         }
         let raw = entry.path()?.into_owned();
         let Some(rel) = safe_rel(&raw) else {
             tracing::warn!(entry = %raw.display(), "bundle: unsafe entry skipped");
+            out.skipped += 1;
             continue;
         };
         let target = dst.join(&rel);
@@ -145,13 +159,14 @@ pub(crate) fn unpack_into(tar_path: &Path, dst: &Path) -> std::io::Result<Vec<Pa
             std::fs::create_dir_all(parent)?;
         }
         match entry.unpack(&target) {
-            Ok(_) => written.push(target),
+            Ok(_) => out.files.push(target),
             Err(e) => {
-                tracing::warn!(entry = %rel.display(), error = %e, "bundle: entry not unpacked")
+                tracing::warn!(entry = %rel.display(), error = %e, "bundle: entry not unpacked");
+                out.skipped += 1;
             }
         }
     }
-    Ok(written)
+    Ok(out)
 }
 
 /// Reserve a fresh folder `name` (or `name (n)`) inside `dir`.
@@ -218,8 +233,8 @@ mod tests {
         assert_eq!(pack_dir(&src, &tar).unwrap(), 3);
         let out = reserve_dir(&root.join("inbox"), &folder_name("项目 A.tar")).unwrap();
         assert!(out.ends_with("项目 A"));
-        let written = unpack_into(&tar, &out).unwrap();
-        assert_eq!(written.len(), 3);
+        let unpacked = unpack_into(&tar, &out).unwrap();
+        assert_eq!((unpacked.files.len(), unpacked.skipped), (3, 0));
         assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"a");
         assert_eq!(std::fs::read(out.join("sub/b.bin")).unwrap(), [0u8, 1, 2]);
         assert_eq!(
@@ -257,8 +272,12 @@ mod tests {
             b.finish().unwrap();
         }
         let out = root.join("out");
-        let written = unpack_into(&tar_path, &out).unwrap();
-        assert_eq!(written, vec![out.join("ok.txt")]);
+        let unpacked = unpack_into(&tar_path, &out).unwrap();
+        assert_eq!(unpacked.files, vec![out.join("ok.txt")]);
+        assert_eq!(
+            unpacked.skipped, 2,
+            "the escape and the symlink are reported"
+        );
         assert!(!root.join("escape.txt").exists());
         assert!(!out.join("link").exists());
         let _ = std::fs::remove_dir_all(root);

@@ -524,17 +524,9 @@ impl Node {
         // Drop part_file so the file handle is released before rename.
         drop(part_file);
 
-        // Never replace an existing inbox file: pick "name (n).ext". The
-        // exists-check and rename race only with another receive into the
-        // same name, which is serialized per transfer id; `rename` would
-        // replace, so the worst case is the pre-fix behaviour.
-        // Origin mark (Zone.Identifier / com.apple.quarantine) so Office
-        // Protected View, SmartScreen and Gatekeeper treat it as downloaded.
-        // Applied to the `.part` before the rename (both survive a same-volume
-        // rename) so the file never appears in the inbox unmarked, and the
-        // completion below is not delayed behind it.
         // v0.3.3: a bundled folder unpacks into a real folder, installed at
-        // the native drag's published path or as a fresh inbox folder.
+        // the native drag's published path or as a fresh inbox folder. Every
+        // unpacked file gets the origin mark before the folder is installed.
         if is_bundle {
             let unpack = dest_dir.join(format!(".{transfer_id}.unpack"));
             let native = self.native_drag_path(&transfer_id);
@@ -544,36 +536,48 @@ impl Node {
                 super::bundle::folder_name(&name),
                 source.as_str().to_string(),
             );
-            let installed =
-                tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
+            let installed = tokio::task::spawn_blocking(
+                move || -> std::io::Result<(std::path::PathBuf, usize)> {
                     let _ = std::fs::remove_dir_all(&unpack);
                     let result = (|| {
-                        let written = super::bundle::unpack_into(&tar, &unpack)?;
-                        for f in &written {
+                        let unpacked = super::bundle::unpack_into(&tar, &unpack)?;
+                        for f in &unpacked.files {
                             super::shell_reveal::mark_received_file(f, &src_peer);
                         }
-                        match native {
+                        let installed = match native {
                             Some(fixed) => {
                                 if let Some(parent) = fixed.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
                                 std::fs::rename(&unpack, &fixed)?;
-                                Ok(fixed)
+                                fixed
                             }
-                            None => super::bundle::move_dir_into(&unpack, &inbox, &folder),
-                        }
+                            None => super::bundle::move_dir_into(&unpack, &inbox, &folder)?,
+                        };
+                        Ok((installed, unpacked.skipped))
                     })();
                     if result.is_err() {
                         let _ = std::fs::remove_dir_all(&unpack);
                     }
                     let _ = std::fs::remove_file(&tar);
                     result
-                })
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))
-                .and_then(|r| r);
+                },
+            )
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .and_then(|r| r);
             let path = match installed {
-                Ok(p) => p,
+                Ok((p, 0)) => p,
+                Ok((p, skipped)) => {
+                    warn!(transfer = %transfer_id, skipped, path = %p.display(), "folder delivered incomplete");
+                    self.emit(UiEvent::Status {
+                        message: format!(
+                            "文件夹 {} 有 {skipped} 项未能解出（详见日志）",
+                            super::bundle::folder_name(&name)
+                        ),
+                    });
+                    p
+                }
                 Err(e) => {
                     self.clear_resume(&transfer_id);
                     self.set_transfer_phase(
@@ -588,7 +592,15 @@ impl Node {
                 .finish_received(&transfer_id, &source, computed_digest, path, name)
                 .await;
         }
+        // Origin mark (Zone.Identifier / com.apple.quarantine) so Office
+        // Protected View, SmartScreen and Gatekeeper treat it as downloaded.
+        // Applied to the `.part` before the rename (both survive a same-volume
+        // rename) so the file never appears in the inbox unmarked, and the
+        // completion below is not delayed behind it.
         super::shell_reveal::mark_received_file(&part, source.as_str());
+        // Never replace an existing inbox file: `reserve_inbox_target` picks
+        // "name (n).ext" by hard-linking (fails on an existing name), so
+        // concurrent receives into one name cannot overwrite each other.
         // v0.3.0: a native drag's payload goes to the path its drag source
         // already published (same volume as the inbox, so a rename).
         let path = match self.native_drag_path(&transfer_id) {

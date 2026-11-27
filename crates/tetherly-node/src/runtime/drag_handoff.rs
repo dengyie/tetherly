@@ -745,8 +745,6 @@ impl Node {
             .await
     }
 
-    /// `confirm == false` is the v0.3.0 pull: the button is still held, so
-    /// only the refreshed enter (final count) precedes the offers.
     /// v0.3.3: send the folder `dir` as one bundled transfer (the receiver
     /// unpacks it into `inbox/<folder>`). Returns the transfer id.
     pub async fn offer_and_send_folder(
@@ -772,6 +770,8 @@ impl Node {
             .await
     }
 
+    /// `confirm == false` is the v0.3.0 pull: the button is still held, so
+    /// only the refreshed enter (final count) precedes the offers.
     async fn hand_off_drag_files_with(
         &self,
         peer: &DeviceId,
@@ -794,7 +794,10 @@ impl Node {
                 .collect()
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            warn!(peer = %peer, error = %e, "drag handoff: staging task failed");
+            Vec::new()
+        });
         let mut ok: Vec<Staged> = Vec::new();
         for r in staged {
             match r {

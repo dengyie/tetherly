@@ -243,11 +243,19 @@ pub(crate) fn lookup(data_dir: &Path, sha: &str, size: u64) -> Option<PathBuf> {
     }
     let cached = cache_dir(data_dir).join(&sha);
     if std::fs::metadata(&cached).is_ok_and(|m| m.is_file() && m.len() == size) {
-        // Cache names are digests this node verified on receive.
-        if insert(&mut index, &sha, &cached) {
-            save(data_dir, &index);
+        // The name is a digest verified on receive, but the cache shares its
+        // inode with the delivered payload (hard link): an app that saved
+        // that payload in place changed these bytes too. Without a valid
+        // index entry (size + mtime), trust it only after re-hashing.
+        let verified = size <= SCAN_MAX_BYTES && file_sha256(&cached).is_ok_and(|h| h == sha);
+        if verified {
+            if insert(&mut index, &sha, &cached) {
+                save(data_dir, &index);
+            }
+            return Some(cached);
         }
-        return Some(cached);
+        debug!(path = %cached.display(), "dedupe cache entry stale or too large to verify; dropped");
+        let _ = std::fs::remove_file(&cached);
     }
     let hit = scan_inbox(&inbox_dir(data_dir), &sha, size, &index)?;
     if insert(&mut index, &sha, &hit) {
@@ -375,6 +383,22 @@ mod tests {
         let out = d.join("native2").join("x.png");
         link_or_copy(&hit, &out).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"pixels");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cache_edited_through_its_link_never_matches() {
+        let d = tmp("alias");
+        let drag = d.join("native").join("doc.txt");
+        std::fs::create_dir_all(drag.parent().unwrap()).unwrap();
+        std::fs::write(&drag, b"pixels").unwrap();
+        let sha = sha_of(b"pixels");
+        retain(&d, &sha, &drag);
+        // An app the payload was dropped into saves in place, same size:
+        // the cache shares the inode, so its bytes change too.
+        std::fs::write(&drag, b"PIXELS").unwrap();
+        assert_eq!(lookup(&d, &sha, 6), None);
+        assert!(!cache_dir(&d).join(&sha).exists(), "stale cache dropped");
         let _ = std::fs::remove_dir_all(&d);
     }
 
