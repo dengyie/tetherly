@@ -2,6 +2,7 @@
 
 ## 速读（当前有效 · 维护于 2026-11-19）
 
+- **【2026-11-28 已归档】** 本路线图对应 v0.2.69 审计轮，所列发布冻结早已解除（此后 v0.2.70–v0.4.0 均经三平台 CI + 生产部署验收）；下文仅作历史审计记录，不再是发布门禁。当前阶段交接见 `docs/HANDOFF_NATIVE_DRAG_v0.3.md`。
 - 当前审计基线为 workspace `v0.2.69`（§213 起，随 Cargo.toml/tag 口径同步）；本文件是 review 实施合同，不替代 `docs/DEVELOPMENT.md` 的实现合同。
 - 深度 review 已确认发布阻断项：本地权限边界、HTTP/文件资源上界、会话 teardown 原子性、Android/release/deploy 门禁均存在待修问题；在 P1 修复和定向回归完成前禁止新 tag、release、生产部署。
 - 修复顺序固定为：取证基线 → P1 安全/资源/发布阻断 → P2 生命周期与可靠性 → CI/release/deploy gate → 仅以 GitHub CI 和现场证据判定可发布。

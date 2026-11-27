@@ -133,8 +133,6 @@ security-framework-sys = "2"
 # keeps the objc2-metal/dispatch2 surface out; `arboard` already pulls these
 # same crates, so no new package enters the lockfile.
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
-# Four-finger swipe monitor (NSEvent global gesture monitor handler block).
-block2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSUUID",

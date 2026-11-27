@@ -20,6 +20,4 @@ spake2.workspace = true
 thiserror.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
-base64.workspace = true
-serde.workspace = true
 

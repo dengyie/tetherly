@@ -21,7 +21,6 @@ version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.82"
-authors = ["Tetherly contributors"]
 description = "Personal-device mesh: LAN first, OTP on-device, desktop input later"
 
 [workspace.dependencies]
@@ -31,7 +30,6 @@ tetherly-crypto = { path = "crates/tetherly-crypto" }
 tetherly-net = { path = "crates/tetherly-net" }
 tetherly-loopback = { path = "crates/tetherly-loopback" }
 tetherly-node = { path = "crates/tetherly-node" }
-tetherly-android = { path = "crates/tetherly-android" }
 
 argon2 = "0.5"
 base64 = "0.22"

@@ -15,12 +15,10 @@ lan = ["mdns-sd"]
 tetherly-core.workspace = true
 tetherly-crypto.workspace = true
 mdns-sd = { workspace = true, optional = true }
-serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
-serde.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
