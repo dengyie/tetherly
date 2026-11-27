@@ -526,3 +526,13 @@
 - 兜底：Pull 还没换来任何 offer 就松手 → `native_drag_to_legacy` 把这次 drop 交还 v0.2.x 旧路径（inbox+reveal）；名字结算窗口从刷新 enter 起算 8s（大文件 staging 慢）。关闭开关 `TETHERLY_NO_NATIVE_DRAG=1`；单测里 `cfg!(test)` 关闭（否则 Windows CI 会真拉起 helper，fb321a8）。
 - 发布：a65c457 CI Windows 红（旧双节点 wire 测试被原生路径接管）→ fixup fb321a8 CI 45922730052 全绿 → bump v0.3.0 c0f60c4 → tag → release 45923498245 全绿 14 资产 → `deploy.sh --target all --tag v0.3.0` exit 0：Mac health/客户端 0.3.0；home-win 热重启 19588→27412（SYSTEM），受保护进程 3/3 不动，msi exit 0，客户端 relaunch=ok session=1；Mac `/api/v1/devices` 显示 DESKTOP-VST7EIE 在线且 caps 含 dragpull。
 - [ ] 用户实测：Mac 拖 Finder 文件过边到 Win，光标即为文件拖拽，按住直接落到资源管理器/应用里得到副本；未落目标/Esc 时文件进下载目录并选中。失败查 Win 日志 `native drag` / `drag-source`
+
+## §243 原生拖拽落进应用失败（OLE E_FAIL）+ 接收端 sha256 去重（v0.3.1，2026-11-27）
+- 用户反馈："能拖过去，也有显示，但是真拖到应用里面无法生效"；并要求"hash 一致的就是已经在本地不用每次都复制"。
+- 证据：home-win tetherly.log 每次 `drag source: DoDragDrop failed hr=-2147467259`（E_FAIL）→ helper 结果 failed → 回落 inbox+reveal，所以看着"到了"却落不进应用。Session 1 探针：桌面/光标正常。根因：OLE 在调用线程的同步键态（GetKeyState）里看不到左键按下就返回 E_FAIL；注入的 LEFTDOWN 落在小窗外/未进本线程队列。
+- 修复（platform/drag_source.rs）：注入按压窗口铺满虚拟屏（SM_X/Y/CX/CYVIRTUALSCREEN）；DoDragDrop 前若本线程 GetKeyState(VK_LBUTTON) 仍未按下则 SetKeyboardState 置位；日志 `drag source: press state before DoDragDrop`（injected/pressed/forced/global_down/thread_down）。
+- 去重（runtime/dedupe.rs，纯接收端判定，兼容旧发送端）：索引 `inbox/.dedupe.json`（sha→path/size/mtime，失效即剔除）；原生拖拽载荷硬链接留存在 `inbox/.cache/<sha>`（上限 4 GiB，按 mtime 淘汰）；索引未命中时对 inbox 同尺寸文件限量哈希（≤16 个/2 GiB）。命中 → core `FileHub::accept_existing` 以 `resume_from=total` 接受，不传字节：原生拖拽把已有文件硬链接到落点路径，普通接收直接复用 inbox 文件（cache 命中则在 inbox 硬链接一份），横幅「文件已在本地」。发送端 `on_peer_accepted_file` 见 start==size 直接 Completed 不建连；旧发送端会建连只写 header，接收端按 `deduplicated` 表静默吸收。
+- 测试：core `accept_existing_resumes_at_total_and_stays_retryable`；dedupe 模块 4 个；files `dedupe_tests` 3 个（命中不传输+旧发送端 header-only、同名同尺寸不同内容正常接收、发送端零字节完成）。
+- 发布：7ba745b CI 全绿 → bump v0.3.1 cfb47f9 → tag → release 45927987984 全绿 14 资产 → deploy：Mac 成功（health 0.3.1、客户端 0.3.1）；home-win 被前置门拦截——SRBMiner-MULTI 未运行（nssm 事件 1011/1023/1027 于 2026-11-27 10:30:36–41，早于部署；komari-agent 10:27 重启），按禁区规则未动，Win 仍为 v0.3.0（daemon 27412）。
+- [ ] 用户确认 SRBMiner 状态后：`scripts/deploy.sh --target win --tag v0.3.1`
+- [ ] 用户实测：Mac 拖文件到 Win 直接落进应用（资源管理器/聊天窗口/编辑器）生效；同一文件再发一次秒完成、不再生成新副本。失败查 Win 日志 `press state before DoDragDrop` 与 `offer matches a local file`
