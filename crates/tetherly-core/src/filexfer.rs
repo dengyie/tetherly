@@ -263,6 +263,37 @@ impl FileHub {
         })
     }
 
+    /// Accept an offer whose content this side already holds (same sha256):
+    /// the decision resumes at `total`, so the sender has nothing left to
+    /// send. A sender that understands it completes without connecting; an
+    /// older one opens the data channel, writes only the header and finishes.
+    pub fn accept_existing(
+        &mut self,
+        transfer_id: &str,
+        now_ms: u64,
+    ) -> Result<FileDecision, CoreError> {
+        let t = self
+            .incoming
+            .get_mut(transfer_id)
+            .ok_or(CoreError::UnknownTransfer)?;
+        if now_ms.saturating_sub(t.offered_ms) > FILE_TOKEN_TTL_MS {
+            return Err(CoreError::CandidateExpired);
+        }
+        if t.status != TransferStatus::Offered {
+            return Err(CoreError::FileAlreadyDecided);
+        }
+        let total = Self::total_of(t);
+        if total == 0 || t.files.len() != 1 {
+            return Err(CoreError::ResumeOffset);
+        }
+        t.status = TransferStatus::Accepted;
+        t.accepted_ms = now_ms;
+        Ok(FileDecision {
+            transfer_id: transfer_id.to_string(),
+            resume_from: Some(total),
+        })
+    }
+
     pub fn reject(&mut self, transfer_id: &str) -> Result<FileDecision, CoreError> {
         let t = self
             .incoming
@@ -624,5 +655,26 @@ mod tests {
         // valid resume echoed in the decision
         let d = hub.accept_at("tr_1", 2, Some(FILE_CHUNK as u64)).unwrap();
         assert_eq!(d.resume_from, Some(FILE_CHUNK as u64));
+    }
+
+    #[test]
+    fn accept_existing_resumes_at_total_and_stays_retryable() {
+        let mut hub = FileHub::default();
+        let src = DeviceId::from_id_pk(&[8u8; 32]);
+        let total = FILE_CHUNK as u64 + 3;
+        let mut o = offer("dup.bin");
+        o.files[0].size = total;
+        hub.offer(src, o, 1).unwrap();
+        let d = hub.accept_existing("tr_1", 2).unwrap();
+        assert_eq!(d.resume_from, Some(total));
+        assert!(hub.is_accepted("tr_1"));
+        // Decided once: a second decision is refused.
+        assert_eq!(
+            hub.accept_existing("tr_1", 3).unwrap_err(),
+            CoreError::FileAlreadyDecided
+        );
+        // A failed accept-frame send rolls back to a plain, full accept.
+        hub.rollback_accept("tr_1").unwrap();
+        assert_eq!(hub.accept("tr_1", 4).unwrap().resume_from, None);
     }
 }

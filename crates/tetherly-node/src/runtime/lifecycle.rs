@@ -232,6 +232,7 @@ impl Node {
             ping_waiters: Mutex::new(HashMap::new()),
             pending_out: Mutex::new(HashMap::new()),
             active_transfers: Mutex::new(HashMap::new()),
+            deduplicated: Mutex::new(HashMap::new()),
             transfer_cancels: Mutex::new(HashMap::new()),
             transfer_stats: Mutex::new(TransferStats::default()),
             bound_control,

@@ -14,7 +14,7 @@ use tetherly_net::filechan::{
 };
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Test-only receive window cap (ms) for [`Node::accept_file`]. Stalled-peer
 /// integration tests set this to a few hundred milliseconds so the Failed /
@@ -30,6 +30,9 @@ static TEST_CHUNK_IDLE_MS: AtomicU64 = AtomicU64::new(TEST_CHUNK_IDLE_INERT_MS);
 /// Inert value: no real accept_file run can span a year.
 #[cfg(test)]
 const TEST_CHUNK_IDLE_INERT_MS: u64 = 31_536_000_000;
+/// How long a dedupe-satisfied transfer id still answers an older sender's
+/// header-only data channel quietly.
+const DEDUPED_TTL_MS: u64 = 10 * 60 * 1000;
 
 /// Single target dispatch outcome for multi-peer file offer fan-out.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -305,6 +308,12 @@ impl Node {
         // gates every chunk, so a forged id simply fails to decrypt.
         let (transfer_id, total, start) =
             read_file_header(&mut stream, FILE_HEADER_TIMEOUT).await?;
+        if total > 0 && start == total && self.is_deduplicated(&transfer_id) {
+            // v0.3.1: an older sender answers a dedupe accept (resume at
+            // `total`) by connecting and writing only the header.
+            debug!(transfer = %transfer_id, "deduplicated transfer: header-only data channel");
+            return Ok(());
+        }
         let (accepted, source, size, resume_hint, name, expected) = {
             let hubs = self.shared.hubs.lock().expect("hubs");
             let t = hubs
@@ -536,6 +545,22 @@ impl Node {
                 path
             }
         };
+        // v0.3.1: index the delivered content so a later offer of the same
+        // bytes is satisfied locally (native drag payloads are retained,
+        // since their directory is swept).
+        {
+            let data_dir = self.shared.cfg.data_dir.clone();
+            let digest = computed_digest.clone();
+            let delivered = path.clone();
+            let native = self.native_drag_path(&transfer_id).is_some();
+            tokio::task::spawn_blocking(move || {
+                if native {
+                    super::dedupe::retain(&data_dir, &digest, &delivered);
+                } else {
+                    super::dedupe::record(&data_dir, &digest, &delivered);
+                }
+            });
+        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -574,6 +599,9 @@ impl Node {
         &self,
         transfer_id: &str,
     ) -> Result<FileDecisionReport, CoreError> {
+        if let Some(report) = self.accept_file_from_local_copy(transfer_id).await? {
+            return Ok(report);
+        }
         let (decision, source, name, total, resume_from) = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             let decision = hubs
@@ -648,6 +676,193 @@ impl Node {
             resume_from,
             timestamp_ms: now,
         })
+    }
+
+    /// v0.3.1 dedupe: when this node already holds the offered content
+    /// (same sha256 and size), accept at `resume_from = total` so nothing is
+    /// sent, and deliver the existing bytes (hard link, no copy). `None` when
+    /// there is no local copy and the normal accept should run.
+    async fn accept_file_from_local_copy(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<FileDecisionReport>, CoreError> {
+        let (source, name, sha, total) = {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            let t = hubs
+                .files
+                .get(transfer_id)
+                .ok_or(CoreError::UnknownTransfer)?;
+            if t.status != tetherly_core::TransferStatus::Offered || t.files.len() != 1 {
+                return Ok(None);
+            }
+            let f = &t.files[0];
+            (t.source.clone(), f.name.clone(), f.sha256.clone(), f.size)
+        };
+        if total == 0 {
+            return Ok(None);
+        }
+        let data_dir = self.shared.cfg.data_dir.clone();
+        let lookup_sha = sha.clone();
+        let done_sha = sha.clone();
+        let existing = tokio::task::spawn_blocking(move || {
+            super::dedupe::lookup(&data_dir, &lookup_sha, total)
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        // Where the content is delivered: a native drag's published path, the
+        // existing inbox file itself, or (for a cached drag payload) a new
+        // inbox entry linked to it.
+        let data_dir = self.shared.cfg.data_dir.clone();
+        let inbox = super::dedupe::inbox_dir(&data_dir);
+        let native = self.native_drag_path(transfer_id);
+        let delivered = {
+            let existing = existing.clone();
+            let name = name.clone();
+            tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
+                match native {
+                    Some(fixed) => {
+                        super::dedupe::link_or_copy(&existing, &fixed)?;
+                        Ok(fixed)
+                    }
+                    None if super::dedupe::is_cached(&data_dir, &existing) => {
+                        std::fs::create_dir_all(&inbox)?;
+                        let dst = reserve_inbox_target(&existing, &inbox, &name)?;
+                        super::dedupe::record(&data_dir, &sha, &dst);
+                        Ok(dst)
+                    }
+                    None => Ok(existing),
+                }
+            })
+            .await
+        };
+        let path = match delivered {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                warn!(transfer = %transfer_id, error = %e, "dedupe delivery failed; receiving normally");
+                return Ok(None);
+            }
+            Err(e) => {
+                warn!(transfer = %transfer_id, error = %e, "dedupe task failed; receiving normally");
+                return Ok(None);
+            }
+        };
+        let decision = {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            match hubs
+                .files
+                .accept_existing(transfer_id, self.shared.clock.unix_ms())
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    drop(hubs);
+                    // Expired or already decided: the normal accept reports it.
+                    debug!(transfer = %transfer_id, error = %e, "dedupe accept refused");
+                    return Ok(None);
+                }
+            }
+        };
+        let now = self.shared.clock.unix_ms();
+        self.shared
+            .active_transfers
+            .lock()
+            .expect("transfers")
+            .insert(
+                transfer_id.to_string(),
+                ActiveTransfer {
+                    transfer_id: transfer_id.to_string(),
+                    peer: source.clone(),
+                    direction: TransferDirection::Inbound,
+                    filename: name.clone(),
+                    total,
+                    transferred: total,
+                    speed_bps: 0,
+                    phase: TransferPhase::Verifying,
+                    error: None,
+                    started_ms: now,
+                    updated_ms: now,
+                    resume_offset: None,
+                    is_resumed: false,
+                },
+            );
+        self.shared
+            .deduplicated
+            .lock()
+            .expect("deduplicated")
+            .insert(transfer_id.to_string(), now);
+        let frame = decision.accept_frame()?;
+        if let Err(e) = self.send_to(&source, frame).await {
+            {
+                let mut hubs = self.shared.hubs.lock().expect("hubs");
+                let _ = hubs.files.rollback_accept(transfer_id);
+            }
+            self.shared
+                .active_transfers
+                .lock()
+                .expect("transfers")
+                .remove(transfer_id);
+            self.shared
+                .deduplicated
+                .lock()
+                .expect("deduplicated")
+                .remove(transfer_id);
+            return Err(e);
+        }
+        info!(
+            transfer = %transfer_id,
+            path = %path.display(),
+            bytes = total,
+            "offer matches a local file; transfer skipped"
+        );
+        self.clear_resume(transfer_id);
+        let _ = std::fs::remove_file(
+            super::dedupe::inbox_dir(&self.shared.cfg.data_dir)
+                .join(format!(".{transfer_id}.part")),
+        );
+        {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            let _ = hubs.files.mark_done(&FileDone {
+                transfer_id: transfer_id.to_string(),
+                sha256: done_sha,
+            });
+        }
+        self.set_transfer_phase(transfer_id, TransferPhase::Completed, None);
+        self.emit(UiEvent::FileDone {
+            transfer_id: transfer_id.to_string(),
+        });
+        self.settle_drag_for_transfer(transfer_id, &path);
+        let shown = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.clone());
+        let _ = self.dispatch_notification_banner(
+            "文件已在本地",
+            &format!("{shown} 内容一致，已直接使用本地副本"),
+            Some("Tetherly File"),
+            false,
+        );
+        Ok(Some(FileDecisionReport {
+            ok: true,
+            accepted: true,
+            action: "deduplicated".to_string(),
+            transfer_id: transfer_id.to_string(),
+            peer: source.to_string(),
+            filename: shown,
+            total_bytes: total,
+            resume_from: total,
+            timestamp_ms: now,
+        }))
+    }
+
+    /// The transfer was satisfied from a local copy (dedupe).
+    pub(crate) fn is_deduplicated(&self, transfer_id: &str) -> bool {
+        let now = self.shared.clock.unix_ms();
+        let mut map = self.shared.deduplicated.lock().expect("deduplicated");
+        map.retain(|_, at| now.saturating_sub(*at) < DEDUPED_TTL_MS);
+        map.contains_key(transfer_id)
     }
 
     pub async fn user_accept_file(&self, transfer_id: &str) -> Result<(), CoreError> {
@@ -1923,6 +2138,19 @@ impl Node {
             }
 
             let now = self.shared.clock.unix_ms();
+            if start == outbound.size && start > 0 {
+                // v0.3.1: the receiver already holds this content (dedupe);
+                // nothing to send.
+                t.transferred = start;
+                t.phase = TransferPhase::Transferring;
+                t.updated_ms = now;
+                drop(transfers);
+                drop(pending);
+                drop(cancels);
+                info!(transfer = %transfer_id, bytes = start, "peer already has this file; nothing sent");
+                self.set_transfer_phase(transfer_id, TransferPhase::Completed, None);
+                return;
+            }
             t.transferred = start;
             if start > 0 {
                 t.resume_offset = Some(start);
@@ -2730,6 +2958,206 @@ mod inbound_stall_tests {
         assert_eq!(side["total"], total);
 
         drop(client);
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod dedupe_tests {
+    use super::*;
+    use tetherly_core::frame::{FileDecision, TYPE_FILE_ACCEPT};
+    use tetherly_core::InnerFrame;
+
+    fn live(peer: &DeviceId) -> LivePeer {
+        LivePeer {
+            device_id: peer.clone(),
+            name: "dedupe-peer".into(),
+            platform: "test".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            handshake_hash: [9u8; 32],
+            file_port: None,
+            input_port: None,
+            screen_port: None,
+            caps: Vec::new(),
+            path: tetherly_core::PathKind::Lan,
+            rtt_ms: None,
+            last_seen_ms: 0,
+        }
+    }
+
+    fn sha(bytes: &[u8]) -> String {
+        let mut h = IncrementalSha256::new();
+        h.update(bytes);
+        h.finalize_hex()
+    }
+
+    /// An offer whose content is already in the inbox completes without a
+    /// data channel: the accept resumes at `total`, and an older sender's
+    /// header-only connect is absorbed quietly.
+    #[tokio::test]
+    async fn offer_of_local_content_completes_without_transfer() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("dedupe-recv");
+        let peer = DeviceId::from_id_pk(&[91u8; 32]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<InnerFrame>(4);
+        node.register_session(live(&peer), tx).await;
+
+        let body = b"same bytes as last time".to_vec();
+        let inbox = dir.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let existing = inbox.join("report.pdf");
+        std::fs::write(&existing, &body).unwrap();
+
+        let tid = "tr_dedupe_1".to_string();
+        let total = body.len() as u64;
+        {
+            let mut hubs = node.shared.hubs.lock().expect("hubs");
+            hubs.files
+                .offer_resumable(
+                    peer.clone(),
+                    FileOffer {
+                        transfer_id: tid.clone(),
+                        files: vec![tetherly_core::FileMeta {
+                            name: "report.pdf".into(),
+                            size: total,
+                            sha256: sha(&body),
+                        }],
+                    },
+                    node.shared.clock.unix_ms(),
+                    None,
+                )
+                .unwrap();
+        }
+        let report = node.user_accept_file_reported(&tid).await.unwrap();
+        assert_eq!(report.action, "deduplicated");
+        assert_eq!(report.filename, "report.pdf");
+
+        let frame = rx.recv().await.expect("accept frame");
+        assert_eq!(frame.ty, TYPE_FILE_ACCEPT);
+        let d = FileDecision::from_payload(&frame.payload).unwrap();
+        assert_eq!(d.resume_from, Some(total));
+
+        let t = node.transfer_by_id(&tid).unwrap();
+        assert_eq!(t.phase, TransferPhase::Completed);
+        assert_eq!(t.transferred, total);
+        // No second copy in the inbox.
+        let visible: Vec<_> = std::fs::read_dir(&inbox)
+            .unwrap()
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert_eq!(visible.len(), 1);
+
+        // An older sender still connects and writes the header at `total`.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, peer_addr) = listener.accept().await.unwrap();
+        // Written by hand: `send_chunks_from` debug-asserts a chunk-aligned
+        // start, which release builds of older senders do not check.
+        use tokio::io::AsyncWriteExt;
+        client
+            .write_all(&tetherly_net::filechan::FILE_MAGIC_V2)
+            .await
+            .unwrap();
+        for part in [tid.as_bytes(), &total.to_be_bytes(), &total.to_be_bytes()] {
+            tetherly_net::codec::write_len_prefixed(&mut client, part)
+                .await
+                .unwrap();
+        }
+        client.flush().await.unwrap();
+        node.accept_file(server, peer_addr)
+            .await
+            .expect("header-only channel of a deduplicated transfer is accepted");
+
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Different content (same name and size) is received normally.
+    #[tokio::test]
+    async fn offer_of_unknown_content_is_accepted_normally() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("dedupe-miss");
+        let peer = DeviceId::from_id_pk(&[92u8; 32]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<InnerFrame>(4);
+        node.register_session(live(&peer), tx).await;
+        let inbox = dir.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("a.txt"), b"aaaa").unwrap();
+        let tid = "tr_dedupe_2".to_string();
+        {
+            let mut hubs = node.shared.hubs.lock().expect("hubs");
+            hubs.files
+                .offer_resumable(
+                    peer.clone(),
+                    FileOffer {
+                        transfer_id: tid.clone(),
+                        files: vec![tetherly_core::FileMeta {
+                            name: "a.txt".into(),
+                            size: 4,
+                            sha256: sha(b"bbbb"),
+                        }],
+                    },
+                    node.shared.clock.unix_ms(),
+                    None,
+                )
+                .unwrap();
+        }
+        let report = node.user_accept_file_reported(&tid).await.unwrap();
+        assert_eq!(report.action, "accepted");
+        let d = FileDecision::from_payload(&rx.recv().await.unwrap().payload).unwrap();
+        assert_eq!(d.resume_from, None);
+        assert!(!node.is_deduplicated(&tid));
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Sender side: an accept resuming at the full size completes the
+    /// outbound transfer without opening a data channel.
+    #[tokio::test]
+    async fn sender_completes_when_peer_already_has_the_file() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("dedupe-send");
+        let peer = DeviceId::from_id_pk(&[93u8; 32]);
+        let tid = "tr_dedupe_3".to_string();
+        let now = node.shared.clock.unix_ms();
+        node.shared.pending_out.lock().unwrap().insert(
+            tid.clone(),
+            OutboundFile {
+                peer: peer.clone(),
+                name: "x.bin".into(),
+                source: OutboundSource::Bytes(vec![1, 2, 3]),
+                size: 3,
+            },
+        );
+        node.shared.active_transfers.lock().unwrap().insert(
+            tid.clone(),
+            ActiveTransfer {
+                transfer_id: tid.clone(),
+                peer: peer.clone(),
+                direction: TransferDirection::Outbound,
+                filename: "x.bin".into(),
+                total: 3,
+                transferred: 0,
+                speed_bps: 0,
+                phase: TransferPhase::Transferring,
+                error: None,
+                started_ms: now,
+                updated_ms: now,
+                resume_offset: None,
+                is_resumed: false,
+            },
+        );
+        node.on_peer_accepted_file(&FileDecision {
+            transfer_id: tid.clone(),
+            resume_from: Some(3),
+        })
+        .await;
+        let t = node.transfer_by_id(&tid).unwrap();
+        assert_eq!(t.phase, TransferPhase::Completed);
+        assert_eq!(t.transferred, 3);
+        assert!(node.shared.pending_out.lock().unwrap().get(&tid).is_none());
         node.shutdown();
         let _ = std::fs::remove_dir_all(dir);
     }

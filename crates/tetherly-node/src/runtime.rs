@@ -50,6 +50,7 @@ mod bench;
 mod camera;
 mod clipboard;
 mod config;
+mod dedupe;
 mod discovery;
 mod drag;
 mod drag_controller;
@@ -456,6 +457,8 @@ struct Shared {
     ping_waiters: Mutex<HashMap<DeviceId, Vec<oneshot::Sender<u64>>>>,
     pending_out: Mutex<HashMap<String, OutboundFile>>,
     active_transfers: Mutex<HashMap<String, ActiveTransfer>>,
+    /// v0.3.1: inbound transfer ids satisfied from a local copy → when.
+    deduplicated: Mutex<HashMap<String, u64>>,
     transfer_cancels: Mutex<HashMap<String, oneshot::Sender<()>>>,
     transfer_stats: Mutex<TransferStats>,
     bound_control: AtomicU16,

@@ -202,20 +202,22 @@ mod win {
     };
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
     use windows::Win32::UI::Shell::SHCreateStdEnumFmtEtc;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::Memory::{
         GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEINPUT, VK_LBUTTON,
+        GetAsyncKeyState, GetKeyState, GetKeyboardState, SendInput, SetKeyboardState, INPUT,
+        INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, VK_LBUTTON,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, KillTimer,
-        MsgWaitForMultipleObjects, PeekMessageW, RegisterClassW, SetLayeredWindowAttributes,
-        SetTimer, ShowWindow, TranslateMessage, LWA_ALPHA, MA_NOACTIVATE, MSG, PM_REMOVE,
-        QS_ALLINPUT, SW_HIDE, SW_SHOWNOACTIVATE, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WNDCLASSW,
-        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetSystemMetrics,
+        KillTimer, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassW,
+        SetLayeredWindowAttributes, SetTimer, ShowWindow, TranslateMessage, LWA_ALPHA,
+        MA_NOACTIVATE, MSG, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, WM_LBUTTONDOWN,
+        WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_POPUP,
     };
 
     const CF_HDROP: u16 = 15;
@@ -224,7 +226,6 @@ mod win {
     const MK_LBUTTON: u32 = 0x0001;
     const DROPEFFECT_NONE: DROPEFFECT = DROPEFFECT(0);
     const DROPEFFECT_COPY: DROPEFFECT = DROPEFFECT(1);
-    const PRESS_SIZE: i32 = 64;
     /// Keeps `QueryContinueDrag` ticking while the drop waits with no input.
     const TICK_MS: u32 = 50;
 
@@ -415,6 +416,27 @@ mod win {
         (unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } as u16 & 0x8000) != 0
     }
 
+    /// This thread's synchronous view of the left button: what
+    /// `DoDragDrop` checks on entry (no button down there → `E_FAIL`).
+    fn thread_lmb_down() -> bool {
+        (unsafe { GetKeyState(VK_LBUTTON as i32) } as u16 & 0x8000) != 0
+    }
+
+    /// Mark the left button down in this thread's key state when the press
+    /// was delivered elsewhere (already held, or the injected press raced a
+    /// window change): `DoDragDrop` then starts, and the release still ends
+    /// it through `QueryContinueDrag`'s daemon-reported `released`.
+    fn force_thread_lmb_down() -> bool {
+        let mut keys = [0u8; 256];
+        unsafe {
+            if GetKeyboardState(keys.as_mut_ptr()) == 0 {
+                return false;
+            }
+            keys[VK_LBUTTON as usize] |= 0x80;
+            SetKeyboardState(keys.as_ptr()) != 0
+        }
+    }
+
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
@@ -460,18 +482,28 @@ mod win {
             lpszClassName: class.as_ptr(),
         };
         unsafe { RegisterClassW(&wc) };
-        let mut pt = POINT { x: 0, y: 0 };
-        unsafe { GetCursorPos(&mut pt) };
+        // Cover the whole virtual screen: the cursor keeps moving while the
+        // controller drags, so a window placed at "the cursor" is already
+        // elsewhere when the press is injected (v0.3.0: the press hit some
+        // other window and `DoDragDrop` failed with E_FAIL).
+        let (vx, vy, vw, vh) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 class.as_ptr(),
                 title.as_ptr(),
                 WS_POPUP,
-                pt.x - PRESS_SIZE / 2,
-                pt.y - PRESS_SIZE / 2,
-                PRESS_SIZE,
-                PRESS_SIZE,
+                vx,
+                vy,
+                vw.max(1),
+                vh.max(1),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -495,6 +527,16 @@ mod win {
             mouse(MOUSEEVENTF_LEFTDOWN);
             pump_until_pressed(std::time::Duration::from_millis(300));
         }
+        let pressed = PRESSED.with(|p| p.get());
+        let forced = !thread_lmb_down() && force_thread_lmb_down();
+        tracing::info!(
+            injected,
+            pressed,
+            forced,
+            global_down = lmb_down(),
+            thread_down = thread_lmb_down(),
+            "drag source: press state before DoDragDrop"
+        );
         unsafe {
             ShowWindow(hwnd, SW_HIDE);
             SetTimer(hwnd, 1, TICK_MS, None);
