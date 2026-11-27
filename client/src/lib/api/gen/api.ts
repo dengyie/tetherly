@@ -153,6 +153,27 @@ export type ShelfAddReport = { added: Array<ShelfItem>, errors: Array<string>, }
 
 export type DragProbeReport = { probe_id: number, paths: Array<string>, };
 
+export type NativeDragRequest = { drag_id: number,
+/**
+ * Result only: `dropped` | `missed` | `esc` | `released` |
+ * `cancelled` | `failed`.
+ */
+outcome?: string | null, };
+
+export type NativeDragStatus = {
+/**
+ * `pending` | `ready` | `cancel` | `failed`.
+ */
+state: string,
+/**
+ * The controller released the button on this screen.
+ */
+released: boolean,
+/**
+ * Final payload paths, once every file name is known.
+ */
+paths: Array<string>, };
+
 export type InboxFile = { name: string, size: number, modified_at_secs: number, is_safe: boolean, };
 
 export type Inbox = { count: number, total_bytes: number, files: Array<InboxFile>, };

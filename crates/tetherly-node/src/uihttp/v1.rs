@@ -317,6 +317,7 @@ fn allowed(path: &str) -> Option<&'static [&'static str]> {
         p if shelf_item(p).is_some() => Some(&["DELETE"]),
         p if shelf_fetch_action(p).is_some() => Some(&["POST"]),
         "/api/v1/drag/probe" => Some(&["POST"]),
+        "/api/v1/drag/native/poll" | "/api/v1/drag/native/result" => Some(&["POST"]),
         "/api/v1/storage" => Some(&["GET"]),
         "/api/v1/storage/clean" => Some(&["POST"]),
         "/api/v1/resume" => Some(&["GET"]),
@@ -763,6 +764,8 @@ pub(super) async fn route(
             post_shelf_fetch(node, &owner, &id).await
         }
         ("POST", "/api/v1/drag/probe") => post_drag_probe(node, body),
+        ("POST", "/api/v1/drag/native/poll") => post_native_drag_poll(node, body),
+        ("POST", "/api/v1/drag/native/result") => post_native_drag_result(node, body),
         ("POST", p) if outbox_resend_action(p).is_some() => {
             post_outbox_resend(node, &outbox_resend_action(p).unwrap_or_default()).await
         }
@@ -1743,6 +1746,37 @@ fn post_drag_probe(node: &Node, body: &[u8]) -> Handled {
         Ok(no_content())
     } else {
         Err(error(ErrorCode::NotFound, "unknown or expired probe"))
+    }
+}
+
+/// v0.3.0 `POST /drag/native/poll`: the Windows drag source's status poll.
+fn post_native_drag_poll(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::NativeDragRequest = parse_body_strict(body)?;
+    let v = node.native_drag_view(req.drag_id);
+    Ok(json(
+        200,
+        &tetherly_api::NativeDragStatus {
+            state: v.state.to_string(),
+            released: v.released,
+            paths: v.paths,
+        },
+    ))
+}
+
+/// v0.3.0 `POST /drag/native/result`: how the native drag ended.
+fn post_native_drag_result(node: &Node, body: &[u8]) -> Handled {
+    let req: tetherly_api::NativeDragRequest = parse_body_strict(body)?;
+    let outcome = req.outcome.as_deref().unwrap_or("");
+    if !matches!(
+        outcome,
+        "dropped" | "missed" | "esc" | "released" | "cancelled" | "failed"
+    ) {
+        return Err(error(ErrorCode::BadRequest, "unknown outcome"));
+    }
+    if node.native_drag_report(req.drag_id, outcome) {
+        Ok(no_content())
+    } else {
+        Err(error(ErrorCode::NotFound, "unknown or finished drag"))
     }
 }
 
@@ -7505,6 +7539,8 @@ mod tests {
         assert!(allowed("/api/v1/shelf").is_some());
         assert_eq!(allowed("/api/v1/shelf/ab12"), Some(&["DELETE"][..]));
         assert_eq!(allowed("/api/v1/drag/probe"), Some(&["POST"][..]));
+        assert_eq!(allowed("/api/v1/drag/native/poll"), Some(&["POST"][..]));
+        assert_eq!(allowed("/api/v1/drag/native/result"), Some(&["POST"][..]));
     }
 
     /// P3: open-path redaction is tier-gated — only Admin keeps the absolute

@@ -54,6 +54,7 @@ mod discovery;
 mod drag;
 mod drag_controller;
 mod drag_handoff;
+mod drag_native;
 mod drag_target;
 mod files;
 mod focus;
@@ -1111,6 +1112,8 @@ struct Shared {
     pub(crate) transfer_drag_ids: Mutex<HashMap<String, (DeviceId, u64)>>,
     /// v0.2.89 cross-screen drag handoff (probe, staging, echo filter).
     pub(crate) drag_handoff: Mutex<drag_handoff::DragHandoffState>,
+    /// v0.3.0 native receive-side drag (Windows `drag-source` helper).
+    pub(crate) native_drag: Mutex<drag_native::NativeDragState>,
     /// v0.2.89 shelf: local registered files + peers' catalogs.
     pub(crate) shelf: Mutex<shelf::ShelfState>,
     /// §6.3 tray takeover: who owns the desktop tray surface. `client`

@@ -63,6 +63,9 @@ pub(crate) struct OutgoingDrag {
     /// The drag announced to the peer at the crossing (`RemoteDragEnter`),
     /// so its screen shows the carried files until release or return.
     pub(crate) announced: Option<u64>,
+    /// v0.3.0: the receiver pulled the files for a native drag; they are
+    /// (or will be) offered without waiting for the release.
+    pub(crate) pulled: bool,
 }
 
 #[derive(Debug, Default)]
@@ -470,6 +473,31 @@ impl Node {
         let Some(mut out) = st.out.take() else {
             return;
         };
+        if out.pulled {
+            // v0.3.0: already offered. The receiver's drag source sees the
+            // forwarded button-up itself; the confirm is the backstop for a
+            // release that beat the helper's own press.
+            drop(st);
+            if let Some(drag_id) = out.announced {
+                let node = self.clone_handle();
+                let rt = tokio::runtime::Handle::try_current()
+                    .ok()
+                    .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
+                if let Some(h) = rt {
+                    h.spawn(async move {
+                        let confirm = DragControlMsg::RemoteDropConfirm {
+                            drag_id,
+                            drop_norm_x: 0.5,
+                            drop_norm_y: 0.5,
+                        };
+                        if let Err(e) = node.send_drag_control(&out.peer, &confirm).await {
+                            warn!(peer = %out.peer, error = %e, "native drag: release notice failed");
+                        }
+                    });
+                }
+            }
+            return;
+        }
         match out.files.take() {
             Some(files) => {
                 drop(st);
@@ -498,6 +526,7 @@ impl Node {
                 files: None,
                 released: false,
                 announced: None,
+                pulled: false,
             });
             (peer, st.pb_baseline)
         };
@@ -554,6 +583,12 @@ impl Node {
                 };
                 if out.released {
                     true
+                } else if out.pulled {
+                    // The pull overtook the files: hand off right now.
+                    st.out = Some(out);
+                    drop(st);
+                    node.spawn_pulled_handoff(peer, files, drag_id);
+                    return;
                 } else {
                     out.files = Some(files.clone());
                     st.out = Some(out);
@@ -600,6 +635,45 @@ impl Node {
         }
     }
 
+    /// Controller side: `RemoteDragPull` — the receiver turned the carry
+    /// into a native drag and wants the bytes before the release.
+    pub(crate) fn drag_handoff_on_pull(&self, peer: &DeviceId, drag_id: u64) {
+        let files = {
+            let mut st = self.shared.drag_handoff.lock().expect("drag_handoff");
+            let Some(out) = st
+                .out
+                .as_mut()
+                .filter(|o| o.peer == *peer && o.announced == Some(drag_id))
+            else {
+                warn!(peer = %peer, drag_id, "drag pull for an unknown carry");
+                return;
+            };
+            if out.pulled {
+                return;
+            }
+            out.pulled = true;
+            // `None`: the probe result is still being published; the enter
+            // task hands off when it stores the files.
+            out.files.take()
+        };
+        if let Some(files) = files {
+            self.spawn_pulled_handoff(peer.clone(), files, drag_id);
+        }
+    }
+
+    fn spawn_pulled_handoff(&self, peer: DeviceId, files: Vec<PathBuf>, drag_id: u64) {
+        let node = self.clone_handle();
+        let rt = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
+        if let Some(h) = rt {
+            h.spawn(async move {
+                node.hand_off_drag_files_with(&peer, files, Some(drag_id), false)
+                    .await
+            });
+        }
+    }
+
     pub(crate) fn spawn_handoff(&self, peer: DeviceId, files: Vec<PathBuf>, drag_id: Option<u64>) {
         let node = self.clone_handle();
         let rt = tokio::runtime::Handle::try_current()
@@ -619,6 +693,19 @@ impl Node {
         peer: &DeviceId,
         paths: Vec<PathBuf>,
         drag_id: Option<u64>,
+    ) {
+        self.hand_off_drag_files_with(peer, paths, drag_id, true)
+            .await
+    }
+
+    /// `confirm == false` is the v0.3.0 pull: the button is still held, so
+    /// only the refreshed enter (final count) precedes the offers.
+    async fn hand_off_drag_files_with(
+        &self,
+        peer: &DeviceId,
+        paths: Vec<PathBuf>,
+        drag_id: Option<u64>,
+        confirm: bool,
     ) {
         let staging = self.send_staging_dir();
         let now = self.now_ms();
@@ -664,12 +751,17 @@ impl Node {
             norm_y: 0.5,
             has_directory: false,
         };
-        let confirm = DragControlMsg::RemoteDropConfirm {
+        let confirm_msg = DragControlMsg::RemoteDropConfirm {
             drag_id,
             drop_norm_x: 0.5,
             drop_norm_y: 0.5,
         };
-        for msg in [&enter, &confirm] {
+        let msgs: &[&DragControlMsg] = if confirm {
+            &[&enter, &confirm_msg]
+        } else {
+            &[&enter]
+        };
+        for msg in msgs {
             if let Err(e) = self.send_drag_control(peer, msg).await {
                 warn!(peer = %peer, error = %e, "drag handoff: control send failed");
                 return;
@@ -779,6 +871,82 @@ mod tests {
         node.drag_handoff_on_lmb(CursorSeat::Local, true);
         wait().await;
         assert!(node.drag_baseline().is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// v0.3.0: a receiver pull offers the carried files at once (enter, no
+    /// confirm); the later release only sends the confirm, never a second
+    /// set of offers.
+    #[tokio::test]
+    async fn pull_offers_once_and_release_only_confirms() {
+        use tetherly_core::drag::DragControlMsg;
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("drag-pull");
+        let peer = DeviceId::from_id_pk(&[43u8; 32]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<tetherly_core::frame::InnerFrame>(64);
+        let live = crate::runtime::LivePeer {
+            device_id: peer.clone(),
+            name: "pull-peer".into(),
+            platform: "test".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            handshake_hash: [4u8; 32],
+            file_port: None,
+            input_port: None,
+            screen_port: None,
+            caps: vec![tetherly_core::drag::DRAG_PULL_CAP.into()],
+            path: tetherly_core::PathKind::Lan,
+            rtt_ms: None,
+            last_seen_ms: 0,
+        };
+        node.register_session(live, tx).await;
+        let src = dir.join("pulled.txt");
+        std::fs::write(&src, b"bytes").unwrap();
+        node.shared.drag_handoff.lock().unwrap().out = Some(OutgoingDrag {
+            peer: peer.clone(),
+            files: Some(vec![src]),
+            released: false,
+            announced: Some(77),
+            pulled: false,
+        });
+        node.drag_handoff_on_pull(&DeviceId::from_id_pk(&[1u8; 32]), 77);
+        assert!(
+            !node
+                .shared
+                .drag_handoff
+                .lock()
+                .unwrap()
+                .out
+                .as_ref()
+                .unwrap()
+                .pulled,
+            "a pull from another peer is ignored"
+        );
+        node.drag_handoff_on_pull(&peer, 77);
+        let offers = || node.shared.pending_out.lock().unwrap().len();
+        for _ in 0..200 {
+            if offers() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(offers(), 1, "pulled files offered before the release");
+        node.drag_handoff_on_lmb(CursorSeat::Remote, false);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(offers(), 1, "release does not offer again");
+        let mut msgs = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            if let Ok(m) = DragControlMsg::from_payload(&f.payload) {
+                msgs.push(m);
+            }
+        }
+        let confirms = msgs
+            .iter()
+            .filter(|m| matches!(m, DragControlMsg::RemoteDropConfirm { drag_id: 77, .. }))
+            .count();
+        let enters = msgs
+            .iter()
+            .filter(|m| matches!(m, DragControlMsg::RemoteDragEnter { drag_id: 77, .. }))
+            .count();
+        assert_eq!((enters, confirms), (1, 1), "{msgs:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

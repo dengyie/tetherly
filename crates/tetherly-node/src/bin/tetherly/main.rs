@@ -232,6 +232,12 @@ fn main() -> Result<()> {
         let code = tetherly_node::platform::drag_probe::run_drag_probe_process(*ui_port, *probe_id);
         std::process::exit(code);
     }
+    #[cfg(windows)]
+    if let Cmd::DragSource { ui_port, drag_id } = &cli.cmd {
+        let code =
+            tetherly_node::platform::drag_source::run_drag_source_process(*ui_port, *drag_id);
+        std::process::exit(code);
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

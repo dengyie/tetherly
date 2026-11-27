@@ -548,6 +548,8 @@ impl Node {
                 s.insert("file".to_string());
                 s.insert("input".to_string());
                 s.insert("screen".to_string());
+                // v0.3.0: understands `RemoteDragPull` (native receive drag).
+                s.insert(tetherly_core::drag::DRAG_PULL_CAP.to_string());
                 s.insert("handoff".to_string());
                 s.insert("media".to_string());
                 s.insert("power".to_string());
@@ -696,6 +698,7 @@ impl Node {
             pending_drag_drops: Mutex::new(HashMap::new()),
             transfer_drag_ids: Mutex::new(HashMap::new()),
             drag_handoff: Mutex::new(Default::default()),
+            native_drag: Mutex::new(Default::default()),
             shelf: Mutex::new(initial_shelf),
             tray_owner: Mutex::new(tetherly_api::TrayOwner::Daemon),
             tray_keepalive: Mutex::new(None),
@@ -1300,6 +1303,7 @@ impl Node {
         if still_mine {
             sessions.remove(peer);
             self.shared.live.lock().expect("live").remove(peer);
+            self.native_drag_peer_down(peer);
         }
         still_mine
     }
@@ -1716,6 +1720,11 @@ impl Node {
                         // transfer_id to the drag_id so the completion hook can
                         // settle MOTW + reveal.
                         let drag_claimed = self.claim_drag_offer(peer, &tid);
+                        if drag_claimed {
+                            if let Some(f) = t.files.first() {
+                                self.native_drag_bind(&tid, &f.name);
+                            }
+                        }
                         // v0.2.89: a shelf fetch this node asked for is
                         // expected too — both are user-initiated pulls, so a
                         // trusted sender's offer is accepted without a prompt.

@@ -1035,4 +1035,13 @@ pub(crate) enum Cmd {
         #[arg(long)]
         probe_id: u64,
     },
+    /// v0.3.0 (Windows, internal): run the native OLE drag of a file carried
+    /// in from the controller, as the console user.
+    #[command(hide = true)]
+    DragSource {
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+        #[arg(long)]
+        drag_id: u64,
+    },
 }

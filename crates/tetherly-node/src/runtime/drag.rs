@@ -63,6 +63,9 @@ impl Node {
                 norm_y,
                 has_directory,
             } => {
+                if self.native_drag_refresh(drag_id, file_count) {
+                    return; // v0.3.0: the pulled handoff's refreshed enter
+                }
                 let entered = {
                     let mut target = self.shared.drag_target.lock().expect("drag_target");
                     target.handle_drag_enter(
@@ -77,11 +80,16 @@ impl Node {
                     )
                 };
                 match entered {
-                    Ok(()) => self.emit(UiEvent::DragCarry {
-                        active: true,
-                        file_count,
-                        first_file_name,
-                    }),
+                    Ok(()) => {
+                        self.emit(UiEvent::DragCarry {
+                            active: true,
+                            file_count,
+                            first_file_name,
+                        });
+                        // v0.3.0: hand the carry to a real OS drag here.
+                        self.native_drag_begin(peer, drag_id, file_count, has_directory)
+                            .await;
+                    }
                     Err(e) => warn!(peer = %peer, drag_id, error = %e, "drag enter rejected"),
                 }
             }
@@ -96,6 +104,9 @@ impl Node {
                 }
             }
             DragControlMsg::RemoteDragCancel { drag_id, reason } => {
+                if self.native_drag_cancelled(drag_id, reason) {
+                    return;
+                }
                 let mut target = self.shared.drag_target.lock().expect("drag_target");
                 if let Err(e) = target.handle_drag_cancel(drag_id, reason) {
                     warn!(peer = %peer, drag_id, error = %e, "drag cancel rejected");
@@ -121,6 +132,13 @@ impl Node {
                 if self.is_outgoing_drag_echo(drag_id) {
                     // v0.2.89: the receiver echoed our own handoff's confirm;
                     // the files are already being offered.
+                    return;
+                }
+                if self.native_drag_confirmed(drag_id) {
+                    // v0.3.0: released before the pull was honoured; the
+                    // drop was registered at the enter and the helper
+                    // decides the outcome. No echo: the controller offers
+                    // the files right after its confirm.
                     return;
                 }
                 // The controller tells us the user released LMB on our screen.
@@ -172,6 +190,11 @@ impl Node {
                         warn!(peer = %peer, drag_id, error = %e, "drop confirm echo failed");
                     }
                 }
+            }
+            DragControlMsg::RemoteDragPull { drag_id } => {
+                // Controller side: the receiver runs a native drag and wants
+                // the carried files now, while the button is still held.
+                self.drag_handoff_on_pull(peer, drag_id);
             }
         }
     }
@@ -235,6 +258,13 @@ impl Node {
             return;
         };
         let label = self.drag_peer_label(&peer);
+        if self.native_drag_delivered(transfer_id) {
+            // v0.3.0: the drag source reads it; no file-manager window.
+            if let Err(e) = super::shell_reveal::apply_motw(saved_path, &label) {
+                warn!(drag_id, error = %e, "native drag MOTW failed");
+            }
+            return;
+        }
         let now = self.now_ms();
         let mut target = self.shared.drag_target.lock().expect("drag_target");
         if target.active_session().map(|s| s.drag_id) == Some(drag_id) {

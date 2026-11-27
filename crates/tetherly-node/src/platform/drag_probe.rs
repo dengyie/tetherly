@@ -83,18 +83,28 @@ pub fn drag_pasteboard_files() -> Vec<String> {
 /// loopback API. Errors are human-readable spawn failures.
 #[cfg(windows)]
 pub fn spawn_drag_probe(ui_port: u16, probe_id: u64) -> Result<(), String> {
+    spawn_helper(
+        ui_port,
+        &[
+            "drag-probe".to_string(),
+            "--ui-port".into(),
+            ui_port.to_string(),
+            "--probe-id".into(),
+            probe_id.to_string(),
+        ],
+    )
+}
+
+/// Launch `tetherly <args>` in the console user's session (the daemon runs
+/// as LocalSystem on session 0, which has no interactive desktop), passing
+/// the loopback API token through the environment.
+#[cfg(windows)]
+pub(crate) fn spawn_helper(ui_port: u16, args: &[String]) -> Result<(), String> {
     use windows_sys::Win32::Foundation::CloseHandle;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let exe_str = exe.to_string_lossy().into_owned();
     let token = tetherly_loopback::api_token_for(ui_port);
-    let args = [
-        "drag-probe".to_string(),
-        "--ui-port".into(),
-        ui_port.to_string(),
-        "--probe-id".into(),
-        probe_id.to_string(),
-    ];
     if crate::cred::process_runs_as_local_system() {
         let line = std::iter::once(exe_str.clone())
             .chain(args.iter().cloned())

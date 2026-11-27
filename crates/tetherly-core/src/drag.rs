@@ -83,7 +83,18 @@ pub enum DragControlMsg {
         drop_norm_x: f32,
         drop_norm_y: f32,
     },
+
+    /// v0.3.0 receiver → controller: "send the carried files now". The
+    /// receiver turns the carry into a native OS drag on its own screen, so
+    /// the bytes must be flowing while the button is still held. Only sent
+    /// to peers advertising [`DRAG_PULL_CAP`]: older nodes fail to decode an
+    /// unknown variant and would drop the session.
+    RemoteDragPull { drag_id: u64 },
 }
+
+/// Capability token advertised by nodes that understand
+/// [`DragControlMsg::RemoteDragPull`].
+pub const DRAG_PULL_CAP: &str = "dragpull";
 
 impl DragControlMsg {
     /// Serialize into an inner frame for the session channel.
@@ -445,6 +456,17 @@ mod tests {
             .expect("cancel");
         assert_eq!(r, DragCancelReason::UserEscPressed);
         assert_eq!(sm.current_phase(), DragPhase::Idle);
+    }
+
+    #[test]
+    fn drag_pull_round_trips_on_the_wire() {
+        let pull = DragControlMsg::RemoteDragPull { drag_id: 9 };
+        let frame = pull.to_frame().expect("frame");
+        assert_eq!(
+            String::from_utf8_lossy(&frame.payload),
+            r#"{"type":"remote_drag_pull","payload":{"drag_id":9}}"#
+        );
+        assert_eq!(DragControlMsg::from_payload(&frame.payload).unwrap(), pull);
     }
 
     #[test]

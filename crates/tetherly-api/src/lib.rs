@@ -723,6 +723,31 @@ pub struct DragProbeReport {
     pub paths: Vec<String>,
 }
 
+/// `POST /api/v1/drag/native/poll` (v0.3.0): the Windows drag source asks
+/// about its native drag; also the body of `.../native/result` (`outcome`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NativeDragRequest {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub drag_id: u64,
+    /// Result only: `dropped` | `missed` | `esc` | `released` |
+    /// `cancelled` | `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+}
+
+/// Reply to `POST /api/v1/drag/native/poll`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NativeDragStatus {
+    /// `pending` | `ready` | `cancel` | `failed`.
+    pub state: String,
+    /// The controller released the button on this screen.
+    pub released: bool,
+    /// Final payload paths, once every file name is known.
+    pub paths: Vec<String>,
+}
+
 /// §145: session aggregate transfer metrics across inbound and outbound
 /// files (legacy `/api/state` `transfer_stats` shape, field-for-field).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -7197,6 +7222,8 @@ mod bindings {
             decl::<ShelfAddRequest>(&cfg),
             decl::<ShelfAddReport>(&cfg),
             decl::<DragProbeReport>(&cfg),
+            decl::<NativeDragRequest>(&cfg),
+            decl::<NativeDragStatus>(&cfg),
             decl::<InboxFile>(&cfg),
             decl::<Inbox>(&cfg),
             decl::<LayoutEdge>(&cfg),

@@ -523,8 +523,19 @@ impl Node {
         // rename) so the file never appears in the inbox unmarked, and the
         // completion below is not delayed behind it.
         super::shell_reveal::mark_received_file(&part, source.as_str());
-        let path = reserve_inbox_target(&part, &dest_dir, &name)?;
-        std::fs::remove_file(&part)?;
+        // v0.3.0: a native drag's payload goes to the path its drag source
+        // already published (same volume as the inbox, so a rename).
+        let path = match self.native_drag_path(&transfer_id) {
+            Some(fixed) => {
+                std::fs::rename(&part, &fixed)?;
+                fixed
+            }
+            None => {
+                let path = reserve_inbox_target(&part, &dest_dir, &name)?;
+                std::fs::remove_file(&part)?;
+                path
+            }
+        };
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

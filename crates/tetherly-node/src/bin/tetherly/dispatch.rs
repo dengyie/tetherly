@@ -551,6 +551,9 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::DragProbe { .. } => {
             anyhow::bail!("drag-probe is a Windows-only internal command");
         }
+        Cmd::DragSource { .. } => {
+            anyhow::bail!("drag-source is a Windows-only internal command");
+        }
     }
     Ok(())
 }
