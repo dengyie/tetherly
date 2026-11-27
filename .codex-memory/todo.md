@@ -551,3 +551,4 @@
 ## §245 大版本 v0.4.0（2026-11-28）
 - 用户："当前的项目先做一个大版本吧，部署线上更新 github 和 obsidian 文档"；版本号由用户选定 v0.4.0（不选 1.0.0，不对外承诺稳定 API）。
 - 内容：v0.3.x 原生拖拽/去重/文件夹传输的里程碑。README 中英文新增"跨屏原生拖拽"特性行，发布说明在 `docs/releases/v0.4.0.md`（同步为 GitHub Release 正文），Obsidian `tetherly 开发文档` 与 projects 路由已更新。
+- 发布：CI 46066313846 全绿 → tag v0.4.0 → release 46067421713（android Maven 429 重跑）全绿 14 资产，Release 正文=docs/releases/v0.4.0.md 并设 Latest → deploy all exit 0：Mac health/客户端 0.4.0；home-win 热重启 5204→25688、客户端 relaunch=ok session=1，受保护进程完好。
