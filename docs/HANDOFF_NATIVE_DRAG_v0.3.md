@@ -102,11 +102,12 @@ drag_handoff::hand_off_drag_files_with
 
 1. **helper OLE 循环偶发卡死只被看门狗掩盖**（v0.3.2）：根因未定位。下次复现时抓 helper 的 `drag source` 日志序列和卡住时 `QueryContinueDrag` 是否还在 tick。
 2. **大文件夹首帧延迟 + 双倍磁盘**：发送端先完整 `pack_dir` 再发 enter/offer，GB 级文件夹在 Mac 上要等打包完 Win 侧才有反应，且 staging 占一份等大空间。方向：流式 tar（offer 时 size 未知需要协议支持）或先发 enter 再打包。
-3. **tar 头开销未计入 `FILE_MAX`**：`pack_dir` 只累计文件字节，接近 64 GiB 时打完包才在 offer 处 `FileTooLarge`。可按每条目 +1024 B 预估。
-4. **`.<tid>.unpack` 崩溃残留**：daemon 在解包中途崩溃会在 inbox 留下隐藏目录，目前无清扫。
+3. ~~tar 头开销未计入 `FILE_MAX`~~ **已完成（ddb23d6）**：`pack_dir_limited` 按 `entry_tar_bytes`（512 B 头 + 数据按 512 对齐，含 GNU 长名扩展头）+ 1024 B trailer 精确预估，单测校验与实际 tar 字节数相等。
+4. ~~`.<tid>.unpack` 崩溃残留~~ **已完成（ddb23d6）**：daemon 启动 `load_resume_table` 扫描 inbox 时删除 `.*.unpack` 隐藏目录。
+   - 附带：文件夹 tar 在打包时同步计算 sha256（`HashingWriter`），offer 前不再整包重读一遍。
 5. **硬链接别名语义**：dedupe 交付与原生拖拽副本可能和 inbox 里的旧文件共享 inode，原地编辑一份会同时改另一份。完整性已由 #6 不变量兜住；若用户在意隔离，可改为 reflink/复制。
 6. **测试 flake**：`tests/phase3.rs::m3_2_peer_gone_returns_cursor`（ubuntu CI）、Android release Maven Central 429 —— 均 `gh run rerun <id> --failed`。
-7. Win 上 `inbox\muse2api-extension (1)…(5)` 为 v0.3.3/0.3.4 测试残留，可删。
+7. ~~Win 上 `inbox` 测试残留~~ 已于 2026-11-28 按 hash 核对后移入回收站。
 
 ## 7. 发布 / 部署 SOP
 
