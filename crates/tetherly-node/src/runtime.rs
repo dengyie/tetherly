@@ -47,6 +47,7 @@ mod actions;
 mod audio;
 mod audit;
 mod bench;
+mod bundle;
 mod camera;
 mod clipboard;
 mod config;

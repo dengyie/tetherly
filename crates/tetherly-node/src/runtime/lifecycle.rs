@@ -1723,7 +1723,14 @@ impl Node {
                         let drag_claimed = self.claim_drag_offer(peer, &tid);
                         if drag_claimed {
                             if let Some(f) = t.files.first() {
-                                self.native_drag_bind(&tid, &f.name);
+                                // A bundled folder is published as the folder.
+                                let name = match f.bundle.as_deref() {
+                                    Some(tetherly_core::BUNDLE_DIR_TAR) => {
+                                        super::bundle::folder_name(&f.name)
+                                    }
+                                    _ => f.name.clone(),
+                                };
+                                self.native_drag_bind(&tid, &name);
                             }
                         }
                         // v0.2.89: a shelf fetch this node asked for is

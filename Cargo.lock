@@ -1451,6 +1451,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1255e7a9f1902190d4c10a75f2f7f495d3d3ce13e9ba26e6c48683a0f4dbed7"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4669,6 +4679,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5021,7 +5041,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "serde_json",
@@ -5037,7 +5057,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-android"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "jni",
  "serde_json",
@@ -5052,7 +5072,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-api"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -5061,7 +5081,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-cli"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -5080,7 +5100,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "data-encoding",
@@ -5094,7 +5114,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-crypto"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -5114,7 +5134,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-loopback"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde_json",
  "tokio",
@@ -5122,7 +5142,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-net"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "mdns-sd",
  "proptest",
@@ -5139,7 +5159,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-node"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5164,6 +5184,7 @@ dependencies = [
  "security-framework-sys",
  "serde",
  "serde_json",
+ "tar",
  "tetherly-api",
  "tetherly-core",
  "tetherly-crypto",
@@ -5185,7 +5206,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-shell"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "serde_json",

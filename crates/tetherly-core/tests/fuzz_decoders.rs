@@ -116,6 +116,7 @@ fn corpus() -> Vec<Vec<u8>> {
                 name: "报告.pdf".into(),
                 size: 12345,
                 sha256: "ab".repeat(32),
+                bundle: None,
             }],
         }
         .to_frame()

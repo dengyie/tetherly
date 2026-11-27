@@ -526,9 +526,15 @@ impl Node {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "file.bin".into());
-                    match super::files::reserve_inbox_target(&f.path, &inbox, &name) {
-                        Ok(dst) => {
+                    let moved = if f.path.is_dir() {
+                        super::bundle::move_dir_into(&f.path, &inbox, &name)
+                    } else {
+                        super::files::reserve_inbox_target(&f.path, &inbox, &name).inspect(|_| {
                             let _ = std::fs::remove_file(&f.path);
+                        })
+                    };
+                    match moved {
+                        Ok(dst) => {
                             first.get_or_insert(dst);
                         }
                         Err(e) => {
@@ -680,6 +686,25 @@ mod tests {
         let inbox = node.shared.cfg.data_dir.join("inbox");
         assert_eq!(std::fs::read(inbox.join("b.txt")).unwrap(), b"x");
         assert!(!inbox.join(NATIVE_DRAG_DIR).join("12").exists());
+    }
+
+    /// v0.3.3: a bundled folder lands as a directory at its bound path; a
+    /// missed drop moves the whole folder into the inbox.
+    #[test]
+    fn missed_folder_drop_moves_the_folder_to_the_inbox() {
+        let (node, _dir) = temp_test_node("native_dir");
+        let p = peer();
+        assert!(node.native_drag_install(&p, 17, 1, node.now_ms()));
+        assert!(node.claim_drag_offer(&p, "t1"));
+        node.native_drag_bind("t1", "proj");
+        assert!(node.native_drag_report(17, "missed"));
+        let fixed = node.native_drag_path("t1").expect("bound path");
+        std::fs::create_dir_all(fixed.join("sub")).unwrap();
+        std::fs::write(fixed.join("sub/x.txt"), b"x").unwrap();
+        assert!(node.native_drag_delivered("t1"));
+        let inbox = node.shared.cfg.data_dir.join("inbox");
+        assert_eq!(std::fs::read(inbox.join("proj/sub/x.txt")).unwrap(), b"x");
+        assert!(!inbox.join(NATIVE_DRAG_DIR).join("17").exists());
     }
 
     /// Carried back to the controller: delivered quietly, and an unknown

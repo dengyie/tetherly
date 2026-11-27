@@ -9,7 +9,9 @@
 use crate::allowlist::sanitize_file_name;
 use crate::device_id::DeviceId;
 use crate::error::CoreError;
-use crate::frame::{FileDecision, FileDone, FileMeta, FileOffer, FILE_CHUNK, FILE_TOKEN_TTL_MS};
+use crate::frame::{
+    FileDecision, FileDone, FileMeta, FileOffer, BUNDLE_DIR_TAR, FILE_CHUNK, FILE_TOKEN_TTL_MS,
+};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +163,8 @@ impl FileHub {
                 name,
                 size: f.size,
                 sha256: f.sha256.to_ascii_lowercase(),
+                // Unknown packings are delivered as plain files.
+                bundle: f.bundle.filter(|b| b == BUNDLE_DIR_TAR),
             });
         }
         // Repeated control frames are normal around reconnects. Admit an exact
@@ -410,6 +414,7 @@ mod tests {
                 name: name.into(),
                 size: 10,
                 sha256: "a".repeat(64),
+                bundle: None,
             }],
         }
     }
@@ -526,6 +531,7 @@ mod tests {
                 name: "..".into(),
                 size: 1,
                 sha256: "b".repeat(64),
+                bundle: None,
             }],
         };
         assert_eq!(
@@ -544,6 +550,7 @@ mod tests {
                 name: "huge.bin".into(),
                 size,
                 sha256: "c".repeat(64),
+                bundle: None,
             }],
         };
         // One byte over the cap is refused; the cap itself is allowed.
@@ -564,6 +571,7 @@ mod tests {
                 name: "enterprise_disk.img".into(),
                 size,
                 sha256: "d".repeat(64),
+                bundle: None,
             }],
         };
         assert!(hub
@@ -591,6 +599,7 @@ mod tests {
                 name: "a.bin".into(),
                 size: 10,
                 sha256: "e".repeat(64),
+                bundle: None,
             }],
         };
         hub.offer(src.clone(), sized("tr_1"), 1).unwrap();

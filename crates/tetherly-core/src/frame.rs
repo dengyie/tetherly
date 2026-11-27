@@ -447,7 +447,15 @@ pub struct FileMeta {
     pub name: String,
     pub size: u64,
     pub sha256: String,
+    /// v0.3.3: how the payload is packed. `Some(BUNDLE_DIR_TAR)` is a tar of
+    /// a folder (`name` is `<folder>.tar`) that the receiver unpacks; older
+    /// receivers ignore the field and keep the `.tar`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
 }
+
+/// [`FileMeta::bundle`] for a tarred folder.
+pub const BUNDLE_DIR_TAR: &str = "dir-tar";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileOffer {

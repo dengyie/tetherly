@@ -69,6 +69,7 @@ fn file_meta() -> impl Strategy<Value = FileMeta> {
         // Keep a valid (64 hex) or deliberately-invalid hash: the *frame* codec
         // does not validate, only `FileHub` does, so any string must round-trip.
         sha256: hash,
+        bundle: None,
     })
 }
 

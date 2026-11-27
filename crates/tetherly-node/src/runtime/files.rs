@@ -314,7 +314,7 @@ impl Node {
             debug!(transfer = %transfer_id, "deduplicated transfer: header-only data channel");
             return Ok(());
         }
-        let (accepted, source, size, resume_hint, name, expected) = {
+        let (accepted, source, size, resume_hint, name, expected, is_bundle) = {
             let hubs = self.shared.hubs.lock().expect("hubs");
             let t = hubs
                 .files
@@ -333,6 +333,8 @@ impl Node {
                     .first()
                     .map(|f| f.sha256.clone())
                     .unwrap_or_default(),
+                t.files.first().and_then(|f| f.bundle.as_deref())
+                    == Some(tetherly_core::BUNDLE_DIR_TAR),
             )
         };
         if !accepted {
@@ -531,6 +533,61 @@ impl Node {
         // Applied to the `.part` before the rename (both survive a same-volume
         // rename) so the file never appears in the inbox unmarked, and the
         // completion below is not delayed behind it.
+        // v0.3.3: a bundled folder unpacks into a real folder, installed at
+        // the native drag's published path or as a fresh inbox folder.
+        if is_bundle {
+            let unpack = dest_dir.join(format!(".{transfer_id}.unpack"));
+            let native = self.native_drag_path(&transfer_id);
+            let (tar, inbox, folder, src_peer) = (
+                part.clone(),
+                dest_dir.clone(),
+                super::bundle::folder_name(&name),
+                source.as_str().to_string(),
+            );
+            let installed =
+                tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
+                    let _ = std::fs::remove_dir_all(&unpack);
+                    let result = (|| {
+                        let written = super::bundle::unpack_into(&tar, &unpack)?;
+                        for f in &written {
+                            super::shell_reveal::mark_received_file(f, &src_peer);
+                        }
+                        match native {
+                            Some(fixed) => {
+                                if let Some(parent) = fixed.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+                                std::fs::rename(&unpack, &fixed)?;
+                                Ok(fixed)
+                            }
+                            None => super::bundle::move_dir_into(&unpack, &inbox, &folder),
+                        }
+                    })();
+                    if result.is_err() {
+                        let _ = std::fs::remove_dir_all(&unpack);
+                    }
+                    let _ = std::fs::remove_file(&tar);
+                    result
+                })
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))
+                .and_then(|r| r);
+            let path = match installed {
+                Ok(p) => p,
+                Err(e) => {
+                    self.clear_resume(&transfer_id);
+                    self.set_transfer_phase(
+                        &transfer_id,
+                        TransferPhase::Failed,
+                        Some(format!("folder unpack failed: {e}")),
+                    );
+                    return Err(e.into());
+                }
+            };
+            return self
+                .finish_received(&transfer_id, &source, computed_digest, path, name)
+                .await;
+        }
         super::shell_reveal::mark_received_file(&part, source.as_str());
         // v0.3.0: a native drag's payload goes to the path its drag source
         // already published (same volume as the inbox, so a rename).
@@ -561,6 +618,21 @@ impl Node {
                 }
             });
         }
+        self.finish_received(&transfer_id, &source, computed_digest, path, name)
+            .await
+    }
+
+    /// Completion of a verified receive installed at `path`: done frame,
+    /// phase, settle (MOTW + reveal / native drag) and the banner.
+    async fn finish_received(
+        &self,
+        transfer_id: &str,
+        source: &DeviceId,
+        computed_digest: String,
+        path: std::path::PathBuf,
+        name: String,
+    ) -> Result<(), tetherly_net::NetError> {
+        let transfer_id = transfer_id.to_string();
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -574,7 +646,7 @@ impl Node {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             let _ = hubs.files.mark_done(&done);
         }
-        let _ = self.send_to(&source, done.to_frame()?).await;
+        let _ = self.send_to(source, done.to_frame()?).await;
         self.set_transfer_phase(&transfer_id, TransferPhase::Completed, None);
         self.emit(UiEvent::FileDone {
             transfer_id: transfer_id.clone(),
@@ -696,6 +768,10 @@ impl Node {
                 return Ok(None);
             }
             let f = &t.files[0];
+            if f.bundle.is_some() {
+                // A bundle is unpacked on receipt; nothing local to reuse.
+                return Ok(None);
+            }
             (t.source.clone(), f.name.clone(), f.sha256.clone(), f.size)
         };
         if total == 0 {
@@ -1231,6 +1307,7 @@ impl Node {
                 name: name.into(),
                 size: data.len() as u64,
                 sha256: digest.clone(),
+                bundle: None,
             }],
         };
         self.shared.pending_out.lock().expect("pending").insert(
@@ -1318,6 +1395,18 @@ impl Node {
         path: &std::path::Path,
         name: Option<&str>,
     ) -> Result<String, CoreError> {
+        self.offer_and_send_file_as(peer, path, name, None).await
+    }
+
+    /// [`Self::offer_and_send_file`] with the payload's packing announced
+    /// (`FileMeta::bundle`, v0.3.3 folder transfer).
+    pub(crate) async fn offer_and_send_file_as(
+        &self,
+        peer: &DeviceId,
+        path: &std::path::Path,
+        name: Option<&str>,
+        bundle: Option<&str>,
+    ) -> Result<String, CoreError> {
         let path = self.validate_send_source_path(path)?;
         let meta = std::fs::metadata(&path)?;
         let size = meta.len();
@@ -1358,6 +1447,7 @@ impl Node {
                 name: safe_name.clone(),
                 size,
                 sha256: digest.clone(),
+                bundle: bundle.map(str::to_string),
             }],
         };
         self.shared.pending_out.lock().expect("pending").insert(
@@ -1517,6 +1607,7 @@ impl Node {
                     name: safe_name.clone(),
                     size,
                     sha256: digest.clone(),
+                    bundle: None,
                 }],
             };
 
@@ -1715,6 +1806,7 @@ impl Node {
                     name: safe_name.clone(),
                     size,
                     sha256: digest.clone(),
+                    bundle: None,
                 }],
             };
 
@@ -2865,6 +2957,7 @@ mod inbound_stall_tests {
                             name: "stall.bin".into(),
                             size: total,
                             sha256: "a".repeat(64),
+                            bundle: None,
                         }],
                     },
                     now,
@@ -3021,6 +3114,7 @@ mod dedupe_tests {
                             name: "report.pdf".into(),
                             size: total,
                             sha256: sha(&body),
+                            bundle: None,
                         }],
                     },
                     node.shared.clock.unix_ms(),
@@ -3098,6 +3192,7 @@ mod dedupe_tests {
                             name: "a.txt".into(),
                             size: 4,
                             sha256: sha(b"bbbb"),
+                            bundle: None,
                         }],
                     },
                     node.shared.clock.unix_ms(),

@@ -42,6 +42,7 @@ getrandom.workspace = true
 arboard.workspace = true
 png = "0.18"
 zstd = "0.13"
+tar = { version = "0.4.46", default-features = false }
 openh264 = "0.9.9"
 
 [target.'cfg(windows)'.dependencies]

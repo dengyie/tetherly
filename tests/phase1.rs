@@ -396,6 +396,54 @@ async fn m1_7_file_reject_then_accept_sha256() {
     b.shutdown();
 }
 
+/// v0.3.3 — a folder travels as one bundled transfer and lands as a real
+/// folder (nested files, empty dirs, no Finder litter, no leftover tar).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_arrives_as_a_folder() {
+    let (a_dir, _g1) = temp_dir("dir-a");
+    let (b_dir, _g2) = temp_dir("dir-b");
+    let a = Node::start(cfg(a_dir.clone(), "a", "macos")).unwrap();
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
+
+    let src = std::path::Path::new(&a_dir).join("src").join("muse ext");
+    std::fs::create_dir_all(src.join("icons/16")).unwrap();
+    std::fs::create_dir_all(src.join("empty")).unwrap();
+    std::fs::write(src.join("manifest.json"), b"{}").unwrap();
+    std::fs::write(src.join("icons/16/a.png"), vec![7u8; 300_000]).unwrap();
+    std::fs::write(src.join(".DS_Store"), b"x").unwrap();
+    let peer_b = b.identity().device_id().clone();
+    let id = a.offer_and_send_folder(&peer_b, &src).await.unwrap();
+    wait_offered(&b, Duration::from_secs(3)).await;
+    b.user_accept_file(&id).await.unwrap();
+    let got = wait_inbox(&b_dir, "muse ext/icons/16/a.png", Duration::from_secs(20)).await;
+    assert_eq!(got, vec![7u8; 300_000]);
+    let inbox = std::path::Path::new(&b_dir).join("inbox");
+    assert_eq!(
+        std::fs::read(inbox.join("muse ext/manifest.json")).unwrap(),
+        b"{}"
+    );
+    assert!(inbox.join("muse ext/empty").is_dir());
+    assert!(!inbox.join("muse ext/.DS_Store").exists());
+    assert!(!inbox.join("muse ext.tar").exists());
+    let leftovers: Vec<_> = std::fs::read_dir(&inbox)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".part") || n.ends_with(".unpack"))
+        .collect();
+    assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
+    a.shutdown();
+    b.shutdown();
+}
+
 /// M1.7c — an offer whose declared size exceeds `FILE_MAX` is refused at the
 /// receiver before the user is ever asked, and the refusal must not be fatal to
 /// the session (the file hub rejects the offer, not the connection).
@@ -431,6 +479,7 @@ async fn an_oversized_offer_is_refused_without_dropping_the_session() {
             name: "huge.bin".into(),
             size: tetherly_core::FILE_MAX + 1,
             sha256: "d".repeat(64),
+            bundle: None,
         }],
     };
     a.send_to(&peer_b, oversized.to_frame().unwrap())
