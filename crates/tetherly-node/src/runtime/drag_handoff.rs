@@ -243,18 +243,35 @@ pub(crate) fn stage_user_file(
     Ok((dst, name))
 }
 
+/// One item ready to offer.
+#[derive(Debug)]
+pub(crate) struct StagedItem {
+    pub path: PathBuf,
+    /// The offered name.
+    pub name: String,
+    /// The packing (`FileMeta::bundle`).
+    pub bundle: Option<&'static str>,
+    /// Content digest when staging already computed it (a packed folder);
+    /// `None` lets the offer hash the file.
+    pub sha256: Option<String>,
+}
+
 /// Stage one dragged item: a file as [`stage_user_file`], a folder packed
-/// into `<staging>/drag/<rand>/<folder>.tar` (v0.3.3). Returns the staged
-/// path, the offered name and the packing.
+/// into `<staging>/drag/<rand>/<folder>.tar` (v0.3.3).
 pub(crate) fn stage_drag_item(
     staging_root: &Path,
     src: &Path,
     now_ms: u64,
-) -> Result<(PathBuf, String, Option<&'static str>), String> {
+) -> Result<StagedItem, String> {
     let meta = std::fs::metadata(src).map_err(|e| unreadable_message(src, &e))?;
     if !meta.is_dir() {
-        let (dst, name) = stage_user_file(staging_root, src, now_ms)?;
-        return Ok((dst, name, None));
+        let (path, name) = stage_user_file(staging_root, src, now_ms)?;
+        return Ok(StagedItem {
+            path,
+            name,
+            bundle: None,
+            sha256: None,
+        });
     }
     let raw_name = src.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
     let folder = tetherly_core::sanitize_file_name(raw_name).map_err(|e| e.to_string())?;
@@ -264,11 +281,18 @@ pub(crate) fn stage_drag_item(
     let dir = drag_root.join(format!("{:016x}", random_u64()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建暂存目录失败：{e}"))?;
     let dst = dir.join(&name);
-    if let Err(e) = super::bundle::pack_dir(src, &dst) {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(e);
+    match super::bundle::pack_dir(src, &dst) {
+        Ok(packed) => Ok(StagedItem {
+            path: dst,
+            name,
+            bundle: Some(tetherly_core::BUNDLE_DIR_TAR),
+            sha256: Some(packed.sha256),
+        }),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(e)
+        }
     }
-    Ok((dst, name, Some(tetherly_core::BUNDLE_DIR_TAR)))
 }
 
 fn sweep_stale_stages(drag_root: &Path, now_ms: u64) {
@@ -761,12 +785,11 @@ impl Node {
         let staging = self.send_staging_dir();
         let now = self.now_ms();
         let src = dir.to_path_buf();
-        let (path, name, bundle) =
-            tokio::task::spawn_blocking(move || stage_drag_item(&staging, &src, now))
-                .await
-                .map_err(|e| tetherly_core::CoreError::File(e.to_string()))?
-                .map_err(tetherly_core::CoreError::File)?;
-        self.offer_and_send_file_as(peer, &path, Some(&name), bundle)
+        let item = tokio::task::spawn_blocking(move || stage_drag_item(&staging, &src, now))
+            .await
+            .map_err(|e| tetherly_core::CoreError::File(e.to_string()))?
+            .map_err(tetherly_core::CoreError::File)?;
+        self.offer_and_send_file_as(peer, &item.path, Some(&item.name), item.bundle, item.sha256)
             .await
     }
 
@@ -781,15 +804,15 @@ impl Node {
     ) {
         let staging = self.send_staging_dir();
         let now = self.now_ms();
-        type Staged = (PathBuf, String, u64, Option<&'static str>);
+        type Staged = (StagedItem, u64);
         let staged: Vec<Result<Staged, String>> = tokio::task::spawn_blocking(move || {
             paths
                 .into_iter()
                 .take(HANDOFF_MAX_FILES)
                 .map(|src| {
-                    let (dst, name, bundle) = stage_drag_item(&staging, &src, now)?;
-                    let size = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
-                    Ok((dst, name, size, bundle))
+                    let item = stage_drag_item(&staging, &src, now)?;
+                    let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+                    Ok((item, size))
                 })
                 .collect()
         })
@@ -824,14 +847,14 @@ impl Node {
         let enter = DragControlMsg::RemoteDragEnter {
             drag_id,
             file_count: ok.len() as u32,
-            total_bytes: ok.iter().map(|f| f.2).sum(),
-            first_file_name: match ok[0].3 {
-                Some(_) => super::bundle::folder_name(&ok[0].1),
-                None => ok[0].1.clone(),
+            total_bytes: ok.iter().map(|f| f.1).sum(),
+            first_file_name: match ok[0].0.bundle {
+                Some(_) => super::bundle::folder_name(&ok[0].0.name),
+                None => ok[0].0.name.clone(),
             },
             norm_x: 0.5,
             norm_y: 0.5,
-            has_directory: ok.iter().any(|f| f.3.is_some()),
+            has_directory: ok.iter().any(|f| f.0.bundle.is_some()),
         };
         let confirm_msg = DragControlMsg::RemoteDropConfirm {
             drag_id,
@@ -853,12 +876,18 @@ impl Node {
         // The offer only announces each file; the bytes are read when the
         // peer accepts (and again on a resume). The staged copy stays until
         // `sweep_stale_stages` ages it out.
-        for (path, name, _, bundle) in ok {
+        for (item, _) in ok {
             if let Err(e) = self
-                .offer_and_send_file_as(peer, &path, Some(&name), bundle)
+                .offer_and_send_file_as(
+                    peer,
+                    &item.path,
+                    Some(&item.name),
+                    item.bundle,
+                    item.sha256,
+                )
                 .await
             {
-                warn!(peer = %peer, file = %name, error = %e, "drag handoff: send failed");
+                warn!(peer = %peer, file = %item.name, error = %e, "drag handoff: send failed");
             }
         }
     }
@@ -923,12 +952,17 @@ mod tests {
             Some(name.as_str())
         );
         assert!(stage_user_file(&staging, &src_dir, 0).is_err());
-        let (tar, tar_name, bundle) = stage_drag_item(&staging, &src_dir, 0).unwrap();
-        assert_eq!(tar_name, "src.tar");
-        assert_eq!(bundle, Some(tetherly_core::BUNDLE_DIR_TAR));
-        assert!(tar.starts_with(staging.join("drag")) && tar.is_file());
-        let (_, _, plain) = stage_drag_item(&staging, &src, 0).unwrap();
-        assert_eq!(plain, None);
+        let tar = stage_drag_item(&staging, &src_dir, 0).unwrap();
+        assert_eq!(tar.name, "src.tar");
+        assert_eq!(tar.bundle, Some(tetherly_core::BUNDLE_DIR_TAR));
+        assert!(tar.path.starts_with(staging.join("drag")) && tar.path.is_file());
+        // The folder's digest comes from packing and matches the tar on disk,
+        // so the offer can skip re-reading it.
+        let mut h = tetherly_core::IncrementalSha256::new();
+        h.update(&std::fs::read(&tar.path).unwrap());
+        assert_eq!(tar.sha256, Some(h.finalize_hex()));
+        let plain = stage_drag_item(&staging, &src, 0).unwrap();
+        assert_eq!((plain.bundle, plain.sha256), (None, None));
         assert!(stage_user_file(&staging, &root.join("missing"), 0).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -396,7 +396,16 @@ mod tests {
         retain(&d, &sha, &drag);
         // An app the payload was dropped into saves in place, same size:
         // the cache shares the inode, so its bytes change too.
+        let before = std::fs::metadata(&drag).unwrap().modified().unwrap();
         std::fs::write(&drag, b"PIXELS").unwrap();
+        // A real save lands seconds later; Linux/NTFS timestamps are coarse
+        // enough that an immediate rewrite can keep the same mtime_ms.
+        std::fs::File::options()
+            .write(true)
+            .open(&drag)
+            .unwrap()
+            .set_modified(before + std::time::Duration::from_secs(2))
+            .unwrap();
         assert_eq!(lookup(&d, &sha, 6), None);
         assert!(!cache_dir(&d).join(&sha).exists(), "stale cache dropped");
         let _ = std::fs::remove_dir_all(&d);

@@ -1407,17 +1407,21 @@ impl Node {
         path: &std::path::Path,
         name: Option<&str>,
     ) -> Result<String, CoreError> {
-        self.offer_and_send_file_as(peer, path, name, None).await
+        self.offer_and_send_file_as(peer, path, name, None, None)
+            .await
     }
 
     /// [`Self::offer_and_send_file`] with the payload's packing announced
-    /// (`FileMeta::bundle`, v0.3.3 folder transfer).
+    /// (`FileMeta::bundle`, v0.3.3 folder transfer). `sha256` is the content
+    /// digest when the caller produced the file and hashed it on the way
+    /// (a packed folder); `None` hashes the file here.
     pub(crate) async fn offer_and_send_file_as(
         &self,
         peer: &DeviceId,
         path: &std::path::Path,
         name: Option<&str>,
         bundle: Option<&str>,
+        sha256: Option<String>,
     ) -> Result<String, CoreError> {
         let path = self.validate_send_source_path(path)?;
         let meta = std::fs::metadata(&path)?;
@@ -1436,22 +1440,25 @@ impl Node {
         // Off-thread: a whole-file read can stall a tokio worker for seconds
         // on large payloads (up to FILE_MAX), starving every other task on it.
         let hash_path = path.to_path_buf();
-        let digest = tokio::task::spawn_blocking(move || -> Result<String, std::io::Error> {
-            let mut hasher = tetherly_core::IncrementalSha256::new();
-            use std::io::Read;
-            let mut f = std::fs::File::open(&hash_path)?;
-            let mut buf = [0u8; tetherly_core::FILE_CHUNK];
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
+        let digest = match sha256 {
+            Some(d) => d,
+            None => tokio::task::spawn_blocking(move || -> Result<String, std::io::Error> {
+                let mut hasher = tetherly_core::IncrementalSha256::new();
+                use std::io::Read;
+                let mut f = std::fs::File::open(&hash_path)?;
+                let mut buf = [0u8; tetherly_core::FILE_CHUNK];
+                loop {
+                    let n = f.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
                 }
-                hasher.update(&buf[..n]);
-            }
-            Ok(hasher.finalize_hex())
-        })
-        .await
-        .map_err(|e| CoreError::File(format!("hash task panicked: {e}")))??;
+                Ok(hasher.finalize_hex())
+            })
+            .await
+            .map_err(|e| CoreError::File(format!("hash task panicked: {e}")))??,
+        };
         let transfer_id = format!("tr_{}", &digest[..16]);
         let offer = FileOffer {
             transfer_id: transfer_id.clone(),

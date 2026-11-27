@@ -303,7 +303,8 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "tetherly".into())
 }
 
-/// Scan `inbox/` for `.<name>.resume.json` sidecars and rebuild the in-memory
+/// Scan `inbox/` at startup: drop crashed bundle unpack dirs, and read
+/// `.<name>.resume.json` sidecars to rebuild the in-memory
 /// resume table. Only meaningful for content-addressed transfers whose
 /// `transfer_id` equals the name; a mismatched/unreadable sidecar is skipped.
 fn load_resume_table(data_dir: &std::path::Path) -> tetherly_core::ResumeTable {
@@ -314,6 +315,21 @@ fn load_resume_table(data_dir: &std::path::Path) -> tetherly_core::ResumeTable {
     };
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
+        // A bundle unpack dir (`.<transfer_id>.unpack`, files.rs) that survives
+        // to startup belongs to a daemon that died mid-install: no transfer is
+        // active yet, so it is always residue.
+        if name.starts_with('.')
+            && name.ends_with(".unpack")
+            && entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            match std::fs::remove_dir_all(entry.path()) {
+                Ok(()) => tracing::info!(dir = %name, "removed crashed bundle unpack dir"),
+                Err(e) => {
+                    tracing::warn!(dir = %name, error = %e, "crashed bundle unpack dir not removed")
+                }
+            }
+            continue;
+        }
         let Some(stem) = name
             .strip_prefix('.')
             .and_then(|s| s.strip_suffix(".resume.json"))
@@ -1987,6 +2003,26 @@ mod resume_scan_tests {
         assert_eq!(table.all().len(), 1);
         // The torn sidecar file was removed so a later transfer starts clean.
         assert!(!dir.join("inbox").join(".tr_torn.resume.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn startup_scan_removes_crashed_bundle_unpack_dirs() {
+        let dir = temp_inbox("unpack");
+        let inbox = dir.join("inbox");
+        let stale = inbox.join(".tr_dead.unpack");
+        std::fs::create_dir_all(stale.join("sub")).unwrap();
+        std::fs::write(stale.join("sub").join("a.txt"), b"x").unwrap();
+        // A user folder that merely ends in ".unpack" and a same-named file
+        // are not bundle staging dirs and must survive.
+        std::fs::create_dir_all(inbox.join("photos.unpack")).unwrap();
+        std::fs::write(inbox.join(".note.unpack"), b"keep").unwrap();
+
+        load_resume_table(&dir);
+
+        assert!(!stale.exists(), "crashed unpack dir is swept at startup");
+        assert!(inbox.join("photos.unpack").is_dir());
+        assert!(inbox.join(".note.unpack").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
