@@ -83,6 +83,7 @@ drag_handoff::hand_off_drag_files_with
 | `drag source: DoDragDrop failed hr=…` | OLE 拒绝（v0.3.1 修过 E_FAIL：按压窗口铺满虚拟屏 + 补线程键态；v0.4.1 修掉"上一个 helper 仍占着 OLE 拖拽"这一来源） |
 | `drag source watchdog: exiting … in_loop qcd_calls qcd_idle_ms wakes` | 看门狗强退（取消/失败后 5s 或存活 2h）。`in_loop=true` 且 `qcd_idle_ms` 大 = OLE 循环没在调 `QueryContinueDrag`；`wakes>0` 仍卡 = 投递的 WM_MOUSEMOVE 没唤醒，需要换唤醒手段 |
 | `drag source finished … qcd_calls wakes alive_ms` | 每次 helper 正常结束的遥测；`wakes>0` 表示靠唤醒（而非用户输入）结束/放下 |
+| `keyboard not forwarded: macOS Secure Event Input is on pid= app=` | v0.4.2：Mac 有应用持有安全输入，键盘到不了 event tap（鼠标正常、按键落在 Mac）；按 app 关闭密码框或退出/重启该应用 |
 | `native drag: superseded helper's result ignored` | 同一 drag_id 二次接管，旧 helper 的结果被丢弃（预期，非故障） |
 | `drag source result not needed` | helper 结果 404：已被取代或 daemon 已自行结算（info，非故障） |
 | `folder stream produced X of Y bytes` / `folder stream task failed` / 传输错误 `sha256 mismatch` | v0.4.1 流式文件夹：扫描后文件夹被改（大小不符，发送端中止）/ 生成线程异常 / 接收端 trailer 摘要不符（不会安装） |
