@@ -1,7 +1,7 @@
-# 阶段交接：跨端原生拖拽 / 去重 / 文件夹传输（v0.3.0 – v0.4.0）
+# 阶段交接：跨端原生拖拽 / 去重 / 文件夹传输（v0.3.0 – v0.4.1）
 
 - 更新日期：2026-11-28
-- 覆盖范围：`v0.2.99..v0.4.0`（v0.4.0 = v0.3.x 里程碑版本，见 `docs/releases/v0.4.0.md`）（Mac 控制端 → Windows 受控端 home-win）
+- 覆盖范围：`v0.2.99..v0.4.1`（v0.4.0 = v0.3.x 里程碑版本，见 `docs/releases/v0.4.0.md`；v0.4.1 = 流式文件夹 + helper 根因修复）（Mac 控制端 → Windows 受控端 home-win）
 - 用户验收：普通文件、文件夹均可从 Mac Finder 拖过边后在 Win 侧直接作为鼠标拖住的副本落到任意窗口（v0.3.4 实测通过）
 
 ---
@@ -18,12 +18,17 @@ Finder 拖文件/文件夹过屏幕边缘
                                                        │   dragpull && (!has_directory || dragdir)
                                                        │   不满足 → 旧路径（松手落 inbox + 选中）
                                                        ├ 注册 pending drop（自动接收）
-                                                       ├ 拉起 `tetherly drag-source` helper（控制台会话）
+                                                       ├ 拉起 `tetherly drag-source --session <nonce>` helper（控制台会话）
+                                                       │   v0.4.1：每次接管新 nonce；被取代的 helper 轮询读到 cancel、结果不计
                     ◀──────────────── RemoteDragPull ─┘
 drag_handoff::hand_off_drag_files_with
   stage_drag_item（spawn_blocking）
     文件：硬链/复制到 staging/drag/<rand>/
-    文件夹：bundle::pack_dir → <folder>.tar
+    文件夹（对端有 filestream cap，v0.4.1）：只 scan_dir，不落盘
+      offer size=scan.total、sha256=占位、sha256_trailer=true
+      接受后 spawn_dir_stream 边生成 tar 边发，末尾 AEAD 封装 digest trailer
+      续传：重生 tar 跳过已保留前缀；接收端重哈希 .part 前缀
+    文件夹（旧对端）：bundle::pack_dir → <folder>.tar
   刷新 enter（最终数量）
   offer_and_send_file_as(bundle=dir-tar) ─────────▶ lifecycle：认领 offer → native_drag_bind
                                                        固定路径 inbox/.drag/<drag_id>/<name|folder>
@@ -59,6 +64,8 @@ drag_handoff::hand_off_drag_files_with
 - 新消息/新语义一律加 cap 门控：旧版本遇到未知 `DragControlMsg` 变体会断会话。
 - `dragpull`：对端理解 `RemoteDragPull`（v0.3.0）。
 - `dragdir`：对端发送端会把文件夹打成 bundle（v0.3.4）。缺它的对端带文件夹的 carry 走旧路径。
+- `filestream`（`tetherly_core::FILE_STREAM_CAP`，v0.4.1）：接收端理解 `sha256_trailer` offer（大小先知、摘要在流尾）。发送端仅对有此 cap 的对端流式发文件夹，否则仍先 `pack_dir` 落 staging。
+- helper `--session` 不是 cap：helper 与 daemon 同一二进制；`NativeDragRequest.session` 缺省视为老 helper，照常服务。
 - 新增 cap：`lifecycle.rs::local_caps` 插入 + 消费处 `peer_has_cap` 判断 + 单测覆盖"缺 cap 时回落"。
 
 ## 3. 排障：日志签名
@@ -73,8 +80,12 @@ drag_handoff::hand_off_drag_files_with
 | `drag handoff: offering files` / `file skipped` / `staging task failed` | 发送端 staging/offer |
 | `native drag handed back before any offer` | 松手早于任何 offer，交还旧路径 |
 | `native drag delivered to the inbox` | missed/esc 回落 inbox |
-| `drag source: DoDragDrop failed hr=…` | OLE 拒绝（v0.3.1 修过 E_FAIL：按压窗口铺满虚拟屏 + 补线程键态） |
-| `drag source watchdog: exiting` | 看门狗强退（取消/失败后 5s 或存活 2h） |
+| `drag source: DoDragDrop failed hr=…` | OLE 拒绝（v0.3.1 修过 E_FAIL：按压窗口铺满虚拟屏 + 补线程键态；v0.4.1 修掉"上一个 helper 仍占着 OLE 拖拽"这一来源） |
+| `drag source watchdog: exiting … in_loop qcd_calls qcd_idle_ms wakes` | 看门狗强退（取消/失败后 5s 或存活 2h）。`in_loop=true` 且 `qcd_idle_ms` 大 = OLE 循环没在调 `QueryContinueDrag`；`wakes>0` 仍卡 = 投递的 WM_MOUSEMOVE 没唤醒，需要换唤醒手段 |
+| `drag source finished … qcd_calls wakes alive_ms` | 每次 helper 正常结束的遥测；`wakes>0` 表示靠唤醒（而非用户输入）结束/放下 |
+| `native drag: superseded helper's result ignored` | 同一 drag_id 二次接管，旧 helper 的结果被丢弃（预期，非故障） |
+| `drag source result not needed` | helper 结果 404：已被取代或 daemon 已自行结算（info，非故障） |
+| `folder stream produced X of Y bytes` / `folder stream task failed` / 传输错误 `sha256 mismatch` | v0.4.1 流式文件夹：扫描后文件夹被改（大小不符，发送端中止）/ 生成线程异常 / 接收端 trailer 摘要不符（不会安装） |
 | `folder delivered incomplete` | v0.3.5：bundle 有条目未能解出（UI 同步提示 N 项） |
 | `bundle: unsafe entry skipped` / `entry not unpacked` | 具体哪个条目 |
 
@@ -100,8 +111,13 @@ drag_handoff::hand_off_drag_files_with
 
 ## 6. 遗留与下阶段建议（按优先级）
 
-1. **helper OLE 循环偶发卡死只被看门狗掩盖**（v0.3.2）：根因未定位。下次复现时抓 helper 的 `drag source` 日志序列和卡住时 `QueryContinueDrag` 是否还在 tick。
-2. **大文件夹首帧延迟 + 双倍磁盘**：发送端先完整 `pack_dir` 再发 enter/offer，GB 级文件夹在 Mac 上要等打包完 Win 侧才有反应，且 staging 占一份等大空间。方向：流式 tar（offer 时 size 未知需要协议支持）或先发 enter 再打包。
+1. ~~helper OLE 循环偶发卡死只被看门狗掩盖~~ **已定位并修复（v0.4.1，f258a6c）**。根因（home-win v0.3.2 日志 drag 9374…）：
+   - 拖回再拖入使同一 drag_id 被接管两次，两个 helper 轮询同一 drag；后者 `DoDragDrop` 撞前者活着的 OLE 循环 E_FAIL，其 `failed` 把整个 drag 结算掉；
+   - 前者留在 `DoDragDrop` 里 2.7 s：OLE 模态循环只在鼠标/键盘消息上调 `QueryContinueDrag`（隐藏窗口的 `WM_TIMER` 不算），指针静止时 cancel 要等用户下一次移动，期间下一次拖拽也 E_FAIL。
+   - 修复：helper session nonce（被取代者读到 cancel、结果不计）；daemon 已有决定（cancel/failed、或松手后 ready）时 poller 向 helper 自己的 OLE 线程 `PostThreadMessageW(WM_MOUSEMOVE)`，不向桌面注入输入，按住时绝不唤醒；`QueryContinueDrag` 计数/空闲时长/唤醒次数进日志。
+   - 待真机观察：`drag source finished` 的 `wakes` 字段；若出现 `watchdog: exiting in_loop=true wakes>0`，说明 posted 消息不足以唤醒，改为 `SendInput` 零位移 move（需评估对用户桌面影响）。
+2. ~~大文件夹首帧延迟 + 双倍磁盘~~ **已完成（v0.4.1，75743e0）**：`filestream` cap 下文件夹流式发送，无 staging、无预打包；摘要走 AEAD trailer；支持断点续传（重生 tar 跳前缀 + 接收端重哈希前缀）；扫描后文件夹被改 → 摘要不符不安装。旧对端仍走 pack_dir。
+   - 已知限制：流式 offer 没有 `source_path`，outbox"重发"对其返回 "cannot resend memory-only"，需用户重新拖。
 3. ~~tar 头开销未计入 `FILE_MAX`~~ **已完成（ddb23d6）**：`pack_dir_limited` 按 `entry_tar_bytes`（512 B 头 + 数据按 512 对齐，含 GNU 长名扩展头）+ 1024 B trailer 精确预估，单测校验与实际 tar 字节数相等。
 4. ~~`.<tid>.unpack` 崩溃残留~~ **已完成（ddb23d6）**：daemon 启动 `load_resume_table` 扫描 inbox 时删除 `.*.unpack` 隐藏目录。
    - 附带：文件夹 tar 在打包时同步计算 sha256（`HashingWriter`），offer 前不再整包重读一遍。
