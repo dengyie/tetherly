@@ -548,6 +548,13 @@
 - 交接文档：`docs/HANDOFF_NATIVE_DRAG_v0.3.md`（链路图、caps、日志签名、不变量、遗留清单、发布 SOP）。
 - [ ] 遗留：helper OLE 偶发卡死根因；大文件夹先打包后发的首帧延迟/双倍磁盘；tar 头未计入 FILE_MAX；`.<tid>.unpack` 崩溃残留清扫。
 
+## §247 v0.4.2：macOS 安全输入致键盘不转发（2026-11-28）
+
+- [x] 根因：Secure Event Input 开启时 CGEventTap 收不到键盘（鼠标正常）；现场持有者 ChatGPT.app(ioreg)/Chrome(CGSession)。系统限制不可绕过。
+- [x] `platform::secure_input_holder()` + 进远端座位时 `warn_if_keyboard_blocked`（日志 `keyboard not forwarded: macOS Secure Event Input is on` + 横幅，同 pid 60s 去重）。
+- [x] release v0.4.2 14 资产；deploy all exit 0，Win PID 15880→27640 v0.4.2，受保护进程 3/3 完好。
+- [ ] 候选：座位在远端期间持续轮询（持有者中途变化时也提醒）；tray 状态显示安全输入。
+
 ## §246 v0.4.1：§6 遗留两项深度收口（2026-11-28）
 - 用户："剩下两项需要你定方向 两个都深度做下"。
 - #2 流式文件夹（75743e0）：`filestream` cap 门控；offer 预告 scan 大小 + `sha256_trailer`，接受后阻塞线程边生成 tar 边发，AEAD digest trailer；续传重生 tar 跳前缀；旧端回落 pack_dir staging。限制：流式 outbox 不可"重发"。

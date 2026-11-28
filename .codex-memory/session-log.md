@@ -1889,3 +1889,4 @@ v0.2.71 双端部署（health 0.2.71，受保护进程未动）后用 Playwright
 - v0.3.5 §244（2026-11-28）：阶段 review，修 dedupe 缓存别名被改写仍命中（P1）+ 文件夹解包不完整静默成功（P2）+ 小项；新增交接文档 docs/HANDOFF_NATIVE_DRAG_v0.3.md。
 - v0.4.0 §245（2026-11-28）：大版本里程碑（v0.3.x 原生拖拽系列收官），README/发布说明/Obsidian 同步。
 - v0.4.1 §246（2026-11-28）：流式文件夹发送（filestream cap，无 staging，digest trailer）+ 原生拖拽 helper 卡死根因修复（session nonce + posted WM_MOUSEMOVE 唤醒 + 遥测）；release 14 资产，deploy all exit 0 双端 0.4.1，受保护进程完好。
+- v0.4.2 §247（2026-11-28）：安全输入致键盘不转发——检测并按应用名告警（日志+横幅）；release 14 资产，deploy all exit 0 双端 0.4.2，受保护进程完好。
