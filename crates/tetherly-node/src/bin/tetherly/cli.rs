@@ -1043,5 +1043,8 @@ pub(crate) enum Cmd {
         ui_port: u16,
         #[arg(long)]
         drag_id: u64,
+        /// Spawn nonce (v0.4.1); 0 = none.
+        #[arg(long, default_value_t = 0)]
+        session: u64,
     },
 }

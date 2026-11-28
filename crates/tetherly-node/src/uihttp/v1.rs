@@ -1752,7 +1752,7 @@ fn post_drag_probe(node: &Node, body: &[u8]) -> Handled {
 /// v0.3.0 `POST /drag/native/poll`: the Windows drag source's status poll.
 fn post_native_drag_poll(node: &Node, body: &[u8]) -> Handled {
     let req: tetherly_api::NativeDragRequest = parse_body_strict(body)?;
-    let v = node.native_drag_view(req.drag_id);
+    let v = node.native_drag_view(req.drag_id, req.session);
     Ok(json(
         200,
         &tetherly_api::NativeDragStatus {
@@ -1773,7 +1773,7 @@ fn post_native_drag_result(node: &Node, body: &[u8]) -> Handled {
     ) {
         return Err(error(ErrorCode::BadRequest, "unknown outcome"));
     }
-    if node.native_drag_report(req.drag_id, outcome) {
+    if node.native_drag_report(req.drag_id, req.session, outcome) {
         Ok(no_content())
     } else {
         Err(error(ErrorCode::NotFound, "unknown or finished drag"))

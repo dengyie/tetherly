@@ -76,9 +76,20 @@ pub(crate) struct NativeDrag {
     /// Start of the name-settling window: the enter, then the pulled
     /// handoff's refreshed enter (staging a large file can take a while).
     pub(crate) settle_from_ms: u64,
+    /// v0.4.1: spawn nonce of the one helper that serves this drag. A
+    /// re-take-over of the same drag id (carried back and in again) used
+    /// to leave two helpers polling it: the second hit E_FAIL against the
+    /// first's live OLE loop and its `failed` settled the drag.
+    pub(crate) helper: u64,
 }
 
 impl NativeDrag {
+    /// Whether a helper with `session` serves this drag (`None`: a helper
+    /// that predates sessions, accepted).
+    fn served_by(&self, session: Option<u64>) -> bool {
+        session.is_none_or(|s| s == self.helper)
+    }
+
     fn names_settled(&self, now: u64) -> bool {
         let n = self.files.len() as u32;
         n >= self.expected || (n > 0 && now.saturating_sub(self.settle_from_ms) >= NAMES_SETTLE_MS)
@@ -129,6 +140,17 @@ fn unique_in(dir: &Path, taken: &[NativeFile], name: &str) -> PathBuf {
         }
     }
     unreachable!("u32 counter exhausted")
+}
+
+/// A fresh, non-zero helper session nonce.
+fn helper_nonce() -> u64 {
+    let mut b = [0u8; 8];
+    if getrandom::getrandom(&mut b).is_err() {
+        // Unique enough per process: the nonce only tells helpers apart.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        return NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    u64::from_le_bytes(b).max(1)
 }
 
 fn sweep_native_dirs(root: &Path, now_ms: u64) {
@@ -206,12 +228,15 @@ impl Node {
             self.shared.native_drag.lock().expect("native_drag").cur = None;
             return false;
         }
-        if let Err(e) = crate::platform::drag_source::spawn_drag_source(self.ui_port(), drag_id) {
+        let session = self.native_drag_helper(drag_id).unwrap_or(0);
+        if let Err(e) =
+            crate::platform::drag_source::spawn_drag_source(self.ui_port(), drag_id, session)
+        {
             warn!(drag_id, error = %e, "native drag: helper spawn failed");
             // The files still arrive; deliver them the pre-v0.3.0 way.
             self.native_drag_resolve(drag_id, NativeOutcome::Fallback { reveal: true });
         }
-        info!(peer = %peer, drag_id, file_count, "native drag: carry taken over");
+        info!(peer = %peer, drag_id, file_count, session, "native drag: carry taken over");
         true
     }
 
@@ -245,6 +270,7 @@ impl Node {
                 cancelled: false,
                 outcome: None,
                 settle_from_ms: now,
+                helper: helper_nonce(),
             });
             prev
         };
@@ -268,6 +294,19 @@ impl Node {
         true
     }
 
+    /// Session nonce of the helper that serves `drag_id`.
+    pub(crate) fn native_drag_helper(&self, drag_id: u64) -> Option<u64> {
+        self.shared
+            .native_drag
+            .lock()
+            .expect("native_drag")
+            .cur
+            .as_ref()
+            .filter(|d| d.drag_id == drag_id)
+            .map(|d| d.helper)
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_native_drag(&self, drag_id: u64) -> bool {
         self.shared
             .native_drag
@@ -565,10 +604,16 @@ impl Node {
     }
 
     /// Helper poll: what the drag source may do next.
-    pub(crate) fn native_drag_view(&self, drag_id: u64) -> NativeDragView {
+    /// A superseded helper (`session` not the drag's) reads `cancel`, so
+    /// it leaves its OLE loop instead of competing with its successor.
+    pub(crate) fn native_drag_view(&self, drag_id: u64, session: Option<u64>) -> NativeDragView {
         let now = self.now_ms();
         let st = self.shared.native_drag.lock().expect("native_drag");
-        let Some(d) = st.cur.as_ref().filter(|d| d.drag_id == drag_id) else {
+        let Some(d) = st
+            .cur
+            .as_ref()
+            .filter(|d| d.drag_id == drag_id && d.served_by(session))
+        else {
             return NativeDragView {
                 state: "cancel",
                 released: true,
@@ -608,10 +653,33 @@ impl Node {
     }
 
     /// Helper result: `dropped` | `missed` | `esc` | `released` |
-    /// `cancelled` | `failed`. Returns false for an unknown drag.
-    pub(crate) fn native_drag_report(&self, drag_id: u64, outcome: &str) -> bool {
-        if !self.is_native_drag(drag_id) {
-            return false;
+    /// `cancelled` | `failed`. Returns false for an unknown drag or a
+    /// superseded helper (its outcome says nothing about the live drag).
+    pub(crate) fn native_drag_report(
+        &self,
+        drag_id: u64,
+        session: Option<u64>,
+        outcome: &str,
+    ) -> bool {
+        let served = {
+            let st = self.shared.native_drag.lock().expect("native_drag");
+            st.cur
+                .as_ref()
+                .filter(|d| d.drag_id == drag_id)
+                .map(|d| d.served_by(session))
+        };
+        match served {
+            None => return false,
+            Some(false) => {
+                info!(
+                    drag_id,
+                    ?session,
+                    outcome,
+                    "native drag: superseded helper's result ignored"
+                );
+                return false;
+            }
+            Some(true) => {}
         }
         info!(drag_id, outcome, "native drag: helper finished");
         let o = match outcome {
@@ -649,7 +717,7 @@ mod tests {
         assert!(node.native_drag_install(&p, 11, 2, node.now_ms()));
         assert!(node.claim_drag_offer(&p, "t1"));
         node.native_drag_bind("t1", "a.txt");
-        let v = node.native_drag_view(11);
+        let v = node.native_drag_view(11, None);
         assert_eq!(
             (v.state, v.paths.len()),
             ("pending", 0),
@@ -657,7 +725,7 @@ mod tests {
         );
         assert!(node.claim_drag_offer(&p, "t2"));
         node.native_drag_bind("t2", "a.txt");
-        let v = node.native_drag_view(11);
+        let v = node.native_drag_view(11, None);
         assert_eq!(v.state, "pending");
         assert_eq!(v.paths.len(), 2);
         assert!(
@@ -666,15 +734,44 @@ mod tests {
         );
         land(&node, "t1", b"1");
         land(&node, "t2", b"2");
-        assert_eq!(node.native_drag_view(11).state, "ready");
+        assert_eq!(node.native_drag_view(11, None).state, "ready");
         assert!(node.native_drag_confirmed(11));
-        assert!(node.native_drag_view(11).released);
-        assert!(node.native_drag_report(11, "dropped"));
+        assert!(node.native_drag_view(11, None).released);
+        assert!(node.native_drag_report(11, None, "dropped"));
         assert!(!node.is_native_drag(11));
         assert!(
             std::path::Path::new(&v.paths[0]).exists(),
             "dropped copy kept"
         );
+    }
+
+    /// v0.4.1 field bug (v0.3.2 log, drag 9374…): the same drag id was
+    /// taken over twice, both helpers polled it, and the loser's E_FAIL
+    /// `failed` settled the live drag. Only the current helper counts.
+    #[test]
+    fn a_superseded_helper_reads_cancel_and_its_result_is_ignored() {
+        let (node, _dir) = temp_test_node("native_session");
+        let p = peer();
+        assert!(node.native_drag_install(&p, 21, 1, node.now_ms()));
+        let first = node.native_drag_helper(21).expect("first helper");
+        assert!(node.native_drag_install(&p, 21, 1, node.now_ms()));
+        let second = node.native_drag_helper(21).expect("second helper");
+        assert_ne!(first, second, "each take-over gets its own helper");
+        assert_ne!(second, 0, "0 is the no-session marker");
+
+        let stale = node.native_drag_view(21, Some(first));
+        assert_eq!((stale.state, stale.released), ("cancel", true));
+        assert_eq!(node.native_drag_view(21, Some(second)).state, "pending");
+        assert_eq!(
+            node.native_drag_view(21, None).state,
+            "pending",
+            "a session-less helper is still served"
+        );
+
+        assert!(!node.native_drag_report(21, Some(first), "failed"));
+        assert!(node.is_native_drag(21), "the stale result settled nothing");
+        assert!(node.native_drag_report(21, Some(second), "missed"));
+        assert_eq!(node.native_drag_view(21, Some(second)).state, "cancel");
     }
 
     /// A miss before the bytes landed waits for them, then moves them into
@@ -686,9 +783,9 @@ mod tests {
         assert!(node.native_drag_install(&p, 12, 1, node.now_ms()));
         assert!(node.claim_drag_offer(&p, "t1"));
         node.native_drag_bind("t1", "b.txt");
-        assert!(node.native_drag_report(12, "missed"));
+        assert!(node.native_drag_report(12, None, "missed"));
         assert!(node.is_native_drag(12), "waits for the transfer");
-        assert_eq!(node.native_drag_view(12).state, "cancel");
+        assert_eq!(node.native_drag_view(12, None).state, "cancel");
         land(&node, "t1", b"x");
         assert!(!node.is_native_drag(12));
         let inbox = node.shared.cfg.data_dir.join("inbox");
@@ -705,7 +802,7 @@ mod tests {
         assert!(node.native_drag_install(&p, 17, 1, node.now_ms()));
         assert!(node.claim_drag_offer(&p, "t1"));
         node.native_drag_bind("t1", "proj");
-        assert!(node.native_drag_report(17, "missed"));
+        assert!(node.native_drag_report(17, None, "missed"));
         let fixed = node.native_drag_path("t1").expect("bound path");
         std::fs::create_dir_all(fixed.join("sub")).unwrap();
         std::fs::write(fixed.join("sub/x.txt"), b"x").unwrap();
@@ -771,7 +868,7 @@ mod tests {
         assert!(node.claim_drag_offer(&p, "t1"));
         node.native_drag_bind("t1", "c.txt");
         assert!(node.native_drag_cancelled(13, DragCancelReason::DraggedBackToLocal));
-        assert_eq!(node.native_drag_view(13).state, "cancel");
+        assert_eq!(node.native_drag_view(13, None).state, "cancel");
         land(&node, "t1", b"c");
         assert!(node
             .shared
@@ -780,8 +877,8 @@ mod tests {
             .join("inbox")
             .join("c.txt")
             .exists());
-        assert_eq!(node.native_drag_view(99).state, "cancel");
-        assert!(!node.native_drag_report(99, "dropped"));
+        assert_eq!(node.native_drag_view(99, None).state, "cancel");
+        assert!(!node.native_drag_report(99, None, "dropped"));
         // A pull that raced the return re-announces 13: stale, not a new carry.
         assert!(node.native_drag_is_stale_enter(13));
         assert!(!node.native_drag_is_stale_enter(14));
@@ -794,7 +891,7 @@ mod tests {
         let (node, _dir) = temp_test_node("native_legacy");
         let p = peer();
         assert!(node.native_drag_install(&p, 16, 1, node.now_ms()));
-        assert!(node.native_drag_report(16, "released"));
+        assert!(node.native_drag_report(16, None, "released"));
         assert!(!node.is_native_drag(16));
         assert!(node.claim_drag_offer(&p, "t1"), "offer still claimed");
         node.native_drag_bind("t1", "late.txt");
@@ -813,7 +910,7 @@ mod tests {
         assert!(!node.native_drag_refresh(15, 3));
         assert!(node.native_drag_confirmed(14));
         assert!(!node.native_drag_confirmed(15));
-        assert!(node.native_drag_view(14).released);
+        assert!(node.native_drag_view(14, None).released);
         assert!(!node.native_drag_delivered("unrelated"));
     }
 }

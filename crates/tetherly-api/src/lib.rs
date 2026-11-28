@@ -734,6 +734,12 @@ pub struct NativeDragRequest {
     /// `cancelled` | `failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// v0.4.1: the helper's spawn nonce (`--session`). A helper whose
+    /// session is not the drag's current one was superseded: its poll
+    /// reads `cancel` and its result is not counted. Absent = any helper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional, type = "number"))]
+    pub session: Option<u64>,
 }
 
 /// Reply to `POST /api/v1/drag/native/poll`.

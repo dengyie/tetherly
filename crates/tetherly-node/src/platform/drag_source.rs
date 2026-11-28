@@ -19,9 +19,14 @@
 //! - The data object offers only `DROPEFFECT_COPY` of daemon-published paths.
 //! - A drop is only released once every file is complete on disk.
 //! - The helper always reports, so the daemon never waits on a dead child.
+//! - One helper serves a drag: each spawn carries a session nonce, and a
+//!   superseded helper reads `cancel` and is not counted (v0.4.1).
+//! - `DoDragDrop` only consults `QueryContinueDrag` on input; a decision
+//!   that arrives without input (cancel, or the bytes landing after the
+//!   release) wakes the loop with a posted `WM_MOUSEMOVE` (v0.4.1).
 
 #[cfg(windows)]
-pub fn spawn_drag_source(ui_port: u16, drag_id: u64) -> Result<(), String> {
+pub fn spawn_drag_source(ui_port: u16, drag_id: u64, session: u64) -> Result<(), String> {
     crate::platform::drag_probe::spawn_helper(
         ui_port,
         &[
@@ -30,12 +35,14 @@ pub fn spawn_drag_source(ui_port: u16, drag_id: u64) -> Result<(), String> {
             ui_port.to_string(),
             "--drag-id".into(),
             drag_id.to_string(),
+            "--session".into(),
+            session.to_string(),
         ],
     )
 }
 
 #[cfg(not(windows))]
-pub fn spawn_drag_source(_ui_port: u16, _drag_id: u64) -> Result<(), String> {
+pub fn spawn_drag_source(_ui_port: u16, _drag_id: u64, _session: u64) -> Result<(), String> {
     Err("native drag source is Windows-only".into())
 }
 
@@ -59,6 +66,39 @@ pub(crate) fn hdrop_bytes(paths: &[String]) -> Vec<u8> {
     out
 }
 
+/// What the OLE loop has done, shared with the poller (wake) and the
+/// watchdog (diagnosis of a wedged loop).
+#[derive(Debug, Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Ticks {
+    /// `DoDragDrop` is running on the main thread.
+    in_loop: std::sync::atomic::AtomicBool,
+    /// `QueryContinueDrag` calls so far.
+    calls: std::sync::atomic::AtomicU32,
+    /// When the last call happened (ms since the helper started).
+    last_ms: std::sync::atomic::AtomicU64,
+    /// `WM_MOUSEMOVE` wakes posted to the loop.
+    wakes: std::sync::atomic::AtomicU32,
+}
+
+/// The daemon decided something `QueryContinueDrag` must act on even when
+/// no input arrives: end the drag, or drop a release that waited on bytes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn needs_wake(state: &str, released: bool) -> bool {
+    matches!(state, "cancel" | "failed") || (released && state == "ready")
+}
+
+/// The poll/result body; `session` 0 means "spawned without a session".
+#[cfg_attr(not(windows), allow(dead_code))]
+fn request_body(drag_id: u64, session: u64, outcome: Option<&str>) -> Vec<u8> {
+    serde_json::to_vec(&tetherly_api::NativeDragRequest {
+        drag_id,
+        outcome: outcome.map(str::to_string),
+        session: (session != 0).then_some(session),
+    })
+    .unwrap_or_default()
+}
+
 /// Last status the poller saw.
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -69,15 +109,19 @@ struct Status {
 }
 
 #[cfg(windows)]
-pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
+pub fn run_drag_source_process(ui_port: u16, drag_id: u64, session: u64) -> i32 {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    let born = Instant::now();
     let status = Arc::new(Mutex::new(Status::default()));
+    let ticks = Arc::new(Ticks::default());
+    let main_thread = win::current_thread_id();
     let stop = Arc::new(AtomicBool::new(false));
     let poller = {
         let status = status.clone();
+        let ticks = ticks.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -86,8 +130,7 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
             else {
                 return;
             };
-            let body =
-                serde_json::to_vec(&serde_json::json!({ "drag_id": drag_id })).unwrap_or_default();
+            let body = request_body(drag_id, session, None);
             let mut failures = 0u32;
             while !stop.load(Ordering::Relaxed) {
                 let res = rt.block_on(tetherly_loopback::loopback_post(
@@ -120,6 +163,14 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
                         }
                     }
                 }
+                let wake = {
+                    let st = status.lock().expect("status");
+                    needs_wake(&st.state, st.released)
+                };
+                if wake && ticks.in_loop.load(Ordering::SeqCst) && win::wake_drag_loop(main_thread)
+                {
+                    ticks.wakes.fetch_add(1, Ordering::Relaxed);
+                }
                 std::thread::sleep(poll_interval(ready));
             }
         })
@@ -130,6 +181,7 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
     let finished = Arc::new(AtomicBool::new(false));
     {
         let status = status.clone();
+        let ticks = ticks.clone();
         let finished = finished.clone();
         std::thread::spawn(move || {
             let started = Instant::now();
@@ -160,8 +212,20 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
                     } else {
                         "failed"
                     };
-                    tracing::warn!(drag_id, why, outcome, "drag source watchdog: exiting");
-                    std::process::exit(post_result(ui_port, drag_id, outcome).max(3));
+                    let calls = ticks.calls.load(Ordering::Relaxed);
+                    let idle_ms = (born.elapsed().as_millis() as u64)
+                        .saturating_sub(ticks.last_ms.load(Ordering::Relaxed));
+                    tracing::warn!(
+                        drag_id,
+                        why,
+                        outcome,
+                        in_loop = ticks.in_loop.load(Ordering::SeqCst),
+                        qcd_calls = calls,
+                        qcd_idle_ms = idle_ms,
+                        wakes = ticks.wakes.load(Ordering::Relaxed),
+                        "drag source watchdog: exiting"
+                    );
+                    std::process::exit(post_result(ui_port, drag_id, session, outcome).max(3));
                 }
             }
         });
@@ -195,15 +259,22 @@ pub fn run_drag_source_process(ui_port: u16, drag_id: u64) -> i32 {
                 // Released before the drag could start: nothing to hold.
                 "released"
             } else {
-                win::run_drag(st.paths, status.clone())
+                win::run_drag(st.paths, status.clone(), ticks.clone(), born)
             }
         }
     };
     finished.store(true, Ordering::SeqCst);
     stop.store(true, Ordering::Relaxed);
     let _ = poller.join();
-    tracing::info!(drag_id, outcome, "drag source finished");
-    post_result(ui_port, drag_id, outcome)
+    tracing::info!(
+        drag_id,
+        outcome,
+        qcd_calls = ticks.calls.load(Ordering::Relaxed),
+        wakes = ticks.wakes.load(Ordering::Relaxed),
+        alive_ms = born.elapsed().as_millis() as u64,
+        "drag source finished"
+    );
+    post_result(ui_port, drag_id, session, outcome)
 }
 
 /// How long a cancelled/failed drag may keep the helper alive before the
@@ -253,8 +324,8 @@ fn retry_drag(state: &str, elapsed: std::time::Duration) -> bool {
 
 /// Report the outcome to the daemon; the process exit code.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn post_result(ui_port: u16, drag_id: u64, outcome: &str) -> i32 {
-    let body = serde_json::json!({ "drag_id": drag_id, "outcome": outcome });
+fn post_result(ui_port: u16, drag_id: u64, session: u64, outcome: &str) -> i32 {
+    let body = request_body(drag_id, session, Some(outcome));
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -264,9 +335,15 @@ fn post_result(ui_port: u16, drag_id: u64, outcome: &str) -> i32 {
     match rt.block_on(tetherly_loopback::loopback_post(
         ui_port,
         "/api/v1/drag/native/result",
-        &serde_json::to_vec(&body).unwrap_or_default(),
+        &body,
     )) {
         Ok((code, _)) if code < 300 => 0,
+        Ok((404, _)) => {
+            // Superseded, or the daemon settled the drag without us
+            // (carried back, peer gone): nothing is waiting on this result.
+            tracing::info!(drag_id, outcome, "drag source result not needed");
+            0
+        }
         Ok((code, _)) => {
             tracing::warn!(code, "drag source result refused");
             1
@@ -280,8 +357,9 @@ fn post_result(ui_port: u16, drag_id: u64, outcome: &str) -> i32 {
 
 #[cfg(windows)]
 mod win {
-    use super::Status;
+    use super::{Status, Ticks};
     use std::cell::Cell;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use windows::core::{implement, HRESULT};
     use windows::Win32::Foundation::{
@@ -307,12 +385,12 @@ mod win {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetSystemMetrics,
-        KillTimer, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassW,
+        KillTimer, MsgWaitForMultipleObjects, PeekMessageW, PostThreadMessageW, RegisterClassW,
         SetLayeredWindowAttributes, SetTimer, ShowWindow, TranslateMessage, LWA_ALPHA,
         MA_NOACTIVATE, MSG, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
         SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, WM_LBUTTONDOWN,
-        WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_POPUP,
+        WM_MOUSEACTIVATE, WM_MOUSEMOVE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     const CF_HDROP: u16 = 15;
@@ -434,15 +512,37 @@ mod win {
         }
     }
 
+    /// The calling thread's id (the OLE main thread, for [`wake_drag_loop`]).
+    pub(super) fn current_thread_id() -> u32 {
+        unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() }
+    }
+
+    /// Make `DoDragDrop` on `thread` call `QueryContinueDrag` now: its
+    /// modal loop only consults the source on mouse/keyboard messages (the
+    /// hidden window's `WM_TIMER` does not count), so with the pointer at
+    /// rest a cancel or a ready drop waited for the user's next nudge
+    /// (field: a superseded helper held the OLE drag 2.7 s and the next
+    /// drag hit E_FAIL). The message goes to our own queue only: no input
+    /// is injected into the desktop.
+    pub(super) fn wake_drag_loop(thread: u32) -> bool {
+        unsafe { PostThreadMessageW(thread, WM_MOUSEMOVE, 0, 0) != 0 }
+    }
+
     #[implement(IDropSource)]
     struct Source {
         status: Arc<Mutex<Status>>,
+        ticks: Arc<Ticks>,
+        born: std::time::Instant,
         /// Why the drag was cancelled, when it was.
         reason: Arc<Mutex<Option<&'static str>>>,
     }
 
     impl IDropSource_Impl for Source_Impl {
         fn QueryContinueDrag(&self, esc: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
+            self.ticks.calls.fetch_add(1, Ordering::Relaxed);
+            self.ticks
+                .last_ms
+                .store(self.born.elapsed().as_millis() as u64, Ordering::Relaxed);
             if esc.as_bool() {
                 *self.reason.lock().expect("reason") = Some("esc");
                 return DRAGDROP_S_CANCEL;
@@ -551,17 +651,27 @@ mod win {
     }
 
     /// Run the drag; returns the outcome token for the daemon.
-    pub(super) fn run_drag(paths: Vec<String>, status: Arc<Mutex<Status>>) -> &'static str {
+    pub(super) fn run_drag(
+        paths: Vec<String>,
+        status: Arc<Mutex<Status>>,
+        ticks: Arc<Ticks>,
+        born: std::time::Instant,
+    ) -> &'static str {
         if unsafe { OleInitialize(None) }.is_err() {
             tracing::warn!("drag source: OleInitialize refused");
             return "failed";
         }
-        let outcome = run_inner(paths, status);
+        let outcome = run_inner(paths, status, ticks, born);
         unsafe { OleUninitialize() };
         outcome
     }
 
-    fn run_inner(paths: Vec<String>, status: Arc<Mutex<Status>>) -> &'static str {
+    fn run_inner(
+        paths: Vec<String>,
+        status: Arc<Mutex<Status>>,
+        ticks: Arc<Ticks>,
+        born: std::time::Instant,
+    ) -> &'static str {
         let class = wide("TetherlyDragSource");
         let title = wide("");
         let wc = WNDCLASSW {
@@ -622,6 +732,8 @@ mod win {
         .into();
         let source: IDropSource = Source {
             status: status.clone(),
+            ticks: ticks.clone(),
+            born,
             reason: reason.clone(),
         }
         .into();
@@ -654,7 +766,9 @@ mod win {
             );
             unsafe { ShowWindow(hwnd, SW_HIDE) };
             let mut effect = DROPEFFECT_NONE;
+            ticks.in_loop.store(true, Ordering::SeqCst);
             let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
+            ticks.in_loop.store(false, Ordering::SeqCst);
             if hr == DRAGDROP_S_DROP && effect != DROPEFFECT_NONE {
                 break "dropped";
             }
@@ -697,10 +811,33 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::{
-        hdrop_bytes, poll_interval, retry_drag, watchdog_verdict, DRAG_RETRY_BUDGET,
-        WATCHDOG_LIFETIME_CAP, WATCHDOG_TERMINAL_GRACE,
+        hdrop_bytes, needs_wake, poll_interval, request_body, retry_drag, watchdog_verdict,
+        DRAG_RETRY_BUDGET, WATCHDOG_LIFETIME_CAP, WATCHDOG_TERMINAL_GRACE,
     };
     use std::time::Duration;
+
+    /// Only a decision the OLE loop must act on wakes it, never a held
+    /// drag: the posted move carries no button state, so OLE may read it
+    /// as a release and a ready drag would drop under a held button.
+    #[test]
+    fn the_drag_loop_is_woken_only_for_a_pending_decision() {
+        assert!(needs_wake("cancel", false));
+        assert!(needs_wake("failed", false));
+        assert!(needs_wake("ready", true), "release waited on the bytes");
+        assert!(!needs_wake("ready", false), "still held");
+        assert!(!needs_wake("pending", true), "bytes still arriving");
+        assert!(!needs_wake("", false));
+    }
+
+    #[test]
+    fn requests_carry_the_session_only_when_spawned_with_one() {
+        let with: tetherly_api::NativeDragRequest =
+            serde_json::from_slice(&request_body(7, 42, Some("dropped"))).unwrap();
+        assert_eq!(with.session, Some(42));
+        assert_eq!(with.outcome.as_deref(), Some("dropped"));
+        let bare = String::from_utf8(request_body(7, 0, None)).unwrap();
+        assert_eq!(bare, r#"{"drag_id":7}"#);
+    }
 
     #[test]
     fn watchdog_reaps_only_ended_or_overlong_drags() {

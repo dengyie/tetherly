@@ -158,7 +158,13 @@ export type NativeDragRequest = { drag_id: number,
  * Result only: `dropped` | `missed` | `esc` | `released` |
  * `cancelled` | `failed`.
  */
-outcome?: string | null, };
+outcome?: string | null,
+/**
+ * v0.4.1: the helper's spawn nonce (`--session`). A helper whose
+ * session is not the drag's current one was superseded: its poll
+ * reads `cancel` and its result is not counted. Absent = any helper.
+ */
+session?: number, };
 
 export type NativeDragStatus = {
 /**

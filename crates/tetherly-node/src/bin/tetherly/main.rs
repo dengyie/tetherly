@@ -233,9 +233,15 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     #[cfg(windows)]
-    if let Cmd::DragSource { ui_port, drag_id } = &cli.cmd {
-        let code =
-            tetherly_node::platform::drag_source::run_drag_source_process(*ui_port, *drag_id);
+    if let Cmd::DragSource {
+        ui_port,
+        drag_id,
+        session,
+    } = &cli.cmd
+    {
+        let code = tetherly_node::platform::drag_source::run_drag_source_process(
+            *ui_port, *drag_id, *session,
+        );
         std::process::exit(code);
     }
 
