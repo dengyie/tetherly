@@ -413,6 +413,19 @@ async fn a_folder_arrives_as_a_folder() {
     wait_live(&a, Duration::from_secs(45)).await;
     wait_live(&b, Duration::from_secs(45)).await;
 
+    // v0.4.1: wait for the caps update so the folder takes the streamed
+    // path (`filestream`), not the packed fallback.
+    let start = std::time::Instant::now();
+    while !a
+        .live_peers()
+        .iter()
+        .any(|p| p.caps.iter().any(|c| c == tetherly_core::FILE_STREAM_CAP))
+    {
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("filestream cap never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let src = std::path::Path::new(&a_dir).join("src").join("muse ext");
     std::fs::create_dir_all(src.join("icons/16")).unwrap();
     std::fs::create_dir_all(src.join("empty")).unwrap();
@@ -422,6 +435,10 @@ async fn a_folder_arrives_as_a_folder() {
     let peer_b = b.identity().device_id().clone();
     let id = a.offer_and_send_folder(&peer_b, &src).await.unwrap();
     wait_offered(&b, Duration::from_secs(3)).await;
+    assert!(
+        b.offered_files()[0].files[0].sha256_trailer,
+        "a capable peer gets the streamed offer"
+    );
     b.user_accept_file(&id).await.unwrap();
     let got = wait_inbox(&b_dir, "muse ext/icons/16/a.png", Duration::from_secs(20)).await;
     assert_eq!(got, vec![7u8; 300_000]);
@@ -480,6 +497,7 @@ async fn an_oversized_offer_is_refused_without_dropping_the_session() {
             size: tetherly_core::FILE_MAX + 1,
             sha256: "d".repeat(64),
             bundle: None,
+            sha256_trailer: false,
         }],
     };
     a.send_to(&peer_b, oversized.to_frame().unwrap())

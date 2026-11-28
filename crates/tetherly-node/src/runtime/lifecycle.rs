@@ -553,6 +553,8 @@ impl Node {
                 s.insert(tetherly_core::drag::DRAG_PULL_CAP.to_string());
                 // v0.3.3: drag handoff sends folders (as tar bundles).
                 s.insert(tetherly_core::drag::DRAG_DIR_CAP.to_string());
+                // v0.4.1: receives digest-trailer (streamed) transfers.
+                s.insert(tetherly_core::FILE_STREAM_CAP.to_string());
                 s.insert("handoff".to_string());
                 s.insert("media".to_string());
                 s.insert("power".to_string());

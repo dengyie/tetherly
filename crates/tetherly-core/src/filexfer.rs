@@ -165,6 +165,7 @@ impl FileHub {
                 sha256: f.sha256.to_ascii_lowercase(),
                 // Unknown packings are delivered as plain files.
                 bundle: f.bundle.filter(|b| b == BUNDLE_DIR_TAR),
+                sha256_trailer: f.sha256_trailer,
             });
         }
         // Repeated control frames are normal around reconnects. Admit an exact
@@ -354,7 +355,16 @@ impl FileHub {
             .collect::<Vec<_>>()
             .join(",");
         if t.files.len() == 1 {
-            if t.files[0].sha256 != done.sha256.to_ascii_lowercase() {
+            let f = &mut t.files[0];
+            let got = done.sha256.to_ascii_lowercase();
+            if f.sha256_trailer {
+                // The offer carried a placeholder; the receiver verified the
+                // data against the sealed trailer and reports that digest.
+                if got.len() != 64 || !got.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(CoreError::Sha256Mismatch);
+                }
+                f.sha256 = got;
+            } else if f.sha256 != got {
                 return Err(CoreError::Sha256Mismatch);
             }
         } else if expected != done.sha256.to_ascii_lowercase() && done.sha256.len() != 64 {
@@ -415,6 +425,7 @@ mod tests {
                 size: 10,
                 sha256: "a".repeat(64),
                 bundle: None,
+                sha256_trailer: false,
             }],
         }
     }
@@ -445,6 +456,47 @@ mod tests {
         let mut o = offer("a.txt");
         o.transfer_id = "tr_0123abcdEF-x".into();
         hub.offer(src, o, 1).unwrap();
+    }
+
+    /// v0.4.1: a trailer offer carries a placeholder digest; completion
+    /// takes the receiver's verified digest (still well-formed hex), while a
+    /// normal offer keeps the strict equality check.
+    #[test]
+    fn trailer_offer_completes_with_the_verified_digest() {
+        let src = DeviceId::from_id_pk(&[4u8; 32]);
+        let mut hub = FileHub::default();
+        let mut o = offer("proj.tar");
+        o.files[0].sha256 = crate::SHA256_TRAILER_PLACEHOLDER.into();
+        o.files[0].sha256_trailer = true;
+        hub.offer(src.clone(), o, 1).unwrap();
+        hub.accept("tr_1", 2).unwrap();
+        let bad = FileDone {
+            transfer_id: "tr_1".into(),
+            sha256: "not-hex".into(),
+        };
+        assert!(matches!(
+            hub.mark_done(&bad),
+            Err(CoreError::Sha256Mismatch)
+        ));
+        let done = hub
+            .mark_done(&FileDone {
+                transfer_id: "tr_1".into(),
+                sha256: "B".repeat(64),
+            })
+            .unwrap();
+        assert_eq!(done.files[0].sha256, "b".repeat(64));
+
+        let mut hub = FileHub::default();
+        hub.offer(src, offer("a.bin"), 1).unwrap();
+        hub.accept("tr_1", 2).unwrap();
+        let other = FileDone {
+            transfer_id: "tr_1".into(),
+            sha256: "b".repeat(64),
+        };
+        assert!(matches!(
+            hub.mark_done(&other),
+            Err(CoreError::Sha256Mismatch)
+        ));
     }
 
     #[test]
@@ -532,6 +584,7 @@ mod tests {
                 size: 1,
                 sha256: "b".repeat(64),
                 bundle: None,
+                sha256_trailer: false,
             }],
         };
         assert_eq!(
@@ -551,6 +604,7 @@ mod tests {
                 size,
                 sha256: "c".repeat(64),
                 bundle: None,
+                sha256_trailer: false,
             }],
         };
         // One byte over the cap is refused; the cap itself is allowed.
@@ -572,6 +626,7 @@ mod tests {
                 size,
                 sha256: "d".repeat(64),
                 bundle: None,
+                sha256_trailer: false,
             }],
         };
         assert!(hub
@@ -600,6 +655,7 @@ mod tests {
                 size: 10,
                 sha256: "e".repeat(64),
                 bundle: None,
+                sha256_trailer: false,
             }],
         };
         hub.offer(src.clone(), sized("tr_1"), 1).unwrap();

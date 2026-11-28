@@ -314,7 +314,7 @@ impl Node {
             debug!(transfer = %transfer_id, "deduplicated transfer: header-only data channel");
             return Ok(());
         }
-        let (accepted, source, size, resume_hint, name, expected, is_bundle) = {
+        let (accepted, source, size, resume_hint, name, mut expected, is_bundle, trailer) = {
             let hubs = self.shared.hubs.lock().expect("hubs");
             let t = hubs
                 .files
@@ -335,6 +335,7 @@ impl Node {
                     .unwrap_or_default(),
                 t.files.first().and_then(|f| f.bundle.as_deref())
                     == Some(tetherly_core::BUNDLE_DIR_TAR),
+                t.files.first().is_some_and(|f| f.sha256_trailer),
             )
         };
         if !accepted {
@@ -451,22 +452,35 @@ impl Node {
 
         let node = self.clone_handle();
         let tid = transfer_id.clone();
-        let recv_fut = tetherly_net::filechan::recv_chunks_to_sink(
-            &mut stream,
-            &mut part_file,
-            &token,
-            &transfer_id,
-            total,
-            start,
-            tetherly_core::FILE_MAX,
-            hasher,
-            |chan_offset, chunk_len| {
-                written = chan_offset + chunk_len as u64;
-                node.update_transfer_progress(&tid, written);
-                node.shared.telemetry.record_file_rx(chunk_len as u64);
-                Ok(())
-            },
-        );
+        // v0.4.1: a streamed folder's digest follows its data, sealed under
+        // the same session key; it becomes the value the data must match.
+        let expected_ref = &mut expected;
+        let recv_fut = async {
+            let digest = tetherly_net::filechan::recv_chunks_to_sink(
+                &mut stream,
+                &mut part_file,
+                &token,
+                &transfer_id,
+                total,
+                start,
+                tetherly_core::FILE_MAX,
+                hasher,
+                |chan_offset, chunk_len| {
+                    written = chan_offset + chunk_len as u64;
+                    node.update_transfer_progress(&tid, written);
+                    node.shared.telemetry.record_file_rx(chunk_len as u64);
+                    Ok(())
+                },
+            )
+            .await?;
+            if trailer {
+                let sealed =
+                    tetherly_net::filechan::recv_digest_trailer(&mut stream, &token, &transfer_id)
+                        .await?;
+                *expected_ref = tetherly_core::hex_lower(&sealed);
+            }
+            Ok::<_, tetherly_net::NetError>(digest)
+        };
         // Test-only: bound the receive window so stalled-peer integration tests
         // drive the real error path below in milliseconds. The value maps to
         // the same `NetError::Timeout` filechan's per-chunk deadline produces,
@@ -1320,6 +1334,7 @@ impl Node {
                 size: data.len() as u64,
                 sha256: digest.clone(),
                 bundle: None,
+                sha256_trailer: false,
             }],
         };
         self.shared.pending_out.lock().expect("pending").insert(
@@ -1460,21 +1475,74 @@ impl Node {
             .map_err(|e| CoreError::File(format!("hash task panicked: {e}")))??,
         };
         let transfer_id = format!("tr_{}", &digest[..16]);
+        let meta = tetherly_core::FileMeta {
+            name: safe_name,
+            size,
+            sha256: digest,
+            bundle: bundle.map(str::to_string),
+            sha256_trailer: false,
+        };
+        let source_path = path.to_string_lossy().to_string();
+        self.register_outbound_offer(
+            peer,
+            transfer_id,
+            meta,
+            OutboundSource::Path(path),
+            Some(source_path),
+        )
+        .await
+    }
+
+    /// v0.4.1: offer the folder `scan` was taken of as a tar generated while
+    /// it is sent — no staged copy, and the first byte goes out as soon as
+    /// the peer accepts. Only for peers with [`tetherly_core::FILE_STREAM_CAP`]:
+    /// the digest is unknown until the end, so it follows the data as a
+    /// sealed trailer. The transfer id derives from the tree's fingerprint,
+    /// so re-offering an unchanged folder resumes.
+    pub(crate) async fn offer_and_stream_folder(
+        &self,
+        peer: &DeviceId,
+        folder: &str,
+        scan: std::sync::Arc<super::bundle::DirScan>,
+    ) -> Result<String, CoreError> {
+        let safe = tetherly_core::sanitize_file_name(folder)?;
+        let name = format!("{safe}{}", super::bundle::TAR_SUFFIX);
+        let transfer_id = format!("tr_{}", &scan.fingerprint[..16]);
+        let meta = tetherly_core::FileMeta {
+            name,
+            size: scan.total,
+            sha256: tetherly_core::SHA256_TRAILER_PLACEHOLDER.to_string(),
+            bundle: Some(tetherly_core::BUNDLE_DIR_TAR.to_string()),
+            sha256_trailer: true,
+        };
+        // No source path: an outbox resend re-offers files, not folders.
+        self.register_outbound_offer(peer, transfer_id, meta, OutboundSource::Dir(scan), None)
+            .await
+    }
+
+    /// Record an outbound offer (pending source, active transfer, outbox
+    /// entry) and send it to `peer`.
+    async fn register_outbound_offer(
+        &self,
+        peer: &DeviceId,
+        transfer_id: String,
+        meta: tetherly_core::FileMeta,
+        source: OutboundSource,
+        source_path: Option<String>,
+    ) -> Result<String, CoreError> {
+        let safe_name = meta.name.clone();
+        let size = meta.size;
+        let digest = meta.sha256.clone();
         let offer = FileOffer {
             transfer_id: transfer_id.clone(),
-            files: vec![tetherly_core::FileMeta {
-                name: safe_name.clone(),
-                size,
-                sha256: digest.clone(),
-                bundle: bundle.map(str::to_string),
-            }],
+            files: vec![meta],
         };
         self.shared.pending_out.lock().expect("pending").insert(
             transfer_id.clone(),
             OutboundFile {
                 peer: peer.clone(),
                 name: safe_name.clone(),
-                source: OutboundSource::Path(path.to_path_buf()),
+                source,
                 size,
             },
         );
@@ -1515,7 +1583,7 @@ impl Node {
                 filename: safe_name.clone(),
                 size,
                 sha256: digest,
-                source_path: Some(path.to_string_lossy().to_string()),
+                source_path,
                 status: OutboxStatus::InFlight,
                 error: None,
                 started_ms: now,
@@ -1627,6 +1695,7 @@ impl Node {
                     size,
                     sha256: digest.clone(),
                     bundle: None,
+                    sha256_trailer: false,
                 }],
             };
 
@@ -1826,6 +1895,7 @@ impl Node {
                     size,
                     sha256: digest.clone(),
                     bundle: None,
+                    sha256_trailer: false,
                 }],
             };
 
@@ -2249,7 +2319,9 @@ impl Node {
             }
 
             let now = self.shared.clock.unix_ms();
-            if start == outbound.size && start > 0 {
+            // A streamed folder still sends its digest trailer.
+            let streamed = matches!(outbound.source, OutboundSource::Dir(_));
+            if start == outbound.size && start > 0 && !streamed {
                 // v0.3.1: the receiver already holds this content (dedupe);
                 // nothing to send.
                 t.transferred = start;
@@ -2342,6 +2414,10 @@ impl Node {
                         node.send_file_data(addr, file_port, &token, &tid, outbound.size, start, b)
                             .await
                     }
+                    OutboundSource::Dir(scan) => {
+                        node.send_dir_stream(addr, file_port, &token, &tid, scan, start)
+                            .await
+                    }
                 }
             };
 
@@ -2372,6 +2448,73 @@ impl Node {
                 }
             }
         });
+    }
+
+    /// v0.4.1: send the folder tar of `scan` from `start` as it is
+    /// generated, then the digest trailer. The generator runs ahead on a
+    /// blocking thread; on a resume it re-hashes the prefix before the data
+    /// channel opens. A folder changed since the scan aborts without a
+    /// trailer, so the receiver never accepts it.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_dir_stream(
+        &self,
+        peer_addr: SocketAddr,
+        file_port: u16,
+        token: &[u8; 32],
+        transfer_id: &str,
+        scan: std::sync::Arc<super::bundle::DirScan>,
+        start: u64,
+    ) -> Result<(), tetherly_net::NetError> {
+        use tetherly_net::NetError;
+        let total = scan.total;
+        let (mut reader, generator) = super::bundle::spawn_dir_stream(scan, start);
+        reader.prime().await;
+        let dest = SocketAddr::new(peer_addr.ip(), file_port);
+        let mut stream = tokio::time::timeout(FILE_CONNECT_TIMEOUT, TcpStream::connect(dest))
+            .await
+            .map_err(|_| NetError::Timeout)??;
+        let node_prog = self.clone_handle();
+        let tid_prog = transfer_id.to_string();
+        let sent = tetherly_net::filechan::send_stream_from_with_progress(
+            &mut reader,
+            &mut stream,
+            token,
+            transfer_id,
+            total,
+            start,
+            move |offset, len| {
+                node_prog.update_transfer_progress(&tid_prog, offset + len as u64);
+                node_prog.shared.telemetry.record_file_tx(len as u64);
+                Ok(())
+            },
+        )
+        .await;
+        // Stops the generator if the channel failed first.
+        drop(reader);
+        let generated = generator
+            .await
+            .map_err(|e| std::io::Error::other(format!("folder stream task failed: {e}")))
+            .and_then(|r| r);
+        match (sent, generated) {
+            (Ok(()), Ok(digest)) => {
+                tetherly_net::filechan::send_digest_trailer(
+                    &mut stream,
+                    token,
+                    transfer_id,
+                    &digest,
+                )
+                .await?;
+                use tokio::io::AsyncWriteExt;
+                stream.flush().await?;
+                Ok(())
+            }
+            // The channel failed and the generator merely saw its reader go.
+            (Err(e), Err(g)) if g.kind() == std::io::ErrorKind::BrokenPipe => Err(e),
+            (Err(e), Ok(_)) => Err(e),
+            // The generator failed (a file changed, unreadable): that is the
+            // cause; any channel error is its consequence (early EOF).
+            (_, Err(g)) => Err(NetError::File(g.to_string())),
+        }
     }
 
     /// Send file bytes from `start` (the resume offset) to the end of `data`,
@@ -2977,6 +3120,7 @@ mod inbound_stall_tests {
                             size: total,
                             sha256: "a".repeat(64),
                             bundle: None,
+                            sha256_trailer: false,
                         }],
                     },
                     now,
@@ -3075,6 +3219,253 @@ mod inbound_stall_tests {
     }
 }
 
+/// v0.4.1: a folder streamed as it is generated, with its digest as a
+/// trailer — the real sender (`send_dir_stream`) against the real receiver
+/// (`accept_file`) over loopback TCP.
+#[cfg(test)]
+mod stream_folder_tests {
+    use super::*;
+    use crate::runtime::bundle::{pack_dir, scan_dir, DirScan};
+    use std::sync::Arc;
+    use tetherly_core::InnerFrame;
+
+    struct Rig {
+        rx: Node,
+        tx: Node,
+        dirs: Vec<std::path::PathBuf>,
+        peer: DeviceId,
+        handshake: [u8; 32],
+    }
+
+    async fn rig(tag: &str) -> Rig {
+        let (rx, rx_dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node(&format!("{tag}-rx"));
+        let (tx, tx_dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node(&format!("{tag}-tx"));
+        let peer = DeviceId::from_id_pk(&[61u8; 32]);
+        let handshake = [6u8; 32];
+        let (chan, _rx) = tokio::sync::mpsc::channel::<InnerFrame>(4);
+        std::mem::forget(_rx);
+        rx.register_session(
+            LivePeer {
+                device_id: peer.clone(),
+                name: "stream-peer".into(),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: handshake,
+                file_port: None,
+                input_port: None,
+                screen_port: None,
+                caps: vec![tetherly_core::FILE_STREAM_CAP.to_string()],
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            },
+            chan,
+        )
+        .await;
+        Rig {
+            rx,
+            tx,
+            dirs: vec![rx_dir, tx_dir],
+            peer,
+            handshake,
+        }
+    }
+
+    fn make_folder(root: &std::path::Path) -> std::path::PathBuf {
+        let src = root.join("src").join("proj");
+        std::fs::create_dir_all(src.join("deep/er")).unwrap();
+        std::fs::create_dir_all(src.join("empty")).unwrap();
+        let big: Vec<u8> = (0..(3 * tetherly_core::FILE_CHUNK + 777))
+            .map(|i| (i % 253) as u8)
+            .collect();
+        std::fs::write(src.join("deep/er/big.bin"), &big).unwrap();
+        std::fs::write(src.join("note.txt"), b"streamed").unwrap();
+        src
+    }
+
+    /// Register and accept the streamed offer on the receiver.
+    fn offer(r: &Rig, scan: &DirScan, resume: Option<u64>) -> String {
+        let tid = format!("tr_{}", &scan.fingerprint[..16]);
+        let now = r.rx.shared.clock.unix_ms();
+        let mut hubs = r.rx.shared.hubs.lock().unwrap();
+        hubs.files
+            .offer_resumable(
+                r.peer.clone(),
+                FileOffer {
+                    transfer_id: tid.clone(),
+                    files: vec![tetherly_core::FileMeta {
+                        name: "proj.tar".into(),
+                        size: scan.total,
+                        sha256: tetherly_core::SHA256_TRAILER_PLACEHOLDER.into(),
+                        bundle: Some(tetherly_core::BUNDLE_DIR_TAR.into()),
+                        sha256_trailer: true,
+                    }],
+                },
+                now,
+                resume,
+            )
+            .unwrap();
+        hubs.files.accept(&tid, now).unwrap();
+        tid
+    }
+
+    /// Run sender and receiver against each other.
+    async fn run(
+        r: &Rig,
+        tid: &str,
+        scan: Arc<DirScan>,
+        start: u64,
+    ) -> (
+        Result<(), tetherly_net::NetError>,
+        Result<(), tetherly_net::NetError>,
+    ) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let token = tetherly_crypto::file_token(&r.handshake, tid.as_bytes());
+        let send =
+            r.tx.send_dir_stream(addr, addr.port(), &token, tid, scan, start);
+        let recv = async {
+            let (server, peer_addr) = listener.accept().await.unwrap();
+            r.rx.accept_file(server, peer_addr).await
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(send, recv)
+        })
+        .await
+        .expect("streamed transfer must finish")
+    }
+
+    fn assert_unpacked(inbox: &std::path::Path, src: &std::path::Path) {
+        assert_eq!(
+            std::fs::read(inbox.join("proj/deep/er/big.bin")).unwrap(),
+            std::fs::read(src.join("deep/er/big.bin")).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(inbox.join("proj/note.txt")).unwrap(),
+            b"streamed"
+        );
+        assert!(inbox.join("proj/empty").is_dir());
+        let leftovers: Vec<_> = std::fs::read_dir(inbox)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".part") || n.ends_with(".unpack") || n.ends_with(".tar"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streamed_folder_arrives_verified_by_its_trailer() {
+        let r = rig("stream-full").await;
+        let src = make_folder(&r.dirs[1]);
+        let scan = Arc::new(scan_dir(&src).unwrap());
+        let tid = offer(&r, &scan, None);
+        let (sent, got) = run(&r, &tid, scan, 0).await;
+        sent.unwrap();
+        got.unwrap();
+        assert_unpacked(&r.rx.shared.cfg.data_dir.join("inbox"), &src);
+        for d in &r.dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// A resumed stream regenerates the tar, skips the prefix the receiver
+    /// holds, and the trailer still covers the whole tar.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streamed_folder_resumes_from_a_kept_prefix() {
+        let r = rig("stream-resume").await;
+        let src = make_folder(&r.dirs[1]);
+        let scan = Arc::new(scan_dir(&src).unwrap());
+        let tid = offer(&r, &scan, Some(2 * tetherly_core::FILE_CHUNK as u64));
+        let start =
+            r.rx.shared
+                .hubs
+                .lock()
+                .unwrap()
+                .files
+                .get(&tid)
+                .and_then(|t| t.resume_from)
+                .unwrap_or(0);
+        assert_eq!(start, 2 * tetherly_core::FILE_CHUNK as u64);
+        let tar = r.dirs[1].join("full.tar");
+        pack_dir(&src, &tar).unwrap();
+        let bytes = std::fs::read(&tar).unwrap();
+        let inbox = r.rx.shared.cfg.data_dir.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join(format!(".{tid}.part")), &bytes[..start as usize]).unwrap();
+
+        let (sent, got) = run(&r, &tid, scan, start).await;
+        sent.unwrap();
+        got.unwrap();
+        assert_unpacked(&inbox, &src);
+        for d in &r.dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// A kept prefix that does not match the regenerated tar fails the
+    /// trailer check instead of installing a corrupt folder.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_corrupt_prefix_fails_the_trailer_check() {
+        let r = rig("stream-corrupt").await;
+        let src = make_folder(&r.dirs[1]);
+        let scan = Arc::new(scan_dir(&src).unwrap());
+        let start = tetherly_core::FILE_CHUNK as u64;
+        let tid = offer(&r, &scan, Some(start));
+        let inbox = r.rx.shared.cfg.data_dir.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(
+            inbox.join(format!(".{tid}.part")),
+            vec![0xAAu8; start as usize],
+        )
+        .unwrap();
+
+        let (sent, got) = run(&r, &tid, scan, start).await;
+        sent.unwrap();
+        assert!(got.is_err(), "corrupt prefix must not verify");
+        assert!(!inbox.join("proj").exists());
+        let t = r.rx.transfer_by_id(&tid).unwrap();
+        assert_eq!(t.phase, TransferPhase::Failed);
+        assert_eq!(t.error.as_deref(), Some("sha256 mismatch"));
+        for d in &r.dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// A folder edited after the scan aborts the stream without a trailer;
+    /// the receiver never installs it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_folder_changed_after_the_scan_is_never_installed() {
+        let r = rig("stream-changed").await;
+        let src = make_folder(&r.dirs[1]);
+        let scan = Arc::new(scan_dir(&src).unwrap());
+        let tid = offer(&r, &scan, None);
+        std::fs::write(src.join("note.txt"), b"edited!!").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(src.join("note.txt"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let (sent, got) = run(&r, &tid, scan, 0).await;
+        match sent {
+            Err(tetherly_net::NetError::File(m)) => assert!(m.contains("修改"), "{m}"),
+            other => panic!("sender must report the change, got {other:?}"),
+        }
+        assert!(got.is_err());
+        assert!(!r.rx.shared.cfg.data_dir.join("inbox/proj").exists());
+        for d in &r.dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
 #[cfg(test)]
 mod dedupe_tests {
     use super::*;
@@ -3134,6 +3525,7 @@ mod dedupe_tests {
                             size: total,
                             sha256: sha(&body),
                             bundle: None,
+                            sha256_trailer: false,
                         }],
                     },
                     node.shared.clock.unix_ms(),
@@ -3212,6 +3604,7 @@ mod dedupe_tests {
                             size: 4,
                             sha256: sha(b"bbbb"),
                             bundle: None,
+                            sha256_trailer: false,
                         }],
                     },
                     node.shared.clock.unix_ms(),

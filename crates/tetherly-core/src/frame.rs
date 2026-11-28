@@ -452,7 +452,20 @@ pub struct FileMeta {
     /// receivers ignore the field and keep the `.tar`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
+    /// v0.4.1: the payload is generated while it is sent (a streamed folder
+    /// tar), so `sha256` is a placeholder and the real digest follows the
+    /// data on the file channel (`filechan::send_digest_trailer`). Offered
+    /// only to peers advertising [`FILE_STREAM_CAP`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sha256_trailer: bool,
 }
+
+/// Peer capability: understands [`FileMeta::sha256_trailer`].
+pub const FILE_STREAM_CAP: &str = "filestream";
+
+/// The `sha256` of an offer whose digest travels as a trailer.
+pub const SHA256_TRAILER_PLACEHOLDER: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// [`FileMeta::bundle`] for a tarred folder.
 pub const BUNDLE_DIR_TAR: &str = "dir-tar";

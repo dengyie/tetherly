@@ -70,6 +70,7 @@ fn file_meta() -> impl Strategy<Value = FileMeta> {
         // does not validate, only `FileHub` does, so any string must round-trip.
         sha256: hash,
         bundle: None,
+        sha256_trailer: false,
     })
 }
 

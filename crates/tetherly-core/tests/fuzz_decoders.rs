@@ -117,6 +117,7 @@ fn corpus() -> Vec<Vec<u8>> {
                 size: 12345,
                 sha256: "ab".repeat(32),
                 bundle: None,
+                sha256_trailer: false,
             }],
         }
         .to_frame()

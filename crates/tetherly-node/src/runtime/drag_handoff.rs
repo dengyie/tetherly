@@ -175,6 +175,9 @@ fn carry_enter(drag_id: u64, files: &[PathBuf]) -> DragControlMsg {
             .iter()
             .take(HANDOFF_MAX_FILES)
             .filter_map(|p| std::fs::metadata(p).ok())
+            // A folder's own length is meaningless and walking it here
+            // would stall the carry; the refreshed enter has the real size.
+            .filter(|m| m.is_file())
             .map(|m| m.len())
             .sum(),
         first_file_name,
@@ -293,6 +296,65 @@ pub(crate) fn stage_drag_item(
             Err(e)
         }
     }
+}
+
+/// One dragged item ready to offer: staged, or (v0.4.1) a folder scanned
+/// for a streamed send that needs no staged copy.
+#[derive(Debug)]
+pub(crate) enum PreparedItem {
+    Staged(StagedItem),
+    Stream {
+        /// The folder's own (unsanitized) name.
+        folder: String,
+        scan: std::sync::Arc<super::bundle::DirScan>,
+    },
+}
+
+impl PreparedItem {
+    fn is_folder(&self) -> bool {
+        match self {
+            PreparedItem::Staged(i) => i.bundle.is_some(),
+            PreparedItem::Stream { .. } => true,
+        }
+    }
+
+    /// The name the receiver shows for it.
+    fn display_name(&self) -> String {
+        match self {
+            PreparedItem::Staged(i) if i.bundle.is_some() => super::bundle::folder_name(&i.name),
+            PreparedItem::Staged(i) => i.name.clone(),
+            PreparedItem::Stream { folder, .. } => folder.clone(),
+        }
+    }
+
+    /// Bytes on the wire.
+    fn size(&self) -> u64 {
+        match self {
+            PreparedItem::Staged(i) => std::fs::metadata(&i.path).map(|m| m.len()).unwrap_or(0),
+            PreparedItem::Stream { scan, .. } => scan.total,
+        }
+    }
+}
+
+/// Prepare one dragged item. With `stream` (the peer has
+/// [`tetherly_core::FILE_STREAM_CAP`]) a folder is only scanned — its tar is
+/// generated during the send — otherwise it is packed as [`stage_drag_item`].
+pub(crate) fn prepare_drag_item(
+    staging_root: &Path,
+    src: &Path,
+    now_ms: u64,
+    stream: bool,
+) -> Result<PreparedItem, String> {
+    if stream && src.is_dir() {
+        let raw = src.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
+        let folder = tetherly_core::sanitize_file_name(raw).map_err(|e| e.to_string())?;
+        let scan = super::bundle::scan_dir(src)?;
+        return Ok(PreparedItem::Stream {
+            folder,
+            scan: std::sync::Arc::new(scan),
+        });
+    }
+    stage_drag_item(staging_root, src, now_ms).map(PreparedItem::Staged)
 }
 
 fn sweep_stale_stages(drag_root: &Path, now_ms: u64) {
@@ -785,12 +847,29 @@ impl Node {
         let staging = self.send_staging_dir();
         let now = self.now_ms();
         let src = dir.to_path_buf();
-        let item = tokio::task::spawn_blocking(move || stage_drag_item(&staging, &src, now))
-            .await
-            .map_err(|e| tetherly_core::CoreError::File(e.to_string()))?
-            .map_err(tetherly_core::CoreError::File)?;
-        self.offer_and_send_file_as(peer, &item.path, Some(&item.name), item.bundle, item.sha256)
-            .await
+        let stream = self.peer_has_cap(peer, tetherly_core::FILE_STREAM_CAP);
+        let item =
+            tokio::task::spawn_blocking(move || prepare_drag_item(&staging, &src, now, stream))
+                .await
+                .map_err(|e| tetherly_core::CoreError::File(e.to_string()))?
+                .map_err(tetherly_core::CoreError::File)?;
+        self.offer_prepared(peer, item).await
+    }
+
+    async fn offer_prepared(
+        &self,
+        peer: &DeviceId,
+        item: PreparedItem,
+    ) -> Result<String, tetherly_core::CoreError> {
+        match item {
+            PreparedItem::Staged(i) => {
+                self.offer_and_send_file_as(peer, &i.path, Some(&i.name), i.bundle, i.sha256)
+                    .await
+            }
+            PreparedItem::Stream { folder, scan } => {
+                self.offer_and_stream_folder(peer, &folder, scan).await
+            }
+        }
     }
 
     /// `confirm == false` is the v0.3.0 pull: the button is still held, so
@@ -804,14 +883,15 @@ impl Node {
     ) {
         let staging = self.send_staging_dir();
         let now = self.now_ms();
-        type Staged = (StagedItem, u64);
+        let stream = self.peer_has_cap(peer, tetherly_core::FILE_STREAM_CAP);
+        type Staged = (PreparedItem, u64);
         let staged: Vec<Result<Staged, String>> = tokio::task::spawn_blocking(move || {
             paths
                 .into_iter()
                 .take(HANDOFF_MAX_FILES)
                 .map(|src| {
-                    let item = stage_drag_item(&staging, &src, now)?;
-                    let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+                    let item = prepare_drag_item(&staging, &src, now, stream)?;
+                    let size = item.size();
                     Ok((item, size))
                 })
                 .collect()
@@ -848,13 +928,10 @@ impl Node {
             drag_id,
             file_count: ok.len() as u32,
             total_bytes: ok.iter().map(|f| f.1).sum(),
-            first_file_name: match ok[0].0.bundle {
-                Some(_) => super::bundle::folder_name(&ok[0].0.name),
-                None => ok[0].0.name.clone(),
-            },
+            first_file_name: ok[0].0.display_name(),
             norm_x: 0.5,
             norm_y: 0.5,
-            has_directory: ok.iter().any(|f| f.0.bundle.is_some()),
+            has_directory: ok.iter().any(|f| f.0.is_folder()),
         };
         let confirm_msg = DragControlMsg::RemoteDropConfirm {
             drag_id,
@@ -875,19 +952,11 @@ impl Node {
         info!(peer = %peer, drag_id, count = ok.len(), "drag handoff: offering files");
         // The offer only announces each file; the bytes are read when the
         // peer accepts (and again on a resume). The staged copy stays until
-        // `sweep_stale_stages` ages it out.
+        // `sweep_stale_stages` ages it out; a streamed folder has none.
         for (item, _) in ok {
-            if let Err(e) = self
-                .offer_and_send_file_as(
-                    peer,
-                    &item.path,
-                    Some(&item.name),
-                    item.bundle,
-                    item.sha256,
-                )
-                .await
-            {
-                warn!(peer = %peer, file = %item.name, error = %e, "drag handoff: send failed");
+            let name = item.display_name();
+            if let Err(e) = self.offer_prepared(peer, item).await {
+                warn!(peer = %peer, file = %name, error = %e, "drag handoff: send failed");
             }
         }
     }
@@ -903,6 +972,7 @@ mod tests {
             size,
             sha256: String::new(),
             bundle: None,
+            sha256_trailer: false,
         }
     }
 
@@ -1174,6 +1244,74 @@ mod tests {
             .collect();
         assert_eq!(sources.len(), 1, "one offer pending");
         assert_eq!(std::fs::read(&sources[0]).unwrap(), b"payload");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// v0.4.1: a folder goes to a peer with `filestream` as a streamed scan
+    /// (no staged tar on disk); a peer without it still gets the packed tar.
+    #[tokio::test]
+    async fn folder_handoff_streams_only_to_a_capable_peer() {
+        use crate::runtime::storage::OutboundSource;
+        let (node, dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("drag-handoff-stream");
+        let src = dir.join("src").join("proj");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub/a.txt"), b"hello").unwrap();
+        let mut rxs = Vec::new();
+        for (seed, caps) in [
+            (51u8, vec![tetherly_core::FILE_STREAM_CAP.to_string()]),
+            (52u8, Vec::new()),
+        ] {
+            let peer = DeviceId::from_id_pk(&[seed; 32]);
+            let (tx, rx) = tokio::sync::mpsc::channel::<tetherly_core::frame::InnerFrame>(16);
+            rxs.push(rx);
+            let live = crate::runtime::LivePeer {
+                device_id: peer.clone(),
+                name: format!("peer-{seed}"),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: [seed; 32],
+                file_port: None,
+                input_port: None,
+                screen_port: None,
+                caps,
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            };
+            node.register_session(live, tx).await;
+        }
+        let streaming = DeviceId::from_id_pk(&[51u8; 32]);
+        let legacy = DeviceId::from_id_pk(&[52u8; 32]);
+
+        let id = node.offer_and_send_folder(&streaming, &src).await.unwrap();
+        {
+            let pending = node.shared.pending_out.lock().unwrap();
+            let out = &pending[&id];
+            assert_eq!(out.name, "proj.tar");
+            match &out.source {
+                OutboundSource::Dir(scan) => {
+                    assert_eq!(out.size, scan.total);
+                    assert_eq!(id, format!("tr_{}", &scan.fingerprint[..16]));
+                }
+                _ => panic!("expected a streamed folder"),
+            }
+        }
+        let drag_root = node.send_staging_dir().join("drag");
+        let staged = std::fs::read_dir(&drag_root)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        assert_eq!(staged, 0, "a streamed folder must not be staged");
+
+        let id = node.offer_and_send_folder(&legacy, &src).await.unwrap();
+        let pending = node.shared.pending_out.lock().unwrap();
+        match &pending[&id].source {
+            OutboundSource::Path(p) => {
+                assert!(p.starts_with(drag_root.canonicalize().unwrap()), "{p:?}")
+            }
+            _ => panic!("expected a staged tar"),
+        }
+        drop(pending);
         let _ = std::fs::remove_dir_all(dir);
     }
 

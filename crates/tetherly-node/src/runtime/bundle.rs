@@ -25,23 +25,246 @@ fn is_litter(name: &str) -> bool {
     name == ".DS_Store" || name.starts_with("._") || name.eq_ignore_ascii_case("Thumbs.db")
 }
 
-/// Upper bound on the tar bytes one entry adds: a 512 B header, the data
-/// padded to a 512 B block, and, for paths the 100-byte ustar name field
-/// cannot hold, a GNU long-name record (header + padded name).
-fn entry_tar_bytes(rel: &Path, data_len: u64) -> u64 {
-    const BLOCK: u64 = 512;
-    let pad = |n: u64| n.div_ceil(BLOCK) * BLOCK;
-    let name_len = rel.as_os_str().len() as u64 + 1; // directories get a '/'
-    let long_name = if name_len > 100 {
-        BLOCK + pad(name_len + 1)
-    } else {
-        0
-    };
-    long_name + BLOCK + pad(data_len)
-}
-
 /// Bytes `tar::Builder::into_inner` appends: two zero blocks.
 const TAR_TRAILER: u64 = 1024;
+/// Tar data is padded to this block.
+const BLOCK: u64 = 512;
+
+fn pad_block(n: u64) -> u64 {
+    n.div_ceil(BLOCK) * BLOCK
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Dir,
+    File,
+}
+
+/// One entry of a scanned folder, with the metadata its tar header is
+/// built from (so the header bytes depend on the scan, not on when the
+/// entry is written).
+#[derive(Debug)]
+struct ScanEntry {
+    path: PathBuf,
+    rel: PathBuf,
+    kind: EntryKind,
+    len: u64,
+    mtime: (u64, u32),
+    mode: u32,
+}
+
+impl ScanEntry {
+    fn header(&self, size: u64) -> tar::Header {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(match self.kind {
+            EntryKind::Dir => tar::EntryType::Directory,
+            EntryKind::File => tar::EntryType::Regular,
+        });
+        h.set_size(size);
+        h.set_mode(self.mode);
+        h.set_mtime(self.mtime.0);
+        h.set_uid(0);
+        h.set_gid(0);
+        h
+    }
+}
+
+fn mtime_of(meta: &std::fs::Metadata) -> (u64, u32) {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0))
+}
+
+fn mode_of(meta: &std::fs::Metadata, kind: EntryKind) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = kind;
+        meta.permissions().mode() & 0o777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        match kind {
+            EntryKind::Dir => 0o755,
+            EntryKind::File => 0o644,
+        }
+    }
+}
+
+/// Counts what a tar builder writes.
+struct Counter(u64);
+
+impl std::io::Write for Counter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len() as u64;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A folder walked once: the entries in archive order, the exact size of
+/// the tar [`write_tar`] produces from them, and a fingerprint of the tree.
+#[derive(Debug)]
+pub(crate) struct DirScan {
+    entries: Vec<ScanEntry>,
+    /// Regular files in the bundle.
+    pub(crate) files: usize,
+    /// Exact tar size in bytes (headers, padding and trailer included).
+    pub(crate) total: u64,
+    /// SHA-256 (lower hex) over the folder name and every entry's relative
+    /// path, kind, length and mtime: equal for an unchanged folder, so a
+    /// re-offer reuses the transfer id and resumes.
+    pub(crate) fingerprint: String,
+}
+
+/// Walk `src` (sorted, litter and symlinks skipped) within the transfer cap.
+pub(crate) fn scan_dir(src: &Path) -> Result<DirScan, String> {
+    scan_dir_limited(src, tetherly_core::FILE_MAX)
+}
+
+/// [`scan_dir`] with the cap as a parameter. The cap applies to the tar
+/// itself, since that is what is offered. Header sizes come from a dry run
+/// of the same builder [`write_tar`] uses (GNU long names included), so
+/// `total` is exact rather than estimated.
+fn scan_dir_limited(src: &Path, limit: u64) -> Result<DirScan, String> {
+    let mut headers = tar::Builder::new(Counter(0));
+    let mut fp = tetherly_core::IncrementalSha256::new();
+    fp.update(b"tetherly-dir-v1\0");
+    if let Some(name) = src.file_name() {
+        fp.update(name.to_string_lossy().as_bytes());
+    }
+    let mut entries = Vec::new();
+    let mut files = 0usize;
+    let mut data = 0u64;
+    let mut stack: Vec<(PathBuf, PathBuf)> = vec![(src.to_path_buf(), PathBuf::new())];
+    while let Some((dir, rel)) = stack.pop() {
+        let mut children: Vec<_> = std::fs::read_dir(&dir)
+            .map_err(|e| format!("无法读取 {}：{e}", dir.display()))?
+            .flatten()
+            .collect();
+        children.sort_by_key(|e| e.file_name());
+        // Pushed in reverse so the walk pops them in sorted order.
+        let mut subdirs = Vec::new();
+        for child in children {
+            let name = child.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue; // not representable on the peer
+            };
+            if is_litter(name_str) {
+                continue;
+            }
+            let Ok(ft) = child.file_type() else { continue };
+            let kind = if ft.is_dir() {
+                EntryKind::Dir
+            } else if ft.is_file() {
+                EntryKind::File
+            } else {
+                continue; // symlinks and special files are skipped
+            };
+            let Ok(meta) = child.metadata() else { continue };
+            let entry = ScanEntry {
+                path: child.path(),
+                rel: rel.join(&name),
+                kind,
+                len: if kind == EntryKind::File {
+                    meta.len()
+                } else {
+                    0
+                },
+                mtime: mtime_of(&meta),
+                mode: mode_of(&meta, kind),
+            };
+            if entries.len() >= MAX_ENTRIES {
+                return Err(format!("{} 文件过多（上限 {MAX_ENTRIES}）", src.display()));
+            }
+            headers
+                .append_data(&mut entry.header(0), &entry.rel, std::io::empty())
+                .map_err(|e| format!("打包 {} 失败：{e}", entry.path.display()))?;
+            data = data.saturating_add(pad_block(entry.len));
+            let total = headers.get_ref().0 + data + TAR_TRAILER;
+            if total > limit {
+                return Err(format!("{} 超过单次传输上限", src.display()));
+            }
+            fp.update(entry.rel.to_string_lossy().as_bytes());
+            fp.update(&[0, kind as u8]);
+            fp.update(&entry.len.to_le_bytes());
+            fp.update(&entry.mtime.0.to_le_bytes());
+            fp.update(&entry.mtime.1.to_le_bytes());
+            if kind == EntryKind::Dir {
+                subdirs.push((entry.path.clone(), entry.rel.clone()));
+            } else {
+                files += 1;
+            }
+            entries.push(entry);
+        }
+        stack.extend(subdirs.into_iter().rev());
+    }
+    let total = headers.get_ref().0 + data + TAR_TRAILER;
+    Ok(DirScan {
+        entries,
+        files,
+        total,
+        fingerprint: fp.finalize_hex(),
+    })
+}
+
+/// Reads exactly `left` bytes, failing on a short source (a file truncated
+/// after the scan) instead of letting the tar writer pad a short entry.
+struct ExactReader<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for ExactReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            return Ok(0);
+        }
+        let want = (buf.len() as u64).min(self.left) as usize;
+        let n = self.inner.read(&mut buf[..want])?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file shrank while being sent",
+            ));
+        }
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
+fn changed(path: &Path) -> std::io::Error {
+    std::io::Error::other(format!("{} 在发送过程中被修改", path.display()))
+}
+
+/// Write the tar of `scan` into `out`: exactly `scan.total` bytes, or an
+/// error if a file changed since the scan (length or mtime).
+fn write_tar<W: std::io::Write>(scan: &DirScan, out: W) -> std::io::Result<W> {
+    let mut b = tar::Builder::new(out);
+    for e in &scan.entries {
+        match e.kind {
+            EntryKind::Dir => b.append_data(&mut e.header(0), &e.rel, std::io::empty())?,
+            EntryKind::File => {
+                let f = std::fs::File::open(&e.path)?;
+                let meta = f.metadata()?;
+                if meta.len() != e.len || mtime_of(&meta) != e.mtime {
+                    return Err(changed(&e.path));
+                }
+                let reader = ExactReader {
+                    inner: std::io::Read::take(f, e.len),
+                    left: e.len,
+                };
+                b.append_data(&mut e.header(e.len), &e.rel, reader)?;
+            }
+        }
+    }
+    b.into_inner()
+}
 
 /// What [`pack_dir`] produced.
 #[derive(Debug, PartialEq, Eq)]
@@ -53,7 +276,7 @@ pub(crate) struct Packed {
     pub sha256: String,
 }
 
-/// Hashes every byte on its way to the file.
+/// Hashes every byte on its way to the inner writer.
 struct HashingWriter<W> {
     inner: W,
     hasher: tetherly_core::IncrementalSha256,
@@ -71,80 +294,180 @@ impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
 }
 
 /// Pack the folder `src` into the tar file `dst` (entries rooted at the
-/// folder's contents).
+/// folder's contents). The staging path for peers without
+/// [`tetherly_core::FILE_STREAM_CAP`]; others get [`spawn_dir_stream`].
 pub(crate) fn pack_dir(src: &Path, dst: &Path) -> Result<Packed, String> {
     pack_dir_limited(src, dst, tetherly_core::FILE_MAX)
 }
 
-/// [`pack_dir`] with the size cap as a parameter: the cap applies to the
-/// tar file itself (headers and padding included), since that is what is
-/// offered, so a folder near the cap fails here rather than at the offer.
 fn pack_dir_limited(src: &Path, dst: &Path, limit: u64) -> Result<Packed, String> {
+    let scan = scan_dir_limited(src, limit)?;
     let out = std::fs::File::create(dst).map_err(|e| format!("创建打包文件失败：{e}"))?;
     // BufWriter outside the hasher: it sees large chunks, not 512 B blocks.
-    let mut builder = tar::Builder::new(std::io::BufWriter::new(HashingWriter {
+    let buffered = std::io::BufWriter::new(HashingWriter {
         inner: out,
         hasher: tetherly_core::IncrementalSha256::new(),
-    }));
-    builder.follow_symlinks(false);
-    let mut files = 0usize;
-    let mut entries = 0usize;
-    let mut total = TAR_TRAILER;
-    let mut stack: Vec<(PathBuf, PathBuf)> = vec![(src.to_path_buf(), PathBuf::new())];
-    while let Some((dir, rel)) = stack.pop() {
-        let mut children: Vec<_> = std::fs::read_dir(&dir)
-            .map_err(|e| format!("无法读取 {}：{e}", dir.display()))?
-            .flatten()
-            .collect();
-        children.sort_by_key(|e| e.file_name());
-        for child in children {
-            let name = child.file_name();
-            let Some(name_str) = name.to_str() else {
-                continue; // not representable on the peer
-            };
-            if is_litter(name_str) {
-                continue;
-            }
-            let Ok(ft) = child.file_type() else { continue };
-            let path = child.path();
-            let rel_child = rel.join(&name);
-            entries += 1;
-            if entries > MAX_ENTRIES {
-                return Err(format!("{} 文件过多（上限 {MAX_ENTRIES}）", src.display()));
-            }
-            if ft.is_dir() {
-                total = total.saturating_add(entry_tar_bytes(&rel_child, 0));
-                if total > limit {
-                    return Err(format!("{} 超过单次传输上限", src.display()));
-                }
-                builder
-                    .append_dir(&rel_child, &path)
-                    .map_err(|e| format!("打包 {} 失败：{e}", path.display()))?;
-                stack.push((path, rel_child));
-            } else if ft.is_file() {
-                let len = child.metadata().map(|m| m.len()).unwrap_or(0);
-                total = total.saturating_add(entry_tar_bytes(&rel_child, len));
-                if total > limit {
-                    return Err(format!("{} 超过单次传输上限", src.display()));
-                }
-                let mut f = std::fs::File::open(&path)
-                    .map_err(|e| format!("无法读取 {}：{e}", path.display()))?;
-                builder
-                    .append_file(&rel_child, &mut f)
-                    .map_err(|e| format!("打包 {} 失败：{e}", path.display()))?;
-                files += 1;
-            }
-            // Symlinks and special files are skipped.
-        }
-    }
-    let hashing = builder
-        .into_inner()
+    });
+    let hashing = write_tar(&scan, buffered)
         .and_then(|w| w.into_inner().map_err(|e| e.into_error()))
         .map_err(|e| format!("打包失败：{e}"))?;
     Ok(Packed {
-        files,
+        files: scan.files,
         sha256: hashing.hasher.finalize_hex(),
     })
+}
+
+/// Write side of a streamed bundle: drops the bytes before `start` (the
+/// receiver already holds them; they are still hashed upstream) and hands
+/// the rest out in channel-chunk pieces.
+struct ChunkSink {
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pos: u64,
+    start: u64,
+    total: u64,
+    buf: Vec<u8>,
+}
+
+impl ChunkSink {
+    fn send(&mut self, chunk: Vec<u8>) -> std::io::Result<()> {
+        self.tx.blocking_send(chunk).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "folder stream reader gone")
+        })
+    }
+}
+
+impl std::io::Write for ChunkSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let end = self.pos + data.len() as u64;
+        if end > self.total {
+            return Err(std::io::Error::other("folder grew past its scanned size"));
+        }
+        let skip = self.start.saturating_sub(self.pos).min(data.len() as u64) as usize;
+        self.buf.extend_from_slice(&data[skip..]);
+        self.pos = end;
+        while self.buf.len() >= STREAM_CHUNK {
+            let rest = self.buf.split_off(STREAM_CHUNK);
+            let chunk = std::mem::replace(&mut self.buf, rest);
+            self.send(chunk)?;
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            let chunk = std::mem::take(&mut self.buf);
+            self.send(chunk)?;
+        }
+        Ok(())
+    }
+}
+
+/// Channel piece size of a streamed bundle (the file channel's chunk).
+const STREAM_CHUNK: usize = tetherly_core::FILE_CHUNK;
+/// Pieces buffered between the tar writer and the socket.
+const STREAM_DEPTH: usize = 8;
+
+/// Generate the tar of `scan` into `tx` from byte `start` on; returns the
+/// SHA-256 of the whole tar (prefix included). Blocking.
+fn stream_dir(
+    scan: &DirScan,
+    start: u64,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> std::io::Result<[u8; 32]> {
+    let sink = ChunkSink {
+        tx,
+        pos: 0,
+        start,
+        total: scan.total,
+        buf: Vec::with_capacity(STREAM_CHUNK),
+    };
+    let buffered = std::io::BufWriter::with_capacity(
+        STREAM_CHUNK,
+        HashingWriter {
+            inner: sink,
+            hasher: tetherly_core::IncrementalSha256::new(),
+        },
+    );
+    let mut hashing = write_tar(scan, buffered)?
+        .into_inner()
+        .map_err(|e| e.into_error())?;
+    std::io::Write::flush(&mut hashing.inner)?;
+    if hashing.inner.pos != scan.total {
+        return Err(std::io::Error::other(format!(
+            "folder stream produced {} of {} bytes",
+            hashing.inner.pos, scan.total
+        )));
+    }
+    Ok(hashing.hasher.finalize_bytes())
+}
+
+/// Async read side of a streamed bundle. EOF early means the generator
+/// stopped; its join handle says why.
+pub(crate) struct ChunkReader {
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    cur: Vec<u8>,
+    pos: usize,
+}
+
+impl ChunkReader {
+    /// Wait for the first piece. On a resume the generator re-reads and
+    /// hashes the whole prefix before it yields anything; waiting here,
+    /// before the data channel opens, keeps that time off the channel's
+    /// per-chunk deadline.
+    pub(crate) async fn prime(&mut self) {
+        if self.pos >= self.cur.len() {
+            if let Some(c) = self.rx.recv().await {
+                self.cur = c;
+                self.pos = 0;
+            }
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for ChunkReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        while this.pos >= this.cur.len() {
+            match this.rx.poll_recv(cx) {
+                Poll::Ready(Some(c)) => {
+                    this.cur = c;
+                    this.pos = 0;
+                }
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        let n = buf.remaining().min(this.cur.len() - this.pos);
+        buf.put_slice(&this.cur[this.pos..this.pos + n]);
+        this.pos += n;
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Start generating the tar of `scan` from `start` on a blocking thread.
+/// Dropping the reader stops the generator (its next send fails with
+/// `BrokenPipe`); the handle yields the whole-tar digest.
+pub(crate) fn spawn_dir_stream(
+    scan: std::sync::Arc<DirScan>,
+    start: u64,
+) -> (
+    ChunkReader,
+    tokio::task::JoinHandle<std::io::Result<[u8; 32]>>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel(STREAM_DEPTH);
+    let handle = tokio::task::spawn_blocking(move || stream_dir(&scan, start, tx));
+    (
+        ChunkReader {
+            rx,
+            cur: Vec::new(),
+            pos: 0,
+        },
+        handle,
+    )
 }
 
 /// The folder name a bundle named `name` unpacks to.
@@ -346,31 +669,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Every byte of the tar is accounted for: the estimate pack_dir checks
-    /// against the cap equals the size of the file it writes, long names
-    /// and nested directories included.
+    /// The scan's size is exact: it equals the tar pack_dir writes, long
+    /// names (both sides of the 100-byte ustar limit) and nested
+    /// directories included.
     #[test]
-    fn size_estimate_matches_the_written_tar() {
+    fn scanned_size_matches_the_written_tar() {
         let src = temp("est-src");
         let long = "n".repeat(150);
         std::fs::create_dir_all(src.join("d").join(&long)).unwrap();
         std::fs::write(src.join("a.txt"), vec![1u8; 700]).unwrap();
         std::fs::write(src.join("d").join(&long).join("b.bin"), vec![2u8; 1]).unwrap();
         std::fs::write(src.join("empty"), b"").unwrap();
+        for n in 97..=103 {
+            std::fs::write(src.join("f".repeat(n)), b"x").unwrap();
+            std::fs::create_dir_all(src.join(format!("{}d", "g".repeat(n - 1)))).unwrap();
+        }
+        let scan = scan_dir(&src).unwrap();
         let tar = temp("est-out").join("x.tar");
         let packed = pack_dir(&src, &tar).unwrap();
         let bytes = std::fs::read(&tar).unwrap();
         let mut h = tetherly_core::IncrementalSha256::new();
         h.update(&bytes);
         assert_eq!(packed.sha256, h.finalize_hex());
-        let actual = bytes.len() as u64;
-        let expected = TAR_TRAILER
-            + entry_tar_bytes(Path::new("a.txt"), 700)
-            + entry_tar_bytes(Path::new("d"), 0)
-            + entry_tar_bytes(&Path::new("d").join(&long), 0)
-            + entry_tar_bytes(&Path::new("d").join(&long).join("b.bin"), 1)
-            + entry_tar_bytes(Path::new("empty"), 0);
-        assert_eq!(actual, expected);
+        assert_eq!(bytes.len() as u64, scan.total);
+        assert_eq!(scan.files, packed.files);
     }
 
     /// The cap is on the tar, not the payload: 1 KiB of data fits a 2 KiB
@@ -382,7 +704,8 @@ mod tests {
         let out = temp("cap-out");
         let err = pack_dir_limited(&src, &out.join("x.tar"), 2048).unwrap_err();
         assert!(err.contains("超过单次传输上限"), "{err}");
-        let limit = TAR_TRAILER + entry_tar_bytes(Path::new("a"), 1024);
+        let limit = TAR_TRAILER + BLOCK + 1024;
+        assert_eq!(scan_dir_limited(&src, limit).unwrap().total, limit);
         assert_eq!(
             pack_dir_limited(&src, &out.join("y.tar"), limit)
                 .unwrap()
@@ -390,6 +713,79 @@ mod tests {
             1
         );
         assert_eq!(std::fs::metadata(out.join("y.tar")).unwrap().len(), limit);
+    }
+
+    fn sample_folder(tag: &str) -> PathBuf {
+        let src = temp(tag).join("F");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        // Several channel pieces, not piece-aligned.
+        let big: Vec<u8> = (0..(3 * STREAM_CHUNK as u32 + 777))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        std::fs::write(src.join("big.bin"), big).unwrap();
+        std::fs::write(src.join("sub/s.txt"), b"small").unwrap();
+        src
+    }
+
+    async fn collect(mut r: ChunkReader) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).await.unwrap();
+        out
+    }
+
+    /// The streamed bytes and digest are the staged tar's, and a resume
+    /// yields exactly the suffix while still digesting the whole tar.
+    #[tokio::test]
+    async fn stream_matches_the_packed_tar_and_resumes() {
+        let src = sample_folder("stream");
+        let tar = src.parent().unwrap().join("F.tar");
+        let packed = pack_dir(&src, &tar).unwrap();
+        let staged = std::fs::read(&tar).unwrap();
+        let scan = std::sync::Arc::new(scan_dir(&src).unwrap());
+        assert_eq!(scan.total, staged.len() as u64);
+
+        let (reader, gen) = spawn_dir_stream(scan.clone(), 0);
+        assert_eq!(collect(reader).await, staged);
+        let digest = gen.await.unwrap().unwrap();
+        assert_eq!(tetherly_core::hex_lower(&digest), packed.sha256);
+
+        let start = 2 * STREAM_CHUNK as u64;
+        let (mut reader, gen) = spawn_dir_stream(scan.clone(), start);
+        reader.prime().await;
+        assert_eq!(collect(reader).await, staged[start as usize..]);
+        assert_eq!(gen.await.unwrap().unwrap(), digest);
+
+        let again = scan_dir(&src).unwrap();
+        assert_eq!(again.fingerprint, scan.fingerprint, "unchanged folder");
+        std::fs::write(src.join("sub/s.txt"), b"SMALL!").unwrap();
+        assert_ne!(scan_dir(&src).unwrap().fingerprint, scan.fingerprint);
+    }
+
+    /// A file edited after the scan fails the stream instead of sending
+    /// bytes the scanned size and headers no longer describe.
+    #[tokio::test]
+    async fn file_changed_after_scan_fails_the_stream() {
+        let src = sample_folder("changed");
+        let scan = std::sync::Arc::new(scan_dir(&src).unwrap());
+        std::fs::write(src.join("sub/s.txt"), b"longer than before").unwrap();
+        let (reader, gen) = spawn_dir_stream(scan.clone(), 0);
+        let got = collect(reader).await;
+        assert!((got.len() as u64) < scan.total);
+        let err = gen.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("被修改"), "{err}");
+    }
+
+    /// Dropping the reader (cancel, socket error) stops the generator.
+    #[tokio::test]
+    async fn dropped_reader_stops_the_generator() {
+        let src = sample_folder("drop");
+        let scan = std::sync::Arc::new(scan_dir(&src).unwrap());
+        let (mut reader, gen) = spawn_dir_stream(scan, 0);
+        reader.prime().await;
+        drop(reader);
+        let err = gen.await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
     }
 
     #[test]

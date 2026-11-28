@@ -148,6 +148,9 @@ fn inbox_file_needs_demotion(name: &str) -> bool {
 pub(super) enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
+    /// v0.4.1: a folder tar generated while it is sent (no staged copy);
+    /// the digest follows the data as a trailer.
+    Dir(std::sync::Arc<super::bundle::DirScan>),
 }
 
 pub(super) struct OutboundFile {

@@ -518,6 +518,55 @@ pub async fn recv_bytes<R: AsyncRead + Unpin>(
     Ok((out, digest))
 }
 
+/// Nonce counter of the digest trailer. Data chunks use `offset / CHUNK + 1`,
+/// which stays far below this for any size under `FILE_MAX`, so the trailer
+/// never reuses a data chunk's nonce.
+const TRAILER_COUNTER: u64 = u64::MAX;
+
+/// AAD of the digest trailer: distinct from every data chunk's
+/// `id || offset_le` (one byte longer), so neither can stand in for the other.
+fn trailer_aad(id: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(id.len() + 9);
+    aad.extend_from_slice(id.as_bytes());
+    aad.extend_from_slice(b"\xffdigest\0\0");
+    aad
+}
+
+/// v0.4.1 streamed send: after the last data chunk, the sender appends the
+/// SHA-256 of the whole stream as one sealed record. Used when the offer
+/// could not carry the digest (the payload was generated while sending).
+pub async fn send_digest_trailer<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    token: &[u8; 32],
+    transfer_id: &str,
+    digest: &[u8; 32],
+) -> Result<(), NetError> {
+    let ct = aead_seal(
+        token,
+        &counter_nonce(TRAILER_COUNTER),
+        &trailer_aad(transfer_id),
+        digest,
+    )?;
+    timed_write_len_prefixed(w, &ct, FILE_CHUNK_TIMEOUT).await
+}
+
+/// Read the record [`send_digest_trailer`] wrote after the data chunks.
+pub async fn recv_digest_trailer<R: AsyncRead + Unpin>(
+    r: &mut R,
+    token: &[u8; 32],
+    expected_id: &str,
+) -> Result<[u8; 32], NetError> {
+    let ct = timed_read_len_prefixed(r, FILE_CHUNK_TIMEOUT).await?;
+    let pt = aead_open(
+        token,
+        &counter_nonce(TRAILER_COUNTER),
+        &trailer_aad(expected_id),
+        &ct,
+    )?;
+    pt.try_into()
+        .map_err(|_| NetError::File("digest trailer length".into()))
+}
+
 fn parse_sha256_hex(hex: &str) -> Result<[u8; 32], NetError> {
     if hex.len() != 64 {
         return Err(NetError::File("sha256 length".into()));
@@ -872,5 +921,68 @@ mod tests {
         assert_eq!(recorded[0], (0, CHUNK));
         assert_eq!(recorded[1], (CHUNK as u64, CHUNK));
         assert_eq!(recorded[2], (2 * CHUNK as u64, 500));
+    }
+
+    /// v0.4.1: a streamed send ends with a sealed digest record the receiver
+    /// reads after the data; it is bound to the transfer and cannot be
+    /// replaced by a data chunk.
+    #[tokio::test]
+    async fn digest_trailer_follows_the_stream() {
+        let token = [5u8; 32];
+        let payload = vec![9u8; CHUNK + 1234];
+        let digest = parse_sha256_hex(&hex_sha256(&payload)).unwrap();
+        let (mut a, mut b) = duplex(512 * 1024);
+        let send = async {
+            let mut src = &payload[..];
+            send_stream_from(&mut src, &mut a, &token, "tr_s", payload.len() as u64, 0).await?;
+            send_digest_trailer(&mut a, &token, "tr_s", &digest).await
+        };
+        let recv = async {
+            let mut sink = Vec::new();
+            let (id, total, start) = read_header(&mut b).await?;
+            assert_eq!(
+                (id.as_str(), total, start),
+                ("tr_s", payload.len() as u64, 0)
+            );
+            let got = recv_chunks_to_sink(
+                &mut b,
+                &mut sink,
+                &token,
+                "tr_s",
+                total,
+                0,
+                u64::MAX,
+                tetherly_core::IncrementalSha256::new(),
+                |_, _| Ok(()),
+            )
+            .await?;
+            let trailer = recv_digest_trailer(&mut b, &token, "tr_s").await?;
+            Ok::<_, NetError>((sink, got, trailer))
+        };
+        let (sent, recvd) = tokio::join!(send, recv);
+        sent.unwrap();
+        let (sink, got, trailer) = recvd.unwrap();
+        assert_eq!(sink, payload);
+        assert_eq!(got, digest);
+        assert_eq!(trailer, digest);
+    }
+
+    #[tokio::test]
+    async fn digest_trailer_rejects_other_transfers_and_data_chunks() {
+        let token = [5u8; 32];
+        let digest = [7u8; 32];
+        let (mut a, mut b) = duplex(4096);
+        send_digest_trailer(&mut a, &token, "tr_a", &digest)
+            .await
+            .unwrap();
+        assert!(recv_digest_trailer(&mut b, &token, "tr_b").await.is_err());
+
+        // A data chunk at the matching position is not a trailer either.
+        let (mut a, mut b) = duplex(4096);
+        let ct = aead_seal(&token, &counter_nonce(1), &aad_for("tr_a", 0), &digest).unwrap();
+        timed_write_len_prefixed(&mut a, &ct, FILE_CHUNK_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(recv_digest_trailer(&mut b, &token, "tr_a").await.is_err());
     }
 }

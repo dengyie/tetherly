@@ -237,7 +237,7 @@ proptest! {
                     let size = cur.u64() % (4 * FILE_CHUNK as u64 + 1);
                     let offer = FileOffer {
                         transfer_id: id.clone(),
-                        files: vec![FileMeta { name, size, sha256: hex64(cur.u64()) , bundle: None, }],
+                        files: vec![FileMeta { name, size, sha256: hex64(cur.u64()) , bundle: None, sha256_trailer: false, }],
                     };
                     if let Ok(t) = hub.offer(src.clone(), offer, 1) {
                         let n = &t.files[0].name;
@@ -277,7 +277,7 @@ proptest! {
         for i in 0..count {
             let offer = FileOffer {
                 transfer_id: format!("tr_{i}"),
-                files: vec![FileMeta { name: "a.bin".into(), size: 16, sha256: hex64(i as u64) , bundle: None, }],
+                files: vec![FileMeta { name: "a.bin".into(), size: 16, sha256: hex64(i as u64) , bundle: None, sha256_trailer: false, }],
             };
             let _ = hub.offer(src.clone(), offer, 1);
         }
@@ -796,6 +796,7 @@ fn file_hub_requires_accept_before_done() {
             size: 8,
             sha256: sha.clone(),
             bundle: None,
+            sha256_trailer: false,
         }],
     };
     hub.offer(src, offer, 1).unwrap();
