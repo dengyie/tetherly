@@ -548,6 +548,13 @@
 - 交接文档：`docs/HANDOFF_NATIVE_DRAG_v0.3.md`（链路图、caps、日志签名、不变量、遗留清单、发布 SOP）。
 - [ ] 遗留：helper OLE 偶发卡死根因；大文件夹先打包后发的首帧延迟/双倍磁盘；tar 头未计入 FILE_MAX；`.<tid>.unpack` 崩溃残留清扫。
 
+## §246 v0.4.1：§6 遗留两项深度收口（2026-11-28）
+- 用户："剩下两项需要你定方向 两个都深度做下"。
+- #2 流式文件夹（75743e0）：`filestream` cap 门控；offer 预告 scan 大小 + `sha256_trailer`，接受后阻塞线程边生成 tar 边发，AEAD digest trailer；续传重生 tar 跳前缀；旧端回落 pack_dir staging。限制：流式 outbox 不可"重发"。
+- #1 helper OLE 卡死根因（f258a6c）：v0.3.2 日志证实同一 drag_id 被二次接管→双 helper 抢 OLE（后者 E_FAIL 结算整个 drag），前者因 QueryContinueDrag 只在输入时 tick 而滞留 2.7 s。修：helper session nonce（旧 helper 读 cancel、结果 404/忽略）；有待决定时 PostThreadMessageW(WM_MOUSEMOVE) 唤醒自身 OLE 线程（不注入桌面输入，按住时不唤醒）；qcd_calls/qcd_idle_ms/wakes 遥测。
+- 发布：CI 46088002786 / a11bc4a 全绿 → tag v0.4.1 → release 46089788260 全绿 14 资产，正文=docs/releases/v0.4.1.md 设 Latest → deploy all exit 0：Mac health/客户端 0.4.1；home-win 25688→15880 health 0.4.1，客户端 relaunch=ok session=1，受保护进程 3/3 不动。
+- 待观察：真机 `drag source finished` 的 `wakes`；若 `watchdog: exiting in_loop=true wakes>0` 再评估 SendInput 零位移。
+
 ## §245 大版本 v0.4.0（2026-11-28）
 - 用户："当前的项目先做一个大版本吧，部署线上更新 github 和 obsidian 文档"；版本号由用户选定 v0.4.0（不选 1.0.0，不对外承诺稳定 API）。
 - 内容：v0.3.x 原生拖拽/去重/文件夹传输的里程碑。README 中英文新增"跨屏原生拖拽"特性行，发布说明在 `docs/releases/v0.4.0.md`（同步为 GitHub Release 正文），Obsidian `tetherly 开发文档` 与 projects 路由已更新。
