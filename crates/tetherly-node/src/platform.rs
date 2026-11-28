@@ -2645,6 +2645,125 @@ pub fn is_accessibility_trusted() -> bool {
     true
 }
 
+/// The process holding macOS Secure Event Input, when it is on.
+///
+/// While any process has `EnableSecureEventInput` active (a password field,
+/// Terminal's "Secure Keyboard Entry", or an app that leaks it), WindowServer
+/// stops delivering keyboard events to every event tap — ours included —
+/// while mouse events keep flowing. The remote seat then moves the peer's
+/// cursor but every keystroke lands in the Mac's frontmost app. There is no
+/// way around it (that is the point of the feature); the caller names the
+/// holder so the user can close or defocus it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecureInputHolder {
+    /// 0 when the session dictionary does not name the owner.
+    pub pid: i32,
+    pub name: String,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    fn IsSecureEventInputEnabled() -> u8;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> *const std::ffi::c_void;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFDictionaryGetValue(
+        dict: *const std::ffi::c_void,
+        key: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_void;
+    fn CFNumberGetValue(
+        number: *const std::ffi::c_void,
+        the_type: isize,
+        value_ptr: *mut std::ffi::c_void,
+    ) -> u8;
+}
+
+#[cfg(target_os = "macos")]
+pub fn secure_input_holder() -> Option<SecureInputHolder> {
+    // Cheap HIToolbox flag first; the session dictionary only when it is set.
+    if unsafe { IsSecureEventInputEnabled() } == 0 {
+        return None;
+    }
+    let pid = secure_input_pid().unwrap_or(0);
+    let name = if pid > 0 {
+        let mut buf = [0u8; 4096];
+        let n = unsafe {
+            libc::proc_pidpath(
+                pid,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+            )
+        };
+        if n > 0 {
+            app_label_from_path(&String::from_utf8_lossy(&buf[..n as usize]))
+        } else {
+            format!("pid {pid}")
+        }
+    } else {
+        String::new()
+    };
+    Some(SecureInputHolder { pid, name })
+}
+
+/// `kCGSSessionSecureInputPID` from the current session dictionary.
+#[cfg(target_os = "macos")]
+fn secure_input_pid() -> Option<i32> {
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_CF_NUMBER_SINT32_TYPE: isize = 3;
+    unsafe {
+        let dict = CGSessionCopyCurrentDictionary();
+        if dict.is_null() {
+            return None;
+        }
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            c"kCGSSessionSecureInputPID".as_ptr(),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        let mut pid: i32 = 0;
+        let found = !key.is_null() && {
+            let v = CFDictionaryGetValue(dict, key);
+            !v.is_null()
+                && CFNumberGetValue(
+                    v,
+                    K_CF_NUMBER_SINT32_TYPE,
+                    &mut pid as *mut i32 as *mut std::ffi::c_void,
+                ) != 0
+        };
+        if !key.is_null() {
+            CFRelease(key);
+        }
+        CFRelease(dict);
+        (found && pid > 0).then_some(pid)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn secure_input_holder() -> Option<SecureInputHolder> {
+    None
+}
+
+/// A human label for an executable path: the outermost `.app` bundle name
+/// when there is one (`/Applications/ChatGPT.app/Contents/MacOS/ChatGPT` →
+/// `ChatGPT`), else the file name.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn app_label_from_path(path: &str) -> String {
+    path.split('/')
+        .find_map(|seg| seg.strip_suffix(".app").filter(|s| !s.is_empty()))
+        .or_else(|| path.rsplit('/').find(|s| !s.is_empty()))
+        .unwrap_or(path)
+        .to_string()
+}
+
 // Win32 priority-class values (winbase.h), spelled out so the pure ordering
 // helper below compiles and is tested on every platform.
 pub const WIN_IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
@@ -5183,5 +5302,33 @@ mod applescript_escape_tests {
         assert_eq!(applescript_escape("a\"b"), "a\\\"b");
         assert_eq!(applescript_escape("a\nb"), "a b");
         assert_eq!(applescript_escape("plain"), "plain");
+    }
+}
+
+#[cfg(test)]
+mod secure_input_tests {
+    use super::app_label_from_path;
+
+    #[test]
+    fn the_holder_is_named_by_its_app_bundle_else_its_file_name() {
+        assert_eq!(
+            app_label_from_path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
+            "ChatGPT"
+        );
+        // A helper nested inside another bundle reports the outer app.
+        assert_eq!(
+            app_label_from_path(
+                "/Applications/1Password.app/Contents/Library/LoginItems/Helper.app/Contents/MacOS/x"
+            ),
+            "1Password"
+        );
+        assert_eq!(app_label_from_path("/usr/bin/sudo"), "sudo");
+        assert_eq!(app_label_from_path("loginwindow"), "loginwindow");
+    }
+
+    /// Smoke: the live query never panics; on a CI runner it is off.
+    #[test]
+    fn the_live_query_is_callable() {
+        eprintln!("secure input holder: {:?}", super::secure_input_holder());
     }
 }

@@ -29,6 +29,27 @@ static INPUT_CHANNEL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 /// `ActiveInputTunnelSession::pre_arm_epoch`).
 static INPUT_PRE_ARM_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Last Secure Event Input warning: (holder pid, unix ms). One banner per
+/// holder per [`SECURE_INPUT_REWARN_MS`], so crossing back and forth while
+/// an app keeps it on does not spam Notification Center.
+static SECURE_INPUT_WARNED: std::sync::Mutex<Option<(i32, u64)>> = std::sync::Mutex::new(None);
+const SECURE_INPUT_REWARN_MS: u64 = 60_000;
+
+/// Whether a remote-seat entry under Secure Event Input held by `pid`
+/// should raise the banner, given the last warning.
+fn should_warn_secure_input(last: Option<(i32, u64)>, pid: i32, now_ms: u64) -> bool {
+    !matches!(last, Some((p, t)) if p == pid && now_ms.saturating_sub(t) < SECURE_INPUT_REWARN_MS)
+}
+
+fn secure_input_banner_body(holder_name: &str) -> String {
+    let who = if holder_name.is_empty() {
+        "某个应用".to_string()
+    } else {
+        format!("「{holder_name}」")
+    };
+    format!("{who}开启了 macOS 安全输入，键盘会继续输入到 Mac。请关闭其密码框，或退出/重启该应用。")
+}
+
 fn next_pre_arm_epoch() -> u64 {
     INPUT_PRE_ARM_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
@@ -2230,6 +2251,50 @@ impl Node {
             self.trace_input("cursor_hide", "with capture arm");
         }
         self.arm_input_capture();
+        self.warn_if_keyboard_blocked();
+    }
+
+    /// macOS Secure Event Input withholds keyboard events from every event
+    /// tap while the mouse keeps flowing: the peer's cursor moves but each
+    /// keystroke lands in the Mac's frontmost app. It cannot be bypassed, so
+    /// name the holder (log + banner) on entering the remote seat.
+    fn warn_if_keyboard_blocked(&self) {
+        // Unit tests enter the remote seat on a real Mac; never query or
+        // raise a banner there.
+        if cfg!(test) {
+            return;
+        }
+        let Some(holder) = crate::platform::secure_input_holder() else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let fire = {
+            let mut last = SECURE_INPUT_WARNED.lock().expect("secure input warned");
+            let fire = should_warn_secure_input(*last, holder.pid, now);
+            if fire {
+                *last = Some((holder.pid, now));
+            }
+            fire
+        };
+        warn!(
+            pid = holder.pid,
+            app = %holder.name,
+            banner = fire,
+            "keyboard not forwarded: macOS Secure Event Input is on"
+        );
+        self.trace_input(
+            "secure_input",
+            format!("pid={} app={}", holder.pid, holder.name),
+        );
+        if fire && self.notify_config().banners_enabled {
+            crate::platform::show_system_toast(
+                "Tetherly：键盘无法转发",
+                &secure_input_banner_body(&holder.name),
+            );
+        }
     }
 
     /// Seat returned to Local: disarm capture and put the cursor back at
@@ -5312,6 +5377,29 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use tetherly_core::InputKind;
+
+    /// Secure Event Input banner: once per holder per window — a new
+    /// holder or an expired window warns again, back-and-forth crossings
+    /// under the same holder do not.
+    #[test]
+    fn secure_input_warns_once_per_holder_per_window() {
+        assert!(should_warn_secure_input(None, 720, 1_000));
+        assert!(!should_warn_secure_input(
+            Some((720, 1_000)),
+            720,
+            1_000 + 59_999
+        ));
+        assert!(should_warn_secure_input(
+            Some((720, 1_000)),
+            720,
+            1_000 + SECURE_INPUT_REWARN_MS
+        ));
+        assert!(should_warn_secure_input(Some((720, 1_000)), 9, 2_000));
+        // A clock step backwards never re-fires inside the window.
+        assert!(!should_warn_secure_input(Some((720, 5_000)), 720, 1_000));
+        assert!(secure_input_banner_body("ChatGPT").contains("「ChatGPT」"));
+        assert!(secure_input_banner_body("").starts_with("某个应用"));
+    }
 
     /// §175 (remediation plan §5 Needs-confirmation): `ensure_input_capture`
     /// used a plain check-then-act on `input_capture_active`. Between the
